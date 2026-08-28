@@ -31,7 +31,10 @@ type SeedanceModelPrice struct {
 	Video map[string]float64 `json:"video"`
 }
 
-// SeedanceSuperResolutionPrice stores MediaKit enhance-video list prices in RMB per second.
+// SeedanceSuperResolutionPrice stores MediaKit enhance-video list prices in RMB per second of FINAL output.
+// JSON keys stay 480_to_720 / 720_to_1080 for compatibility.
+// From480To720 is the 720p-final rate (client 480p: generate 480p, enhance to 720p).
+// From720To1080 is the 1080p-final rate (client 720p: 480→1080 and client 1080p: 720→1080).
 type SeedanceSuperResolutionPrice struct {
 	From480To720  float64 `json:"480_to_720"`
 	From720To1080 float64 `json:"720_to_1080"`
@@ -63,9 +66,16 @@ var officialSeedancePrices = map[string]SeedanceModelPrice{
 	},
 }
 
-// Default MediaKit AIGC enhance-video list prices (RMB / output second).
-// 720p output is billed as 480→720; 1080p output is billed as 720→1080.
+// Default MediaKit enhance-video selling prices (RMB / final-output second).
+// 720p-final = 0.05; 1080p-final (480→1080 and 720→1080) = 0.1.
 var officialSeedanceSuperResolution = SeedanceSuperResolutionPrice{
+	From480To720:  0.05,
+	From720To1080: 0.1,
+}
+
+// legacyOfficialSeedanceSuperResolution is the previous official pair. Stored
+// configs that still equal this pair are migrated to the new defaults.
+var legacyOfficialSeedanceSuperResolution = SeedanceSuperResolutionPrice{
 	From480To720:  0.02,
 	From720To1080: 0.04,
 }
@@ -198,7 +208,7 @@ func RebuildSeedancePriceIndex() {
 	if len(prices) == 0 {
 		prices = defaultSeedancePrices
 	}
-	sr := seedancePriceSetting.SuperResolution
+	sr := migrateLegacySeedanceSuperResolution(seedancePriceSetting.SuperResolution)
 	if sr.From480To720 <= 0 && sr.From720To1080 <= 0 {
 		sr = officialSeedanceSuperResolution
 	}
@@ -219,6 +229,7 @@ func currentSeedanceRuntime() seedanceRuntime {
 	if len(runtime.Prices) == 0 {
 		runtime.Prices = defaultSeedancePrices
 	}
+	runtime.SuperResolution = migrateLegacySeedanceSuperResolution(runtime.SuperResolution)
 	if runtime.SuperResolution.From480To720 <= 0 && runtime.SuperResolution.From720To1080 <= 0 {
 		runtime.SuperResolution = officialSeedanceSuperResolution
 	}
@@ -278,7 +289,19 @@ func decodeSeedanceSuperResolutionJSON(value string) (SeedanceSuperResolutionPri
 	if price.From480To720 == 0 && price.From720To1080 == 0 {
 		return officialSeedanceSuperResolution, nil
 	}
-	return price, nil
+	return migrateLegacySeedanceSuperResolution(price), nil
+}
+
+func migrateLegacySeedanceSuperResolution(price SeedanceSuperResolutionPrice) SeedanceSuperResolutionPrice {
+	if almostEqual(price.From480To720, legacyOfficialSeedanceSuperResolution.From480To720) &&
+		almostEqual(price.From720To1080, legacyOfficialSeedanceSuperResolution.From720To1080) {
+		return officialSeedanceSuperResolution
+	}
+	return price
+}
+
+func almostEqual(a, b float64) bool {
+	return math.Abs(a-b) < 1e-9
 }
 
 func normalizeSeedancePriceMap(src map[string]float64) (map[string]float64, error) {
@@ -444,15 +467,29 @@ func siteUSDExchangeRate() float64 {
 	return rate
 }
 
-func SeedanceSourceResolution(outputResolution string) string {
-	switch normalizeSeedanceResolution(outputResolution) {
-	case "1080p":
-		return "720p"
+// SeedanceMediaKitPolicy maps a client-facing MediaKit resolution to the Ark
+// generation resolution (source) and MediaKit enhance target (final output).
+// 1080p-final has two sources, so source cannot be inferred from output alone.
+func SeedanceMediaKitPolicy(clientResolution string) (source, target string, ok bool) {
+	switch strings.ToLower(strings.TrimSpace(clientResolution)) {
+	case "480p":
+		return "480p", "720p", true
 	case "720p":
-		return "480p"
+		return "480p", "1080p", true
+	case "1080p":
+		return "720p", "1080p", true
 	default:
+		return "", "", false
+	}
+}
+
+// SeedanceSourceResolution maps a client-facing MediaKit option to Ark generation resolution.
+func SeedanceSourceResolution(clientResolution string) string {
+	source, _, ok := SeedanceMediaKitPolicy(clientResolution)
+	if !ok {
 		return ""
 	}
+	return source
 }
 
 func SeedanceSuperResolutionPriceRMB(outputResolution string) (float64, bool) {
@@ -496,16 +533,26 @@ func normalizeQuoteDuration(duration float64) float64 {
 }
 
 func BuildSeedanceSnapshot(in SeedanceQuoteInput) (types.SeedanceBillingSnapshot, bool) {
-	billingResolution := normalizeSeedanceResolution(in.BillingResolution)
-	outputResolution := strings.TrimSpace(in.OutputResolution)
-	if outputResolution == "" {
-		outputResolution = billingResolution
-	} else {
-		outputResolution = normalizeSeedanceResolution(outputResolution)
-	}
+	billingRaw := strings.TrimSpace(in.BillingResolution)
+	outputRaw := strings.TrimSpace(in.OutputResolution)
+	billingResolution := ""
+	outputResolution := ""
 	if in.SuperResolution {
-		if source := SeedanceSourceResolution(outputResolution); source != "" {
+		if billingRaw != "" && outputRaw != "" {
+			// Source and final are stored independently: 1080p-final can be 480→1080 or 720→1080.
+			billingResolution = normalizeSeedanceResolution(billingRaw)
+			outputResolution = normalizeSeedanceResolution(outputRaw)
+		} else if source, target, ok := SeedanceMediaKitPolicy(firstNonEmpty(outputRaw, billingRaw)); ok {
 			billingResolution = source
+			outputResolution = target
+		}
+	}
+	if billingResolution == "" {
+		billingResolution = normalizeSeedanceResolution(billingRaw)
+		if outputRaw == "" {
+			outputResolution = billingResolution
+		} else {
+			outputResolution = normalizeSeedanceResolution(outputRaw)
 		}
 	}
 
@@ -609,14 +656,28 @@ func BuildSeedancePublicPricing(modelNames []string, superResolution bool) (*typ
 }
 
 func seedanceOutputPerSecondRMB(prices SeedanceModelPrice, hasVideo bool, sr SeedanceSuperResolutionPrice) map[string]float64 {
-	out := make(map[string]float64, 2)
-	if unit, found := lookupSeedanceCell(prices, "480p", hasVideo); found && sr.From480To720 > 0 {
-		out["720p"] = SeedancePerSecondRMB(unit, "480p") + sr.From480To720
+	out := make(map[string]float64, 3)
+	unit480, has480 := lookupSeedanceCell(prices, "480p", hasVideo)
+	unit720, has720 := lookupSeedanceCell(prices, "720p", hasVideo)
+	if has480 && sr.From480To720 > 0 {
+		out["480p"] = SeedancePerSecondRMB(unit480, "480p") + sr.From480To720
 	}
-	if unit, found := lookupSeedanceCell(prices, "720p", hasVideo); found && sr.From720To1080 > 0 {
-		out["1080p"] = SeedancePerSecondRMB(unit, "720p") + sr.From720To1080
+	if has480 && sr.From720To1080 > 0 {
+		out["720p"] = SeedancePerSecondRMB(unit480, "480p") + sr.From720To1080
+	}
+	if has720 && sr.From720To1080 > 0 {
+		out["1080p"] = SeedancePerSecondRMB(unit720, "720p") + sr.From720To1080
 	}
 	return out
+}
+
+func firstNonEmpty(values ...string) string {
+	for _, value := range values {
+		if strings.TrimSpace(value) != "" {
+			return value
+		}
+	}
+	return ""
 }
 
 // GetVideoBillingRatio is kept for older callers. It now returns 1 when the

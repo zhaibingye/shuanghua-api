@@ -25,7 +25,7 @@ import type { PricingModel, SeedancePublicPricing } from '../types'
 import { getDisplayGroupRatio } from './model-helpers'
 
 const SEEDANCE_OUTPUT_RESOLUTIONS = ['480p', '720p', '1080p', '4k'] as const
-const SEEDANCE_SR_OUTPUT_RESOLUTIONS = ['720p', '1080p'] as const
+const SEEDANCE_SR_OUTPUT_RESOLUTIONS = ['480p', '720p', '1080p'] as const
 
 function applyRechargeRate(
   price: number,

@@ -93,23 +93,70 @@ func TestEstimateSeedanceQuoteDirectAndSuperResolution(t *testing.T) {
 	assert.Greater(t, directQuota, 0)
 
 	srQuota, srSnap, _, ok := EstimateSeedanceQuota(SeedanceQuoteInput{
-		ModelNames:       []string{"doubao-seedance-2-0-260128-se", "doubao-seedance-2-0-260128"},
-		OutputResolution: "720p",
-		DurationSeconds:  5,
-		SuperResolution:  true,
-		GroupRatio:       1,
+		ModelNames:        []string{"doubao-seedance-2-0-260128-se", "doubao-seedance-2-0-260128"},
+		BillingResolution: "480p",
+		OutputResolution:  "720p",
+		DurationSeconds:   5,
+		SuperResolution:   true,
+		GroupRatio:        1,
 	})
 	require.True(t, ok)
 	assert.True(t, srSnap.SuperResolution)
 	assert.Equal(t, "480p", srSnap.BillingResolution)
-	assert.InDelta(t, 0.02, srSnap.SuperResolutionRMB, 1e-9)
+	assert.Equal(t, "720p", srSnap.OutputResolution)
+	assert.InDelta(t, 0.05, srSnap.SuperResolutionRMB, 1e-9)
 	assert.Greater(t, srQuota, 0)
 
 	directCost := SeedanceCostRMB(directSnap, 0, 5)
 	srCost := SeedanceCostRMB(srSnap, 0, 5)
 	assert.InDelta(t, SeedancePerSecondRMB(69, "720p")*5, directCost, 1e-9)
-	assert.InDelta(t, SeedancePerSecondRMB(69, "480p")*5+0.02*5, srCost, 1e-9)
+	assert.InDelta(t, SeedancePerSecondRMB(69, "480p")*5+0.05*5, srCost, 1e-9)
 	assert.Less(t, srCost, directCost)
+}
+
+func TestSeedanceMediaKitPolicyAndIndependentSource(t *testing.T) {
+	source, target, ok := SeedanceMediaKitPolicy("480p")
+	require.True(t, ok)
+	assert.Equal(t, "480p", source)
+	assert.Equal(t, "720p", target)
+
+	source, target, ok = SeedanceMediaKitPolicy("720p")
+	require.True(t, ok)
+	assert.Equal(t, "480p", source)
+	assert.Equal(t, "1080p", target)
+
+	source, target, ok = SeedanceMediaKitPolicy("1080p")
+	require.True(t, ok)
+	assert.Equal(t, "720p", source)
+	assert.Equal(t, "1080p", target)
+
+	_, _, ok = SeedanceMediaKitPolicy("4k")
+	assert.False(t, ok)
+
+	from480, ok := BuildSeedanceSnapshot(SeedanceQuoteInput{
+		ModelNames:        []string{"doubao-seedance-2-0-260128"},
+		BillingResolution: "480p",
+		OutputResolution:  "1080p",
+		SuperResolution:   true,
+		DurationSeconds:   5,
+	})
+	require.True(t, ok)
+	assert.Equal(t, "480p", from480.BillingResolution)
+	assert.Equal(t, "1080p", from480.OutputResolution)
+	assert.InDelta(t, 0.1, from480.SuperResolutionRMB, 1e-9)
+
+	from720, ok := BuildSeedanceSnapshot(SeedanceQuoteInput{
+		ModelNames:        []string{"doubao-seedance-2-0-260128"},
+		BillingResolution: "720p",
+		OutputResolution:  "1080p",
+		SuperResolution:   true,
+		DurationSeconds:   5,
+	})
+	require.True(t, ok)
+	assert.Equal(t, "720p", from720.BillingResolution)
+	assert.Equal(t, "1080p", from720.OutputResolution)
+	assert.InDelta(t, 0.1, from720.SuperResolutionRMB, 1e-9)
+	assert.Greater(t, SeedanceCostRMB(from720, 0, 5), SeedanceCostRMB(from480, 0, 5))
 }
 
 func TestSettleSeedanceQuoteUsesActualTokensAndInferredDuration(t *testing.T) {
@@ -123,6 +170,8 @@ func TestSettleSeedanceQuoteUsesActualTokensAndInferredDuration(t *testing.T) {
 	})
 	require.True(t, ok)
 	assert.Equal(t, "720p", snap.BillingResolution)
+	assert.Equal(t, "1080p", snap.OutputResolution)
+	assert.InDelta(t, 0.1, snap.SuperResolutionRMB, 1e-9)
 
 	tokens := int(snap.TokensPerSecond * 8)
 	quota, _ := SettleSeedanceQuota(snap, tokens, 0, 1)
@@ -158,7 +207,35 @@ func TestBuildSeedancePublicPricingMarksSuperResolutionOutputs(t *testing.T) {
 	sr, ok := BuildSeedancePublicPricing([]string{"doubao-seedance-2-0-260128-se"}, true)
 	require.True(t, ok)
 	assert.True(t, sr.SuperResolution)
-	assert.InDelta(t, 0.02, sr.SRFrom480To720RMB, 1e-9)
-	assert.InDelta(t, SeedancePerSecondRMB(69, "480p")+0.02, sr.OutputTextPerSecondRMB["720p"], 1e-9)
-	assert.InDelta(t, SeedancePerSecondRMB(69, "720p")+0.04, sr.OutputTextPerSecondRMB["1080p"], 1e-9)
+	assert.InDelta(t, 0.05, sr.SRFrom480To720RMB, 1e-9)
+	assert.InDelta(t, 0.1, sr.SRFrom720To1080RMB, 1e-9)
+	assert.InDelta(t, SeedancePerSecondRMB(69, "480p")+0.05, sr.OutputTextPerSecondRMB["480p"], 1e-9)
+	assert.InDelta(t, SeedancePerSecondRMB(69, "480p")+0.1, sr.OutputTextPerSecondRMB["720p"], 1e-9)
+	assert.InDelta(t, SeedancePerSecondRMB(69, "720p")+0.1, sr.OutputTextPerSecondRMB["1080p"], 1e-9)
+}
+
+func TestLoadSeedanceSuperResolutionMigratesLegacyOfficialPair(t *testing.T) {
+	original := seedancePriceSetting.SuperResolution
+	t.Cleanup(func() {
+		seedancePriceSetting.SuperResolution = original
+		RebuildSeedancePriceIndex()
+	})
+
+	LoadSeedanceSuperResolutionFromJSONString(`{"480_to_720":0.02,"720_to_1080":0.04}`)
+	sr := CurrentSeedanceSuperResolution()
+	assert.InDelta(t, 0.05, sr.From480To720, 1e-9)
+	assert.InDelta(t, 0.1, sr.From720To1080, 1e-9)
+}
+
+func TestLoadSeedanceSuperResolutionKeepsCustomPrices(t *testing.T) {
+	original := seedancePriceSetting.SuperResolution
+	t.Cleanup(func() {
+		seedancePriceSetting.SuperResolution = original
+		RebuildSeedancePriceIndex()
+	})
+
+	LoadSeedanceSuperResolutionFromJSONString(`{"480_to_720":0.03,"720_to_1080":0.08}`)
+	sr := CurrentSeedanceSuperResolution()
+	assert.InDelta(t, 0.03, sr.From480To720, 1e-9)
+	assert.InDelta(t, 0.08, sr.From720To1080, 1e-9)
 }

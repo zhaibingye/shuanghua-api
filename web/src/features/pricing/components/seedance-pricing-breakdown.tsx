@@ -116,7 +116,7 @@ export function SeedancePricingBreakdown({
         {seedance.super_resolution ? (
           <p>
             {t(
-              'MediaKit billing = source-resolution token cost + super-resolution per-second price × duration. 720p uses 480p generation; 1080p uses 720p generation.'
+              'MediaKit billing = source-resolution token cost + super-resolution per-second price × duration. 480p generates at 480p then enhances to 720p; 720p generates at 480p then enhances to 1080p; 1080p generates at 720p then enhances to 1080p.'
             )}
           </p>
         ) : (

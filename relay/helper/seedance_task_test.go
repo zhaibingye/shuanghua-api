@@ -81,8 +81,75 @@ func TestApplySeedanceTaskPriceMediaKitUsesSourceResolution(t *testing.T) {
 	assert.True(t, info.SeedanceBilling.SuperResolution)
 	assert.Equal(t, "720p", info.SeedanceBilling.BillingResolution)
 	assert.Equal(t, "1080p", info.SeedanceBilling.OutputResolution)
-	assert.InDelta(t, 0.04, info.SeedanceBilling.SuperResolutionRMB, 1e-9)
+	assert.InDelta(t, 0.1, info.SeedanceBilling.SuperResolutionRMB, 1e-9)
 	assert.Greater(t, info.PriceData.Quota, 0)
+}
+
+func TestApplySeedanceTaskPriceMediaKit480pUses720pFinal(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	ctx, _ := gin.CreateTestContext(httptest.NewRecorder())
+	relaycommon.SetTaskRequest(ctx, relaycommon.TaskSubmitReq{
+		Model:    "doubao-seedance-2-0-260128-se",
+		Duration: 5,
+		Metadata: map[string]any{
+			"resolution": "480p",
+			"content": []any{
+				map[string]any{"type": "text", "text": "a sunrise"},
+			},
+		},
+	})
+	info := &relaycommon.RelayInfo{
+		OriginModelName:       "doubao-seedance-2-0-260128-se",
+		VideoOutputResolution: "720p",
+		UserGroup:             "default",
+		UsingGroup:            "default",
+		ChannelMeta: &relaycommon.ChannelMeta{
+			ChannelType:       constant.ChannelTypeDoubaoVideoMediaKit,
+			UpstreamModelName: "doubao-seedance-2-0-260128",
+		},
+	}
+
+	applied, err := ApplySeedanceTaskPrice(ctx, info)
+	require.NoError(t, err)
+	require.True(t, applied)
+	require.NotNil(t, info.SeedanceBilling)
+	assert.True(t, info.SeedanceBilling.SuperResolution)
+	assert.Equal(t, "480p", info.SeedanceBilling.BillingResolution)
+	assert.Equal(t, "720p", info.SeedanceBilling.OutputResolution)
+	assert.InDelta(t, 0.05, info.SeedanceBilling.SuperResolutionRMB, 1e-9)
+}
+
+func TestApplySeedanceTaskPriceMediaKit720pUses1080pFrom480(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	ctx, _ := gin.CreateTestContext(httptest.NewRecorder())
+	relaycommon.SetTaskRequest(ctx, relaycommon.TaskSubmitReq{
+		Model:    "doubao-seedance-2-0-260128-se",
+		Duration: 5,
+		Metadata: map[string]any{
+			"resolution": "480p",
+			"content": []any{
+				map[string]any{"type": "text", "text": "a sunrise"},
+			},
+		},
+	})
+	info := &relaycommon.RelayInfo{
+		OriginModelName:       "doubao-seedance-2-0-260128-se",
+		VideoOutputResolution: "1080p",
+		UserGroup:             "default",
+		UsingGroup:            "default",
+		ChannelMeta: &relaycommon.ChannelMeta{
+			ChannelType:       constant.ChannelTypeDoubaoVideoMediaKit,
+			UpstreamModelName: "doubao-seedance-2-0-260128",
+		},
+	}
+
+	applied, err := ApplySeedanceTaskPrice(ctx, info)
+	require.NoError(t, err)
+	require.True(t, applied)
+	require.NotNil(t, info.SeedanceBilling)
+	assert.Equal(t, "480p", info.SeedanceBilling.BillingResolution)
+	assert.Equal(t, "1080p", info.SeedanceBilling.OutputResolution)
+	assert.InDelta(t, 0.1, info.SeedanceBilling.SuperResolutionRMB, 1e-9)
 }
 
 func TestApplySeedanceTaskPriceSkipsUnknownModels(t *testing.T) {

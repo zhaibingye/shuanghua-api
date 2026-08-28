@@ -52,7 +52,18 @@ describe('seedance price table', () => {
         DEFAULT_SEEDANCE_PRICES
       )
     ).toBe(true)
-    expect(parseSeedanceSuperResolution('{}')['480_to_720']).toBe(0.02)
+    expect(parseSeedanceSuperResolution('{}')['480_to_720']).toBe(0.05)
+    expect(parseSeedanceSuperResolution('{}')['720_to_1080']).toBe(0.1)
+    expect(
+      parseSeedanceSuperResolution('{"480_to_720":0.02,"720_to_1080":0.04}')[
+        '480_to_720'
+      ]
+    ).toBe(0.05)
+    expect(
+      parseSeedanceSuperResolution('{"480_to_720":0.03,"720_to_1080":0.08}')[
+        '720_to_1080'
+      ]
+    ).toBe(0.08)
   })
 
   test('keeps a custom alias row', () => {

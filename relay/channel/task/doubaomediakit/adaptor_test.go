@@ -71,9 +71,11 @@ func TestResolutionPolicyRewritesOnlyUpstreamResolution(t *testing.T) {
 	tests := []struct {
 		requested string
 		generated string
+		enhanced  string
 	}{
-		{requested: resolution720P, generated: resolution480P},
-		{requested: resolution1080P, generated: resolution720P},
+		{requested: resolution480P, generated: resolution480P, enhanced: resolution720P},
+		{requested: resolution720P, generated: resolution480P, enhanced: resolution1080P},
+		{requested: resolution1080P, generated: resolution720P, enhanced: resolution1080P},
 	}
 
 	for _, test := range tests {
@@ -94,7 +96,8 @@ func TestResolutionPolicyRewritesOnlyUpstreamResolution(t *testing.T) {
 			var payload map[string]any
 			require.NoError(t, common.Unmarshal(body, &payload))
 			assert.Equal(t, test.generated, payload["resolution"])
-			assert.Equal(t, test.requested, adaptor.targetResolution)
+			assert.Equal(t, test.enhanced, adaptor.targetResolution)
+			assert.Equal(t, test.enhanced, info.VideoOutputResolution)
 		})
 	}
 }
@@ -104,7 +107,7 @@ func TestResolutionPolicyRejectsUnsupportedResolution(t *testing.T) {
 	context, info := newMediaKitTestContext(`{
 		"model":"doubao-seedance-2-0-260128",
 		"content":[{"type":"text","text":"a cinematic sunrise"}],
-		"resolution":"480p"
+		"resolution":"4k"
 	}`)
 	adaptor := &TaskAdaptor{}
 	adaptor.Init(info)

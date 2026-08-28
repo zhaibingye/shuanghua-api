@@ -63,6 +63,11 @@ export const DEFAULT_SEEDANCE_PRICES: SeedancePriceTable = {
 }
 
 export const DEFAULT_SEEDANCE_SUPER_RESOLUTION: SeedanceSuperResolutionPrice = {
+  '480_to_720': 0.05,
+  '720_to_1080': 0.1,
+}
+
+const LEGACY_OFFICIAL_SEEDANCE_SUPER_RESOLUTION: SeedanceSuperResolutionPrice = {
   '480_to_720': 0.02,
   '720_to_1080': 0.04,
 }
@@ -105,7 +110,7 @@ export function parseSeedanceSuperResolution(
     const record = parsed as Record<string, unknown>
     const from480 = Number(record['480_to_720'])
     const from720 = Number(record['720_to_1080'])
-    return {
+    const parsedPrice: SeedanceSuperResolutionPrice = {
       '480_to_720':
         Number.isFinite(from480) && from480 >= 0
           ? from480
@@ -115,6 +120,7 @@ export function parseSeedanceSuperResolution(
           ? from720
           : DEFAULT_SEEDANCE_SUPER_RESOLUTION['720_to_1080'],
     }
+    return migrateLegacySeedanceSuperResolution(parsedPrice)
   } catch {
     return { ...DEFAULT_SEEDANCE_SUPER_RESOLUTION }
   }
@@ -147,6 +153,18 @@ function valuesFromPriceMap(
     }
   }
   return values
+}
+
+function migrateLegacySeedanceSuperResolution(
+  price: SeedanceSuperResolutionPrice
+): SeedanceSuperResolutionPrice {
+  if (
+    price['480_to_720'] === LEGACY_OFFICIAL_SEEDANCE_SUPER_RESOLUTION['480_to_720'] &&
+    price['720_to_1080'] === LEGACY_OFFICIAL_SEEDANCE_SUPER_RESOLUTION['720_to_1080']
+  ) {
+    return { ...DEFAULT_SEEDANCE_SUPER_RESOLUTION }
+  }
+  return price
 }
 
 export function parseSeedancePriceCell(value: string): number | null {

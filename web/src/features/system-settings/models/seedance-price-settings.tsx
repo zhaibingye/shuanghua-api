@@ -232,7 +232,7 @@ export const SeedancePriceSettings = memo(function SeedancePriceSettings({
         <p className='text-sm font-medium'>{t('Super-resolution prices')}</p>
         <p className='text-muted-foreground text-xs'>
           {t(
-            'Used only by DoubaoVideoMediaKit channels. 720p output bills 480p tokens plus 480→720; 1080p output bills 720p tokens plus 720→1080.'
+            'Used only by DoubaoVideoMediaKit channels. Super-resolution is billed by final output: any 720p-final uses the 720p rate; any 1080p-final (480→1080 and 720→1080) uses the 1080p rate.'
           )}
         </p>
         <div className='grid gap-3 sm:grid-cols-2'>
@@ -248,10 +248,10 @@ export const SeedancePriceSettings = memo(function SeedancePriceSettings({
                   '480_to_720': Number(event.target.value),
                 }))
               }
-              aria-label={t('480p to 720p per second')}
+              aria-label={t('720p final output per second')}
             />
             <p className='text-muted-foreground text-xs'>
-              {t('480p to 720p per second')} (RMB)
+              {t('720p final output per second')} (RMB)
             </p>
           </Field>
           <Field data-invalid={superResolutionInvalid}>
@@ -266,10 +266,10 @@ export const SeedancePriceSettings = memo(function SeedancePriceSettings({
                   '720_to_1080': Number(event.target.value),
                 }))
               }
-              aria-label={t('720p to 1080p per second')}
+              aria-label={t('1080p final output per second')}
             />
             <p className='text-muted-foreground text-xs'>
-              {t('720p to 1080p per second')} (RMB)
+              {t('1080p final output per second')} (RMB)
             </p>
           </Field>
         </div>
@@ -455,12 +455,20 @@ function SeedancePriceCard({
         ))}
       </div>
       <p className='text-muted-foreground text-xs'>
-        {t('MediaKit 720p')}:{' '}
+        {t('MediaKit 480p')}:{' '}
         {formatRmbPerSecond(
           seedancePerSecondRMB(
             parseSeedancePriceCell(row.text['480p']) ?? 0,
             '480p'
           ) + superResolution['480_to_720']
+        ) || '—'}
+        {' · '}
+        {t('MediaKit 720p')}:{' '}
+        {formatRmbPerSecond(
+          seedancePerSecondRMB(
+            parseSeedancePriceCell(row.text['480p']) ?? 0,
+            '480p'
+          ) + superResolution['720_to_1080']
         ) || '—'}
         {' · '}
         {t('MediaKit 1080p')}:{' '}

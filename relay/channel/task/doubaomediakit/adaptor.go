@@ -17,6 +17,7 @@ import (
 	relaycommon "github.com/QuantumNous/new-api/relay/common"
 	"github.com/QuantumNous/new-api/relaykit/dto"
 	"github.com/QuantumNous/new-api/service"
+	"github.com/QuantumNous/new-api/setting/ratio_setting"
 
 	"github.com/gin-gonic/gin"
 )
@@ -111,24 +112,18 @@ func (a *TaskAdaptor) ValidateRequestAndSetAction(c *gin.Context, info *relaycom
 		return service.TaskErrorWrapperLocal(err, "invalid_request", http.StatusBadRequest)
 	}
 	resolution, _ := req.Metadata["resolution"].(string)
-	resolution = strings.ToLower(strings.TrimSpace(resolution))
-	sourceResolution := ""
-	switch resolution {
-	case resolution720P:
-		sourceResolution = resolution480P
-	case resolution1080P:
-		sourceResolution = resolution720P
-	default:
+	sourceResolution, targetResolution, ok := ratio_setting.SeedanceMediaKitPolicy(resolution)
+	if !ok {
 		return service.TaskErrorWrapperLocal(
-			fmt.Errorf("resolution must be either 720p or 1080p"),
+			fmt.Errorf("resolution must be 480p, 720p, or 1080p"),
 			"invalid_resolution",
 			http.StatusBadRequest,
 		)
 	}
 
-	a.targetResolution = resolution
+	a.targetResolution = targetResolution
 	if info != nil {
-		info.VideoOutputResolution = resolution
+		info.VideoOutputResolution = targetResolution
 	}
 	req.Metadata["resolution"] = sourceResolution
 	relaycommon.SetTaskRequest(c, req)

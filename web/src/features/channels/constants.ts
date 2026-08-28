@@ -433,7 +433,7 @@ export const TYPE_TO_KEY_PROMPT: Record<number, string> = {
 }
 
 export const CHANNEL_TYPE_WARNINGS: Record<number, string> = {
-  61: 'This channel generates at a lower resolution and upscales with MediaKit. Only 720p and 1080p are supported.',
+  61: 'This channel generates at a lower resolution and upscales with MediaKit. 480p, 720p, and 1080p are supported.',
   3: 'For channels added after May 10, 2025, no need to remove "." from model names during deployment',
   8: 'If connecting to upstream One API or New API relay projects, use OpenAI type instead unless you know what you are doing',
   37: 'Dify channels only support chatflow and agent, and agent does not support images',
