@@ -414,3 +414,138 @@ func TestValidateModerationDecisionRejectsUnsafeConfidenceValues(t *testing.T) {
 	}
 	assert.Error(t, validateModerationDecision(decision))
 }
+
+func TestValidateContentModerationURL(t *testing.T) {
+	tests := []struct {
+		name    string
+		rawURL  string
+		wantErr bool
+	}{
+		{
+			name:    "empty URL",
+			rawURL:  "",
+			wantErr: false,
+		},
+		{
+			name:    "whitespace URL",
+			rawURL:  "   ",
+			wantErr: false,
+		},
+		{
+			name:    "http URL with IP and custom port",
+			rawURL:  "http://66.154.103.123:8317/v1/responses",
+			wantErr: false,
+		},
+		{
+			name:    "https URL",
+			rawURL:  "https://api.openai.com/v1/responses",
+			wantErr: false,
+		},
+		{
+			name:    "http localhost with port",
+			rawURL:  "http://127.0.0.1:8000/v1/responses",
+			wantErr: false,
+		},
+		{
+			name:    "unsupported scheme",
+			rawURL:  "ftp://66.154.103.123:8317/v1/responses",
+			wantErr: true,
+		},
+		{
+			name:    "URL with credentials",
+			rawURL:  "http://user:pass@66.154.103.123:8317/v1/responses",
+			wantErr: true,
+		},
+		{
+			name:    "URL with fragment",
+			rawURL:  "http://66.154.103.123:8317/v1/responses#fragment",
+			wantErr: true,
+		},
+		{
+			name:    "URL with apikey query parameter",
+			rawURL:  "http://66.154.103.123:8317/v1/responses?apikey=secret",
+			wantErr: true,
+		},
+		{
+			name:    "URL with token query parameter",
+			rawURL:  "http://66.154.103.123:8317/v1/responses?token=secret",
+			wantErr: true,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			err := ValidateContentModerationURL(tt.rawURL)
+			if tt.wantErr {
+				assert.Error(t, err)
+			} else {
+				assert.NoError(t, err)
+			}
+		})
+	}
+}
+
+func TestReviewModerationTurnUsesCustomPolicyPrompt(t *testing.T) {
+	var capturedInstructions string
+	server := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
+		body, err := io.ReadAll(request.Body)
+		require.NoError(t, err)
+		var payload map[string]any
+		require.NoError(t, common.Unmarshal(body, &payload))
+		if inst, ok := payload["instructions"].(string); ok {
+			capturedInstructions = inst
+		} else if sysInst, ok := payload["systemInstruction"].(map[string]any); ok {
+			if parts, ok := sysInst["parts"].([]any); ok && len(parts) > 0 {
+				if partMap, ok := parts[0].(map[string]any); ok {
+					capturedInstructions, _ = partMap["text"].(string)
+				}
+			}
+		}
+		writer.Header().Set("Content-Type", "application/json")
+		decisionJSON := `{"decision":"allow","actor":"none","severity":"none","categories":[],"confidence":0,"reason_code":"safe"}`
+		response := map[string]any{"output_text": decisionJSON}
+		responseBody, err := common.Marshal(response)
+		require.NoError(t, err)
+		_, err = writer.Write(responseBody)
+		require.NoError(t, err)
+	}))
+	defer server.Close()
+
+	originalHTTPClient := httpClient
+	t.Cleanup(func() {
+		httpClient = originalHTTPClient
+	})
+	httpClient = server.Client()
+
+	turn := &model.ModerationTurn{
+		SystemPrompt:   model.ModerationText("system"),
+		UserPrompt:     model.ModerationText("user"),
+		AssistantReply: model.ModerationText("assistant"),
+		ResponseStatus: "success",
+	}
+
+	// 1. Custom policy prompt
+	customPrompt := "Custom moderation classifier instructions."
+	_, _, err := reviewModerationTurn(context.Background(), turn, setting.ContentModerationSetting{
+		Provider:       "responses",
+		BaseURL:        server.URL,
+		APIKey:         "responses-key",
+		Model:          "moderation-model",
+		PolicyPrompt:   customPrompt,
+		TimeoutSeconds: 2,
+	})
+	require.NoError(t, err)
+	assert.Equal(t, customPrompt, capturedInstructions)
+
+	// 2. Empty policy prompt falls back to DefaultContentModerationPolicyPrompt
+	_, _, err = reviewModerationTurn(context.Background(), turn, setting.ContentModerationSetting{
+		Provider:       "responses",
+		BaseURL:        server.URL,
+		APIKey:         "responses-key",
+		Model:          "moderation-model",
+		PolicyPrompt:   "",
+		TimeoutSeconds: 2,
+	})
+	require.NoError(t, err)
+	assert.Equal(t, setting.DefaultContentModerationPolicyPrompt, capturedInstructions)
+}

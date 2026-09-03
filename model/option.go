@@ -1,6 +1,7 @@
 package model
 
 import (
+	"errors"
 	"strconv"
 	"strings"
 	"time"
@@ -187,6 +188,7 @@ func InitOptionMap() {
 	common.OptionMap[setting.ContentModerationNormalSampleRateOption] = strconv.Itoa(setting.DefaultContentModerationNormalSampleRate)
 	common.OptionMap[setting.ContentModerationElevatedSampleRateOption] = strconv.Itoa(setting.DefaultContentModerationElevatedSampleRate)
 	common.OptionMap[setting.ContentModerationPromptVersionOption] = setting.DefaultContentModerationPromptVersion
+	common.OptionMap[setting.ContentModerationPolicyPromptOption] = setting.DefaultContentModerationPolicyPrompt
 
 	// 自动添加所有注册的模型配置
 	modelConfigs := config.GlobalConfig.ExportAllConfigs()
@@ -240,6 +242,11 @@ func validateOptionValue(key string, value string) error {
 	}
 	if key == "MaxTokenAutoGroups" {
 		return setting.ValidateMaxTokenAutoGroups(value)
+	}
+	if key == setting.ContentModerationPolicyPromptOption {
+		if len(value) > 16384 {
+			return errors.New("policy prompt is too long")
+		}
 	}
 	return nil
 }

@@ -17,16 +17,18 @@ import (
 )
 
 type contentModerationSettingsResponse struct {
-	Enabled            bool   `json:"enabled"`
-	Provider           string `json:"provider"`
-	BaseURL            string `json:"base_url"`
-	Model              string `json:"model"`
-	TimeoutSeconds     int    `json:"timeout_seconds"`
-	MaxRetries         int    `json:"max_retries"`
-	NormalSampleRate   int    `json:"normal_sample_rate"`
-	ElevatedSampleRate int    `json:"elevated_sample_rate"`
-	PromptVersion      string `json:"prompt_version"`
-	APIKeyConfigured   bool   `json:"api_key_configured"`
+	Enabled             bool   `json:"enabled"`
+	Provider            string `json:"provider"`
+	BaseURL             string `json:"base_url"`
+	Model               string `json:"model"`
+	TimeoutSeconds      int    `json:"timeout_seconds"`
+	MaxRetries          int    `json:"max_retries"`
+	NormalSampleRate    int    `json:"normal_sample_rate"`
+	ElevatedSampleRate  int    `json:"elevated_sample_rate"`
+	PromptVersion       string `json:"prompt_version"`
+	PolicyPrompt        string `json:"policy_prompt"`
+	DefaultPolicyPrompt string `json:"default_policy_prompt"`
+	APIKeyConfigured    bool   `json:"api_key_configured"`
 }
 
 type contentModerationSettingsRequest struct {
@@ -40,6 +42,7 @@ type contentModerationSettingsRequest struct {
 	NormalSampleRate   int    `json:"normal_sample_rate"`
 	ElevatedSampleRate int    `json:"elevated_sample_rate"`
 	PromptVersion      string `json:"prompt_version"`
+	PolicyPrompt       string `json:"policy_prompt"`
 }
 
 func GetContentModerationSettings(c *gin.Context) {
@@ -48,16 +51,18 @@ func GetContentModerationSettings(c *gin.Context) {
 	c.JSON(http.StatusOK, gin.H{
 		"success": true,
 		"data": contentModerationSettingsResponse{
-			Enabled:            config.Enabled,
-			Provider:           config.Provider,
-			BaseURL:            config.BaseURL,
-			Model:              config.Model,
-			TimeoutSeconds:     config.TimeoutSeconds,
-			MaxRetries:         config.MaxRetries,
-			NormalSampleRate:   config.NormalSampleRate,
-			ElevatedSampleRate: config.ElevatedSampleRate,
-			PromptVersion:      config.PromptVersion,
-			APIKeyConfigured:   strings.TrimSpace(config.APIKey) != "",
+			Enabled:             config.Enabled,
+			Provider:            config.Provider,
+			BaseURL:             config.BaseURL,
+			Model:               config.Model,
+			TimeoutSeconds:      config.TimeoutSeconds,
+			MaxRetries:          config.MaxRetries,
+			NormalSampleRate:    config.NormalSampleRate,
+			ElevatedSampleRate:  config.ElevatedSampleRate,
+			PromptVersion:       config.PromptVersion,
+			PolicyPrompt:        config.PolicyPrompt,
+			DefaultPolicyPrompt: setting.DefaultContentModerationPolicyPrompt,
+			APIKeyConfigured:    strings.TrimSpace(config.APIKey) != "",
 		},
 	})
 }
@@ -77,12 +82,20 @@ func UpdateContentModerationSettings(c *gin.Context) {
 	apiKey := strings.TrimSpace(request.APIKey)
 	baseURL := strings.TrimSpace(request.BaseURL)
 	promptVersion := strings.TrimSpace(request.PromptVersion)
-	if len(modelName) > 128 || len(apiKey) > 4096 || len(baseURL) > 2048 || len(promptVersion) > 32 {
+	policyPrompt := strings.TrimSpace(request.PolicyPrompt)
+	if policyPrompt == "" {
+		policyPrompt = setting.DefaultContentModerationPolicyPrompt
+	}
+	if len(modelName) > 128 || len(apiKey) > 4096 || len(baseURL) > 2048 || len(promptVersion) > 32 || len(policyPrompt) > 16384 {
 		c.JSON(http.StatusBadRequest, gin.H{"success": false, "message": "content moderation setting is too long"})
 		return
 	}
 	if strings.IndexFunc(apiKey, func(r rune) bool { return r < 0x20 || r == 0x7f }) >= 0 {
 		c.JSON(http.StatusBadRequest, gin.H{"success": false, "message": "content moderation API key contains invalid control characters"})
+		return
+	}
+	if strings.IndexFunc(policyPrompt, func(r rune) bool { return (r < 0x20 && r != '\n' && r != '\r' && r != '\t') || r == 0x7f }) >= 0 {
+		c.JSON(http.StatusBadRequest, gin.H{"success": false, "message": "content moderation policy prompt contains invalid control characters"})
 		return
 	}
 	if baseURL != "" {
@@ -120,6 +133,7 @@ func UpdateContentModerationSettings(c *gin.Context) {
 		setting.ContentModerationNormalSampleRateOption:   strconv.Itoa(request.NormalSampleRate),
 		setting.ContentModerationElevatedSampleRateOption: strconv.Itoa(request.ElevatedSampleRate),
 		setting.ContentModerationPromptVersionOption:      promptVersion,
+		setting.ContentModerationPolicyPromptOption:       policyPrompt,
 	}
 	effectiveAPIKey := apiKey
 	if effectiveAPIKey == "" {
@@ -148,8 +162,9 @@ func UpdateContentModerationSettings(c *gin.Context) {
 
 func ListContentModerationConversations(c *gin.Context) {
 	recordManageAudit(c, "moderation.conversations_list", map[string]interface{}{
-		"user_id": c.Query("user_id"),
-		"status":  c.Query("status"),
+		"user_id":         c.Query("user_id"),
+		"status":          c.Query("status"),
+		"conversation_id": c.Query("conversation_id"),
 	})
 	limit := parseModerationLimit(c.Query("limit"))
 	offset := parseModerationOffset(c.Query("offset"))
@@ -157,8 +172,17 @@ func ListContentModerationConversations(c *gin.Context) {
 	if userID := parsePositiveInt(c.Query("user_id")); userID > 0 {
 		query = query.Where("user_id = ?", userID)
 	}
-	if status := strings.TrimSpace(c.Query("status")); status != "" {
+	if status := strings.TrimSpace(c.Query("status")); status != "" && status != "all" {
 		query = query.Where("status = ?", status)
+	}
+	if conversationID := strings.TrimSpace(c.Query("conversation_id")); conversationID != "" {
+		query = query.Where("conversation_id LIKE ?", "%"+conversationID+"%")
+	}
+	if start := parsePositiveInt64(c.Query("start_timestamp")); start > 0 {
+		query = query.Where("last_activity_at >= ?", start)
+	}
+	if end := parsePositiveInt64(c.Query("end_timestamp")); end > 0 {
+		query = query.Where("last_activity_at <= ?", end)
 	}
 	var total int64
 	if err := query.Count(&total).Error; err != nil {
@@ -333,8 +357,9 @@ func RestoreContentModerationUser(c *gin.Context) {
 
 func ListContentModerationViolations(c *gin.Context) {
 	recordManageAudit(c, "moderation.violations_list", map[string]interface{}{
-		"user_id": c.Query("user_id"),
-		"status":  c.Query("status"),
+		"user_id":         c.Query("user_id"),
+		"status":          c.Query("status"),
+		"conversation_id": c.Query("conversation_id"),
 	})
 	limit := parseModerationLimit(c.Query("limit"))
 	offset := parseModerationOffset(c.Query("offset"))
@@ -342,8 +367,17 @@ func ListContentModerationViolations(c *gin.Context) {
 	if userID := parsePositiveInt(c.Query("user_id")); userID > 0 {
 		query = query.Where("user_id = ?", userID)
 	}
-	if status := strings.TrimSpace(c.Query("status")); status != "" {
+	if status := strings.TrimSpace(c.Query("status")); status != "" && status != "all" {
 		query = query.Where("status = ?", status)
+	}
+	if conversationID := strings.TrimSpace(c.Query("conversation_id")); conversationID != "" {
+		query = query.Where("conversation_id LIKE ?", "%"+conversationID+"%")
+	}
+	if start := parsePositiveInt64(c.Query("start_timestamp")); start > 0 {
+		query = query.Where("created_at >= ?", start)
+	}
+	if end := parsePositiveInt64(c.Query("end_timestamp")); end > 0 {
+		query = query.Where("created_at <= ?", end)
 	}
 	var total int64
 	if err := query.Count(&total).Error; err != nil {
@@ -378,7 +412,15 @@ func parseModerationOffset(value string) int {
 }
 
 func parsePositiveInt(value string) int {
-	parsed, _ := strconv.Atoi(value)
+	parsed, _ := strconv.Atoi(strings.TrimSpace(value))
+	if parsed < 1 {
+		return 0
+	}
+	return parsed
+}
+
+func parsePositiveInt64(value string) int64 {
+	parsed, _ := strconv.ParseInt(strings.TrimSpace(value), 10, 64)
 	if parsed < 1 {
 		return 0
 	}

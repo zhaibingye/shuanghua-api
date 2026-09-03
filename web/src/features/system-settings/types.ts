@@ -39,6 +39,8 @@ export type ContentModerationSettings = {
   normal_sample_rate: number
   elevated_sample_rate: number
   prompt_version: string
+  policy_prompt: string
+  default_policy_prompt?: string
   api_key_configured: boolean
 }
 
@@ -49,7 +51,7 @@ export type ContentModerationSettingsResponse = {
 
 export type ContentModerationSettingsUpdate = Omit<
   ContentModerationSettings,
-  'api_key_configured'
+  'api_key_configured' | 'default_policy_prompt'
 > & {
   api_key: string
 }
