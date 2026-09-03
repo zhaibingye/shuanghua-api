@@ -48,7 +48,8 @@ func ClaudeHelper(c *gin.Context, info *relaycommon.RelayInfo) (newAPIError *typ
 	}
 	adaptor.Init(info)
 
-	if info.ChannelSetting.SystemPrompt != "" {
+	passThrough := model_setting.GetGlobalSettings().PassThroughRequestEnabled || info.ChannelSetting.PassThroughBodyEnabled
+	if !passThrough && info.ChannelSetting.SystemPrompt != "" {
 		if request.System == nil {
 			request.SetStringSystem(info.ChannelSetting.SystemPrompt)
 		} else if info.ChannelSetting.SystemPromptOverride {
@@ -72,6 +73,7 @@ func ClaudeHelper(c *gin.Context, info *relaycommon.RelayInfo) (newAPIError *typ
 			}
 		}
 	}
+	service.SetModerationRequestContent(c, request)
 
 	if !model_setting.GetGlobalSettings().PassThroughRequestEnabled &&
 		!info.ChannelSetting.PassThroughBodyEnabled &&
@@ -86,16 +88,24 @@ func ClaudeHelper(c *gin.Context, info *relaycommon.RelayInfo) (newAPIError *typ
 	}
 
 	var requestBody io.Reader
-	if model_setting.GetGlobalSettings().PassThroughRequestEnabled || info.ChannelSetting.PassThroughBodyEnabled {
+	if passThrough {
 		storage, err := common.GetBodyStorage(c)
 		if err != nil {
 			return types.NewErrorWithStatusCode(err, types.ErrorCodeReadRequestBodyFailed, http.StatusBadRequest, types.ErrOptionWithSkipRetry())
+		}
+		if data, bytesErr := storage.Bytes(); bytesErr == nil {
+			service.SetModerationRequestContentFromJSON(c, data, request)
 		}
 		requestBody = common.NewReplayableBodyReader(storage)
 	} else {
 		convertedRequest, err := adaptor.ConvertClaudeRequest(c, info, request)
 		if err != nil {
 			return newConvertRequestFailedError(c, info, err)
+		}
+		if moderationRequest, ok := convertedRequest.(dto.Request); ok {
+			service.SetModerationRequestContent(c, moderationRequest)
+		} else {
+			service.SetModerationRequestContent(c, request)
 		}
 		relaycommon.AppendRequestConversionFromRequest(info, convertedRequest)
 		jsonData, err := common.Marshal(convertedRequest)
@@ -116,6 +126,11 @@ func ClaudeHelper(c *gin.Context, info *relaycommon.RelayInfo) (newAPIError *typ
 				return newAPIErrorFromParamOverride(err)
 			}
 		}
+		moderationRequest, ok := convertedRequest.(dto.Request)
+		if !ok {
+			moderationRequest = request
+		}
+		service.SetModerationRequestContentFromJSON(c, jsonData, moderationRequest)
 
 		logger.LogDebug(c, "requestBody: %s", jsonData)
 		body, closer, err := relaycommon.NewOutboundJSONBody(jsonData)

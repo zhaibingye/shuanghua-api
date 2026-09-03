@@ -29,6 +29,136 @@ export type SystemOptionsResponse = {
   data: SystemOption[]
 }
 
+export type ContentModerationSettings = {
+  enabled: boolean
+  provider: 'responses' | 'gemini'
+  base_url: string
+  model: string
+  timeout_seconds: number
+  max_retries: number
+  normal_sample_rate: number
+  elevated_sample_rate: number
+  prompt_version: string
+  api_key_configured: boolean
+}
+
+export type ContentModerationSettingsResponse = {
+  success: boolean
+  data: ContentModerationSettings
+}
+
+export type ContentModerationSettingsUpdate = Omit<
+  ContentModerationSettings,
+  'api_key_configured'
+> & {
+  api_key: string
+}
+
+export type ModerationConversation = {
+  id: number
+  user_id: number
+  conversation_id: string
+  status: string
+  first_activity_at: number
+  last_activity_at: number
+  expires_at: number
+  blocked_at?: number
+  blocked_reason?: string
+}
+
+export type ModerationTurn = {
+  id: number
+  round_number: number
+  request_id: string
+  system_prompt: string
+  user_prompt: string
+  assistant_reply: string
+  response_status: string
+  relay_format: string
+  model: string
+  review_required: boolean
+  review_trigger?: string
+  created_at: number
+}
+
+export type ModerationJob = {
+  id: number
+  turn_id: number
+  status: string
+  attempts: number
+  next_attempt_at: number
+  provider: string
+  model: string
+  prompt_version: string
+  expires_at: number
+  request_payload?: string
+  response_payload?: string
+  last_error?: string
+}
+
+export type ModerationViolation = {
+  id: number
+  user_id: number
+  conversation_id: string
+  turn_id: number
+  actor: string
+  user_violation: boolean
+  decision: string
+  severity: string
+  categories: string
+  confidence: number
+  reason_code: string
+  status: string
+  created_at: number
+}
+
+export type ModerationAction = {
+  id: number
+  admin_id: number
+  user_id?: number
+  conversation_id?: string
+  violation_id?: number
+  action: string
+  reason?: string
+  created_at: number
+}
+
+export type ModerationNotification = {
+  id: number
+  alert_type: string
+  recipient: string
+  status: string
+  attempts: number
+  next_attempt_at?: number
+  last_error?: string
+}
+
+export type ModerationConversationDetail = {
+  conversation: ModerationConversation
+  turns: ModerationTurn[]
+  jobs: ModerationJob[]
+  violations: ModerationViolation[]
+  actions: ModerationAction[]
+  notifications: ModerationNotification[]
+}
+
+export type ModerationConversationListResponse = {
+  success: boolean
+  data: ModerationConversation[]
+  total: number
+}
+
+export type ModerationConversationDetailResponse = {
+  success: boolean
+  data: ModerationConversationDetail
+}
+
+export type ModerationViolationListResponse = {
+  success: boolean
+  data: ModerationViolation[]
+  total: number
+}
+
 export type UpdateOptionRequest = {
   key: string
   value: string | boolean | number

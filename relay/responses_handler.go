@@ -81,15 +81,24 @@ func ResponsesHelper(c *gin.Context, info *relaycommon.RelayInfo) (newAPIError *
 	adaptor.Init(info)
 	var requestBody io.Reader
 	if model_setting.GetGlobalSettings().PassThroughRequestEnabled || info.ChannelSetting.PassThroughBodyEnabled {
+		service.SetModerationRequestContent(c, request)
 		storage, err := common.GetBodyStorage(c)
 		if err != nil {
 			return types.NewError(err, types.ErrorCodeReadRequestBodyFailed, types.ErrOptionWithSkipRetry())
+		}
+		if data, bytesErr := storage.Bytes(); bytesErr == nil {
+			service.SetModerationRequestContentFromJSON(c, data, request)
 		}
 		requestBody = common.NewReplayableBodyReader(storage)
 	} else {
 		convertedRequest, err := adaptor.ConvertOpenAIResponsesRequest(c, info, *request)
 		if err != nil {
 			return newConvertRequestFailedError(c, info, err)
+		}
+		if moderationRequest, ok := convertedRequest.(dto.Request); ok {
+			service.SetModerationRequestContent(c, moderationRequest)
+		} else {
+			service.SetModerationRequestContent(c, request)
 		}
 		relaycommon.AppendRequestConversionFromRequest(info, convertedRequest)
 		jsonData, err := common.Marshal(convertedRequest)
@@ -110,6 +119,11 @@ func ResponsesHelper(c *gin.Context, info *relaycommon.RelayInfo) (newAPIError *
 				return newAPIErrorFromParamOverride(err)
 			}
 		}
+		moderationRequest, ok := convertedRequest.(dto.Request)
+		if !ok {
+			moderationRequest = request
+		}
+		service.SetModerationRequestContentFromJSON(c, jsonData, moderationRequest)
 
 		logger.LogDebug(c, "requestBody: %s", jsonData)
 		body, closer, err := relaycommon.NewOutboundJSONBody(jsonData)
