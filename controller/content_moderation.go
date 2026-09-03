@@ -110,7 +110,8 @@ func UpdateContentModerationSettings(c *gin.Context) {
 		}
 	}
 	currentConfig := setting.GetContentModerationSetting()
-	if request.Enabled && (modelName == "" || apiKey == "" && strings.TrimSpace(currentConfig.APIKey) == "") {
+	apiKeyRequired := baseURL == ""
+	if request.Enabled && (modelName == "" || (apiKeyRequired && apiKey == "" && strings.TrimSpace(currentConfig.APIKey) == "")) {
 		c.JSON(http.StatusBadRequest, gin.H{"success": false, "message": "model and API key are required when content moderation is enabled"})
 		return
 	}
