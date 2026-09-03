@@ -56,6 +56,9 @@ export async function updateContentModerationSettings(
 export async function listContentModerationConversations(params?: {
   user_id?: number
   status?: string
+  conversation_id?: string
+  start_timestamp?: number
+  end_timestamp?: number
   limit?: number
   offset?: number
 }) {
