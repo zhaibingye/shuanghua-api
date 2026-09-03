@@ -589,3 +589,37 @@ func TestResolveModerationConversationID(t *testing.T) {
 	// Verify cached value is returned consistently
 	assert.Equal(t, "conv_test-req-999", ResolveModerationConversationID(c4))
 }
+
+func TestExtractReviewJSONSupportsChoicesAndDirectMap(t *testing.T) {
+	decisionJSON := `{"decision":"allow","actor":"none","severity":"none","categories":[],"confidence":0,"reason_code":"safe"}`
+
+	// 1. Output text format
+	assert.Equal(t, decisionJSON, extractReviewJSON(map[string]any{"output_text": decisionJSON}))
+
+	// 2. Choices message content format (chat completions proxy)
+	chatResp := map[string]any{
+		"choices": []any{
+			map[string]any{
+				"message": map[string]any{
+					"content": "```json\n" + decisionJSON + "\n```",
+				},
+			},
+		},
+	}
+	assert.Equal(t, decisionJSON, extractReviewJSON(chatResp))
+
+	// 3. Direct decision map format
+	directResp := map[string]any{
+		"decision":    "allow",
+		"actor":       "none",
+		"severity":    "none",
+		"categories":  []any{},
+		"confidence":  float64(0),
+		"reason_code": "safe",
+	}
+	extracted := extractReviewJSON(directResp)
+	var parsed map[string]any
+	require.NoError(t, common.UnmarshalJsonStr(extracted, &parsed))
+	assert.Equal(t, "allow", parsed["decision"])
+	assert.Equal(t, "none", parsed["actor"])
+}

@@ -1359,6 +1359,25 @@ func extractReviewJSON(response map[string]any) string {
 			}
 		}
 	}
+	if choices, ok := response["choices"].([]any); ok && len(choices) > 0 {
+		if firstChoice, ok := choices[0].(map[string]any); ok {
+			if message, ok := firstChoice["message"].(map[string]any); ok {
+				if content, ok := message["content"].(string); ok && strings.TrimSpace(content) != "" {
+					return stripJSONFence(content)
+				}
+			}
+			if text, ok := firstChoice["text"].(string); ok && strings.TrimSpace(text) != "" {
+				return stripJSONFence(text)
+			}
+		}
+	}
+	if _, ok := response["decision"]; ok {
+		if _, ok := response["actor"]; ok {
+			if bytes, err := common.Marshal(response); err == nil {
+				return string(bytes)
+			}
+		}
+	}
 	return ""
 }
 

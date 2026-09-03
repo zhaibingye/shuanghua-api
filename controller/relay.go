@@ -132,7 +132,8 @@ func Relay(c *gin.Context, relayFormat types.RelayFormat) {
 	isResponsesCompaction := relayInfo.RelayMode == relayconstant.RelayModeResponsesCompact
 	if moderationEnabled && !isGeminiCountTokens && !isResponsesCompaction && service.IsModerationRequestSupported(request) {
 		moderationURLInvalid := service.ValidateContentModerationURL(moderationConfig.BaseURL) != nil
-		if strings.TrimSpace(moderationConfig.APIKey) == "" || strings.TrimSpace(moderationConfig.Model) == "" || moderationURLInvalid {
+		apiKeyRequired := strings.TrimSpace(moderationConfig.BaseURL) == ""
+		if (apiKeyRequired && strings.TrimSpace(moderationConfig.APIKey) == "") || strings.TrimSpace(moderationConfig.Model) == "" || moderationURLInvalid {
 			newAPIError = types.NewErrorWithStatusCode(
 				errors.New("content moderation is enabled but not configured"),
 				types.ErrorCodeContentModerationUnavailable,
