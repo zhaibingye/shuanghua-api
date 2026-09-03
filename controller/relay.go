@@ -126,6 +126,64 @@ func Relay(c *gin.Context, relayFormat types.RelayFormat) {
 		return
 	}
 
+	moderationConfig := setting.GetContentModerationSetting()
+	moderationEnabled := moderationConfig.Enabled
+	isGeminiCountTokens := relayFormat == types.RelayFormatGemini && strings.Contains(c.Request.URL.Path, ":countTokens")
+	isResponsesCompaction := relayInfo.RelayMode == relayconstant.RelayModeResponsesCompact
+	if moderationEnabled && !isGeminiCountTokens && !isResponsesCompaction && service.IsModerationRequestSupported(request) {
+		moderationURLInvalid := service.ValidateContentModerationURL(moderationConfig.BaseURL) != nil
+		if strings.TrimSpace(moderationConfig.APIKey) == "" || strings.TrimSpace(moderationConfig.Model) == "" || moderationURLInvalid {
+			newAPIError = types.NewErrorWithStatusCode(
+				errors.New("content moderation is enabled but not configured"),
+				types.ErrorCodeContentModerationUnavailable,
+				http.StatusServiceUnavailable,
+				types.ErrOptionWithSkipRetry(),
+			)
+			return
+		}
+		conversationID := service.ResolveModerationConversationID(c)
+		if relayInfo.UserId <= 0 || conversationID == "" {
+			newAPIError = types.NewErrorWithStatusCode(
+				errors.New("content moderation requires an authenticated user and a conversation ID"),
+				types.ErrorCodeContentModerationConversationRequired,
+				http.StatusBadRequest,
+				types.ErrOptionWithSkipRetry(),
+			)
+			return
+		}
+		common.SetContextKey(c, constant.ContextKeyModerationConversationID, conversationID)
+		c.Header("X-Conversation-ID", conversationID)
+		blocked, moderationErr := model.IsModerationConversationBlocked(relayInfo.UserId, conversationID)
+		if moderationErr != nil {
+			logger.LogWarn(c, fmt.Sprintf("content moderation block lookup failed: %v", moderationErr))
+			newAPIError = types.NewErrorWithStatusCode(
+				errors.New("content moderation state is unavailable"),
+				types.ErrorCodeContentModerationUnavailable,
+				http.StatusServiceUnavailable,
+				types.ErrOptionWithSkipRetry(),
+			)
+			return
+		}
+		if blocked {
+			newAPIError = types.NewErrorWithStatusCode(
+				model.ErrModerationConversationBlocked,
+				types.ErrorCodeContentModerationBlocked,
+				http.StatusForbidden,
+				types.ErrOptionWithSkipRetry(),
+			)
+			return
+		}
+		common.SetContextKey(c, constant.ContextKeyModerationEnabledAtStart, true)
+		service.BeginModerationCapture(c, request)
+		// Save the parsed request even when channel selection, billing, or
+		// upstream processing fails before a relay handler can enrich it with
+		// the effective system prompt.
+		service.SetModerationRequestContent(c, request)
+		defer func() {
+			service.FinalizeModeration(c, relayInfo, newAPIError)
+		}()
+	}
+
 	needSensitiveCheck := setting.ShouldCheckPromptSensitive()
 	needCountToken := constant.CountToken
 	// Avoid building huge CombineText (strings.Join) when token counting and sensitive check are both disabled.
@@ -140,7 +198,7 @@ func Relay(c *gin.Context, relayFormat types.RelayFormat) {
 		contains, words := service.CheckSensitiveText(meta.CombineText)
 		if contains {
 			logger.LogWarn(c, fmt.Sprintf("user sensitive words detected: %s", strings.Join(words, ", ")))
-			newAPIError = types.NewError(err, types.ErrorCodeSensitiveWordsDetected)
+			newAPIError = types.NewError(errors.New("sensitive words detected"), types.ErrorCodeSensitiveWordsDetected)
 			return
 		}
 	}

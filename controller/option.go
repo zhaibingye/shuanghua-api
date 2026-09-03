@@ -131,6 +131,13 @@ func UpdateOption(c *gin.Context) {
 		})
 		return
 	}
+	if strings.HasPrefix(option.Key, "ContentModeration") {
+		c.JSON(http.StatusBadRequest, gin.H{
+			"success": false,
+			"message": "content moderation settings must be changed through the moderation settings endpoint",
+		})
+		return
+	}
 	switch option.Value.(type) {
 	case bool:
 		option.Value = common.Interface2String(option.Value.(bool))

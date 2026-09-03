@@ -177,6 +177,16 @@ func InitOptionMap() {
 	common.OptionMap["AutomaticDisableStatusCodes"] = operation_setting.AutomaticDisableStatusCodesToString()
 	common.OptionMap["AutomaticRetryStatusCodes"] = operation_setting.AutomaticRetryStatusCodesToString()
 	common.OptionMap["ExposeRatioEnabled"] = strconv.FormatBool(ratio_setting.IsExposeRatioEnabled())
+	common.OptionMap[setting.ContentModerationEnabledOption] = "false"
+	common.OptionMap[setting.ContentModerationProviderOption] = setting.DefaultContentModerationProvider
+	common.OptionMap[setting.ContentModerationBaseURLOption] = ""
+	common.OptionMap[setting.ContentModerationAPIKeyOption] = ""
+	common.OptionMap[setting.ContentModerationModelOption] = ""
+	common.OptionMap[setting.ContentModerationTimeoutSecondsOption] = strconv.Itoa(setting.DefaultContentModerationTimeoutSeconds)
+	common.OptionMap[setting.ContentModerationMaxRetriesOption] = strconv.Itoa(setting.DefaultContentModerationMaxRetries)
+	common.OptionMap[setting.ContentModerationNormalSampleRateOption] = strconv.Itoa(setting.DefaultContentModerationNormalSampleRate)
+	common.OptionMap[setting.ContentModerationElevatedSampleRateOption] = strconv.Itoa(setting.DefaultContentModerationElevatedSampleRate)
+	common.OptionMap[setting.ContentModerationPromptVersionOption] = setting.DefaultContentModerationPromptVersion
 
 	// 自动添加所有注册的模型配置
 	modelConfigs := config.GlobalConfig.ExportAllConfigs()

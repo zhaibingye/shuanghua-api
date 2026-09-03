@@ -75,9 +75,13 @@ func TextHelper(c *gin.Context, info *relaycommon.RelayInfo) (newAPIError *types
 	var requestBody io.Reader
 
 	if passThroughGlobal || info.ChannelSetting.PassThroughBodyEnabled {
+		service.SetModerationRequestContent(c, request)
 		storage, err := common.GetBodyStorage(c)
 		if err != nil {
 			return types.NewErrorWithStatusCode(err, types.ErrorCodeReadRequestBodyFailed, http.StatusBadRequest, types.ErrOptionWithSkipRetry())
+		}
+		if data, bytesErr := storage.Bytes(); bytesErr == nil {
+			service.SetModerationRequestContentFromJSON(c, data, request)
 		}
 		if common.DebugEnabled {
 			if debugBytes, bErr := storage.Bytes(); bErr == nil {
@@ -87,9 +91,15 @@ func TextHelper(c *gin.Context, info *relaycommon.RelayInfo) (newAPIError *types
 		requestBody = common.NewReplayableBodyReader(storage)
 	} else {
 		applySystemPromptIfNeeded(c, info, request)
+		service.SetModerationRequestContent(c, request)
 		convertedRequest, err := convertRequestToChannelNative(c, info, adaptor, request)
 		if err != nil {
 			return newConvertRequestError(err)
+		}
+		if moderationRequest, ok := convertedRequest.(dto.Request); ok {
+			service.SetModerationRequestContent(c, moderationRequest)
+		} else {
+			service.SetModerationRequestContent(c, request)
 		}
 		relaycommon.AppendRequestConversionFromRequest(info, convertedRequest)
 
@@ -111,6 +121,11 @@ func TextHelper(c *gin.Context, info *relaycommon.RelayInfo) (newAPIError *types
 				return newAPIErrorFromParamOverride(err)
 			}
 		}
+		moderationRequest, ok := convertedRequest.(dto.Request)
+		if !ok {
+			moderationRequest = request
+		}
+		service.SetModerationRequestContentFromJSON(c, jsonData, moderationRequest)
 
 		logger.LogDebug(c, "text request body: %s", jsonData)
 

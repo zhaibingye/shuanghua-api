@@ -70,6 +70,7 @@ func GeminiHelper(c *gin.Context, info *relaycommon.RelayInfo) (newAPIError *typ
 		return types.NewError(err, types.ErrorCodeChannelModelMappedError, types.ErrOptionWithSkipRetry())
 	}
 
+	passThrough := model_setting.GetGlobalSettings().PassThroughRequestEnabled || info.ChannelSetting.PassThroughBodyEnabled
 	if !isCountTokensRequest && model_setting.GetGeminiSettings().ThinkingAdapterEnabled {
 		if isNoThinkingRequest(request) {
 			// check is thinking
@@ -92,7 +93,7 @@ func GeminiHelper(c *gin.Context, info *relaycommon.RelayInfo) (newAPIError *typ
 	applyInboundDefaults(info, request)
 	adaptor.Init(info)
 
-	if !isCountTokensRequest && info.ChannelSetting.SystemPrompt != "" {
+	if !passThrough && !isCountTokensRequest && info.ChannelSetting.SystemPrompt != "" {
 		if request.SystemInstructions == nil {
 			request.SystemInstructions = &dto.GeminiChatContent{
 				Parts: []dto.GeminiPart{
@@ -131,18 +132,27 @@ func GeminiHelper(c *gin.Context, info *relaycommon.RelayInfo) (newAPIError *typ
 			request.SystemInstructions = nil
 		}
 	}
+	service.SetModerationRequestContent(c, request)
 
 	var requestBody io.Reader
-	if model_setting.GetGlobalSettings().PassThroughRequestEnabled || info.ChannelSetting.PassThroughBodyEnabled {
+	if passThrough {
 		storage, err := common.GetBodyStorage(c)
 		if err != nil {
 			return types.NewErrorWithStatusCode(err, types.ErrorCodeReadRequestBodyFailed, http.StatusBadRequest, types.ErrOptionWithSkipRetry())
+		}
+		if data, bytesErr := storage.Bytes(); bytesErr == nil {
+			service.SetModerationRequestContentFromJSON(c, data, request)
 		}
 		requestBody = common.NewReplayableBodyReader(storage)
 	} else {
 		convertedRequest, err := convertRequestToChannelNative(c, info, adaptor, request)
 		if err != nil {
 			return newConvertRequestError(err)
+		}
+		if moderationRequest, ok := convertedRequest.(dto.Request); ok {
+			service.SetModerationRequestContent(c, moderationRequest)
+		} else {
+			service.SetModerationRequestContent(c, request)
 		}
 		relaycommon.AppendRequestConversionFromRequest(info, convertedRequest)
 		jsonData, err := common.Marshal(convertedRequest)
@@ -157,6 +167,11 @@ func GeminiHelper(c *gin.Context, info *relaycommon.RelayInfo) (newAPIError *typ
 				return newAPIErrorFromParamOverride(err)
 			}
 		}
+		moderationRequest, ok := convertedRequest.(dto.Request)
+		if !ok {
+			moderationRequest = request
+		}
+		service.SetModerationRequestContentFromJSON(c, jsonData, moderationRequest)
 
 		logger.LogDebug(c, "Gemini request body: %s", jsonData)
 

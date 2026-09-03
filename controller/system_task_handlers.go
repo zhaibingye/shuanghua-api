@@ -9,6 +9,7 @@ import (
 	"github.com/QuantumNous/new-api/constant"
 	"github.com/QuantumNous/new-api/model"
 	"github.com/QuantumNous/new-api/service"
+	"github.com/QuantumNous/new-api/setting"
 	"github.com/QuantumNous/new-api/setting/operation_setting"
 )
 
@@ -22,6 +23,7 @@ func RegisterScheduledSystemTasks() {
 	service.RegisterSystemTaskHandler(modelUpdateHandler{})
 	service.RegisterSystemTaskHandler(midjourneyPollHandler{})
 	service.RegisterSystemTaskHandler(asyncTaskPollHandler{})
+	service.RegisterSystemTaskHandler(contentModerationHandler{})
 }
 
 // channelTestHandler runs the scheduled "test all channels" job. Enablement and
@@ -150,6 +152,34 @@ func (asyncTaskPollHandler) NewPayload() any { return nil }
 func (asyncTaskPollHandler) Run(ctx context.Context, task *model.SystemTask, runnerID string) {
 	summary := service.RunTaskPollingOnce(ctx, service.NewSystemTaskProgressReporter(task, runnerID))
 	finishSystemTaskHandler(task, runnerID, model.SystemTaskStatusSucceeded, summary, nil)
+}
+
+type contentModerationHandler struct{}
+
+func (contentModerationHandler) Type() string { return model.SystemTaskTypeContentModeration }
+
+func (contentModerationHandler) Enabled() bool { return true }
+
+func (contentModerationHandler) Interval() time.Duration {
+	config := setting.GetContentModerationSetting()
+	if config.Enabled {
+		return 15 * time.Second
+	}
+	return time.Hour
+}
+
+func (contentModerationHandler) NewPayload() any { return nil }
+
+func (contentModerationHandler) Run(ctx context.Context, task *model.SystemTask, runnerID string) {
+	runErr := service.ProcessContentModerationQueue(ctx)
+	if runErr == nil {
+		runErr = service.CleanupContentModerationData()
+	}
+	status := model.SystemTaskStatusSucceeded
+	if runErr != nil {
+		status = model.SystemTaskStatusFailed
+	}
+	finishSystemTaskHandler(task, runnerID, status, nil, runErr)
 }
 
 func finishSystemTaskHandler(task *model.SystemTask, runnerID string, status model.SystemTaskStatus, result any, runErr error) {

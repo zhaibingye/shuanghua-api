@@ -279,6 +279,18 @@ func SetApiRouter(router *gin.Engine) {
 		logRoute.GET("/self", middleware.UserAuth(), controller.GetUserLogs)
 		logRoute.GET("/self/search", middleware.UserAuth(), middleware.SearchRateLimit(), controller.SearchUserLogs)
 
+		moderationRoute := apiRouter.Group("/moderation")
+		{
+			moderationRoute.GET("/settings", middleware.RootAuth(), controller.GetContentModerationSettings)
+			moderationRoute.PUT("/settings", middleware.RootAuth(), controller.UpdateContentModerationSettings)
+			moderationRoute.GET("/conversations", middleware.AdminAuth(), controller.ListContentModerationConversations)
+			moderationRoute.GET("/conversations/:id", middleware.AdminAuth(), controller.GetContentModerationConversation)
+			moderationRoute.POST("/conversations/:id/unblock", middleware.AdminAuth(), controller.UnblockContentModerationConversation)
+			moderationRoute.GET("/violations", middleware.AdminAuth(), controller.ListContentModerationViolations)
+			moderationRoute.POST("/violations/:id/resolve", middleware.AdminAuth(), controller.ResolveContentModerationViolation)
+			moderationRoute.POST("/users/:id/restore", middleware.RootAuth(), controller.RestoreContentModerationUser)
+		}
+
 		systemTaskRoute := apiRouter.Group("/system-task")
 		systemTaskRoute.Use(middleware.RootAuth())
 		{
