@@ -549,3 +549,43 @@ func TestReviewModerationTurnUsesCustomPolicyPrompt(t *testing.T) {
 	require.NoError(t, err)
 	assert.Equal(t, setting.DefaultContentModerationPolicyPrompt, capturedInstructions)
 }
+
+func TestResolveModerationConversationID(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+
+	// 1. Explicit X-Conversation-ID header
+	rec1 := httptest.NewRecorder()
+	c1, _ := gin.CreateTestContext(rec1)
+	c1.Request = httptest.NewRequest("POST", "/v1/chat/completions", nil)
+	c1.Request.Header.Set("X-Conversation-ID", "header-chat-123")
+	assert.Equal(t, "header-chat-123", ResolveModerationConversationID(c1))
+
+	// 2. Body with conversation_id
+	rec2 := httptest.NewRecorder()
+	c2, _ := gin.CreateTestContext(rec2)
+	c2.Request = httptest.NewRequest("POST", "/v1/chat/completions", strings.NewReader(`{"conversation_id":"body-conv-456"}`))
+	s2, err := common.CreateBodyStorage([]byte(`{"conversation_id":"body-conv-456"}`))
+	require.NoError(t, err)
+	c2.Set(common.KeyBodyStorage, s2)
+	assert.Equal(t, "body-conv-456", ResolveModerationConversationID(c2))
+
+	// 3. Body with session_id
+	rec3 := httptest.NewRecorder()
+	c3, _ := gin.CreateTestContext(rec3)
+	c3.Request = httptest.NewRequest("POST", "/v1/chat/completions", strings.NewReader(`{"session_id":"sess-789"}`))
+	s3, err := common.CreateBodyStorage([]byte(`{"session_id":"sess-789"}`))
+	require.NoError(t, err)
+	c3.Set(common.KeyBodyStorage, s3)
+	assert.Equal(t, "sess-789", ResolveModerationConversationID(c3))
+
+	// 4. No header and no body - auto-fallback based on request ID
+	rec4 := httptest.NewRecorder()
+	c4, _ := gin.CreateTestContext(rec4)
+	c4.Request = httptest.NewRequest("POST", "/v1/chat/completions", strings.NewReader(`{"messages":[{"role":"user","content":"hello"}]}`))
+	common.SetContextKey(c4, common.RequestIdKey, "test-req-999")
+	convID := ResolveModerationConversationID(c4)
+	assert.Equal(t, "conv_test-req-999", convID)
+
+	// Verify cached value is returned consistently
+	assert.Equal(t, "conv_test-req-999", ResolveModerationConversationID(c4))
+}
