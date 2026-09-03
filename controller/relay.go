@@ -141,15 +141,22 @@ func Relay(c *gin.Context, relayFormat types.RelayFormat) {
 			)
 			return
 		}
-		conversationID := service.ResolveModerationConversationID(c)
-		if relayInfo.UserId <= 0 || conversationID == "" {
+		if relayInfo.UserId <= 0 {
 			newAPIError = types.NewErrorWithStatusCode(
-				errors.New("content moderation requires an authenticated user and a conversation ID"),
+				errors.New("content moderation requires an authenticated user"),
 				types.ErrorCodeContentModerationConversationRequired,
 				http.StatusBadRequest,
 				types.ErrOptionWithSkipRetry(),
 			)
 			return
+		}
+		conversationID := service.ResolveModerationConversationID(c)
+		if conversationID == "" {
+			reqID := relayInfo.RequestId
+			if reqID == "" {
+				reqID = common.NewRequestId()
+			}
+			conversationID = "conv_" + reqID
 		}
 		common.SetContextKey(c, constant.ContextKeyModerationConversationID, conversationID)
 		c.Header("X-Conversation-ID", conversationID)

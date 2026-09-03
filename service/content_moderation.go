@@ -151,24 +151,36 @@ func ResolveModerationConversationID(c *gin.Context) string {
 	if c == nil {
 		return ""
 	}
+	if cached := common.GetContextKeyString(c, constant.ContextKeyModerationConversationID); cached != "" {
+		return cached
+	}
 	if value := normalizeConversationID(c.GetHeader(moderationConversationHeader)); value != "" {
+		common.SetContextKey(c, constant.ContextKeyModerationConversationID, value)
 		return value
+	}
+	for _, headerName := range []string{"X-Session-ID", "X-Chat-ID", "session_id", "chat_id"} {
+		if value := normalizeConversationID(c.GetHeader(headerName)); value != "" {
+			common.SetContextKey(c, constant.ContextKeyModerationConversationID, value)
+			return value
+		}
 	}
 	if storage, err := common.GetBodyStorage(c); err == nil {
 		if data, bytesErr := storage.Bytes(); bytesErr == nil {
 			var payload map[string]any
 			if common.Unmarshal(data, &payload) == nil {
-				for _, key := range []string{"conversation_id", "conversationId", "conversation"} {
+				for _, key := range []string{"conversation_id", "conversationId", "conversation", "chat_id", "chatId", "session_id", "sessionId"} {
 					if value, ok := payload[key].(string); ok {
 						if normalized := normalizeConversationID(value); normalized != "" {
+							common.SetContextKey(c, constant.ContextKeyModerationConversationID, normalized)
 							return normalized
 						}
 					}
 				}
 				if metadata, ok := payload["metadata"].(map[string]any); ok {
-					for _, key := range []string{"conversation_id", "conversationId", "conversation"} {
+					for _, key := range []string{"conversation_id", "conversationId", "conversation", "chat_id", "chatId", "session_id", "sessionId"} {
 						if value, ok := metadata[key].(string); ok {
 							if normalized := normalizeConversationID(value); normalized != "" {
+								common.SetContextKey(c, constant.ContextKeyModerationConversationID, normalized)
 								return normalized
 							}
 						}
@@ -177,7 +189,13 @@ func ResolveModerationConversationID(c *gin.Context) string {
 			}
 		}
 	}
-	return ""
+	reqID := common.GetContextKeyString(c, common.RequestIdKey)
+	if reqID == "" {
+		reqID = common.NewRequestId()
+	}
+	fallback := "conv_" + reqID
+	common.SetContextKey(c, constant.ContextKeyModerationConversationID, fallback)
+	return fallback
 }
 
 func normalizeConversationID(value string) string {
