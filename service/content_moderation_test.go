@@ -415,6 +415,18 @@ func TestValidateModerationDecisionRejectsUnsafeConfidenceValues(t *testing.T) {
 	assert.Error(t, validateModerationDecision(decision))
 }
 
+func TestModerationEndpointExpandsGeminiModelPlaceholder(t *testing.T) {
+	endpoint, err := moderationEndpoint(setting.ContentModerationSetting{
+		BaseURL: "https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent",
+		Model:   "gemini-2.5-flash",
+	}, "gemini")
+	require.NoError(t, err)
+	assert.Equal(t, "https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent", endpoint)
+
+	_, err = moderationEndpoint(setting.ContentModerationSetting{BaseURL: "https://example.com/{model}"}, "gemini")
+	require.Error(t, err)
+}
+
 func TestValidateContentModerationURL(t *testing.T) {
 	tests := []struct {
 		name    string
@@ -578,16 +590,285 @@ func TestResolveModerationConversationID(t *testing.T) {
 	c3.Set(common.KeyBodyStorage, s3)
 	assert.Equal(t, "sess-789", ResolveModerationConversationID(c3))
 
-	// 4. No header and no body - auto-fallback based on request ID
+	// 4. No explicit ID - derive a deterministic fallback from request content
 	rec4 := httptest.NewRecorder()
 	c4, _ := gin.CreateTestContext(rec4)
 	c4.Request = httptest.NewRequest("POST", "/v1/chat/completions", strings.NewReader(`{"messages":[{"role":"user","content":"hello"}]}`))
 	common.SetContextKey(c4, common.RequestIdKey, "test-req-999")
 	convID := ResolveModerationConversationID(c4)
-	assert.Equal(t, "conv_test-req-999", convID)
+	assert.Equal(t, moderationConversationIDFromSeed("hello"), convID)
 
 	// Verify cached value is returned consistently
-	assert.Equal(t, "conv_test-req-999", ResolveModerationConversationID(c4))
+	assert.Equal(t, moderationConversationIDFromSeed("hello"), ResolveModerationConversationID(c4))
+}
+
+func TestResolveModerationConversationIDUsesStableHistorySeed(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+
+	firstRequestBody := `{"model":"gpt-4o","messages":[{"role":"system","content":"assistant prompt"},{"role":"user","content":"first message"}]}`
+	firstRecorder := httptest.NewRecorder()
+	firstContext, _ := gin.CreateTestContext(firstRecorder)
+	firstContext.Request = httptest.NewRequest("POST", "/v1/chat/completions", strings.NewReader(firstRequestBody))
+	firstStorage, err := common.CreateBodyStorage([]byte(firstRequestBody))
+	require.NoError(t, err)
+	firstContext.Set(common.KeyBodyStorage, firstStorage)
+	t.Cleanup(func() { _ = firstStorage.Close() })
+	common.SetContextKey(firstContext, common.RequestIdKey, "rikkahub-request-1")
+
+	secondRequestBody := `{"model":"gpt-4o","messages":[{"role":"system","content":"assistant prompt"},{"role":"user","content":"first message"},{"role":"assistant","content":"first answer"},{"role":"user","content":"second message"}]}`
+	secondRecorder := httptest.NewRecorder()
+	secondContext, _ := gin.CreateTestContext(secondRecorder)
+	secondContext.Request = httptest.NewRequest("POST", "/v1/chat/completions", strings.NewReader(secondRequestBody))
+	secondStorage, err := common.CreateBodyStorage([]byte(secondRequestBody))
+	require.NoError(t, err)
+	secondContext.Set(common.KeyBodyStorage, secondStorage)
+	t.Cleanup(func() { _ = secondStorage.Close() })
+	common.SetContextKey(secondContext, common.RequestIdKey, "rikkahub-request-2")
+
+	firstConversationID := ResolveModerationConversationID(firstContext)
+	secondConversationID := ResolveModerationConversationID(secondContext)
+	require.NotEmpty(t, firstConversationID)
+	assert.Equal(t, firstConversationID, secondConversationID)
+	assert.Contains(t, firstConversationID, "conv_seed_")
+	assert.NotEqual(t, "conv_rikkahub-request-1", firstConversationID)
+	assert.NotEqual(t, "conv_rikkahub-request-2", secondConversationID)
+
+	thirdRequestBody := `{"model":"gpt-4o","messages":[{"role":"system","content":"assistant prompt"},{"role":"user","content":"another conversation"}]}`
+	thirdRecorder := httptest.NewRecorder()
+	thirdContext, _ := gin.CreateTestContext(thirdRecorder)
+	thirdContext.Request = httptest.NewRequest("POST", "/v1/chat/completions", strings.NewReader(thirdRequestBody))
+	thirdStorage, err := common.CreateBodyStorage([]byte(thirdRequestBody))
+	require.NoError(t, err)
+	thirdContext.Set(common.KeyBodyStorage, thirdStorage)
+	t.Cleanup(func() { _ = thirdStorage.Close() })
+	common.SetContextKey(thirdContext, common.RequestIdKey, "rikkahub-request-3")
+
+	assert.NotEqual(t, firstConversationID, ResolveModerationConversationID(thirdContext))
+}
+
+func TestResolveModerationConversationIDForUserKeepsIdenticalInitialPromptsSeparate(t *testing.T) {
+	requestBody := `{"model":"gpt-4o","messages":[{"role":"user","content":"same opening prompt"}]}`
+
+	firstRecorder := httptest.NewRecorder()
+	firstContext, _ := gin.CreateTestContext(firstRecorder)
+	firstContext.Request = httptest.NewRequest("POST", "/v1/chat/completions", strings.NewReader(requestBody))
+	firstStorage, err := common.CreateBodyStorage([]byte(requestBody))
+	require.NoError(t, err)
+	firstContext.Set(common.KeyBodyStorage, firstStorage)
+	t.Cleanup(func() { _ = firstStorage.Close() })
+	common.SetContextKey(firstContext, common.RequestIdKey, "rikkahub-identical-request-1")
+
+	secondRecorder := httptest.NewRecorder()
+	secondContext, _ := gin.CreateTestContext(secondRecorder)
+	secondContext.Request = httptest.NewRequest("POST", "/v1/chat/completions", strings.NewReader(requestBody))
+	secondStorage, err := common.CreateBodyStorage([]byte(requestBody))
+	require.NoError(t, err)
+	secondContext.Set(common.KeyBodyStorage, secondStorage)
+	t.Cleanup(func() { _ = secondStorage.Close() })
+	common.SetContextKey(secondContext, common.RequestIdKey, "rikkahub-identical-request-2")
+
+	firstConversationID := ResolveModerationConversationIDForUser(firstContext, 950002)
+	secondConversationID := ResolveModerationConversationIDForUser(secondContext, 950002)
+	assert.NotEqual(t, firstConversationID, secondConversationID)
+	assert.Equal(t, "conv_rikkahub-identical-request-1", firstConversationID)
+	assert.Equal(t, "conv_rikkahub-identical-request-2", secondConversationID)
+}
+
+func TestResolveModerationConversationIDMatchesHistoryForAllSupportedFormats(t *testing.T) {
+	require.NoError(t, model.DB.AutoMigrate(&model.ModerationConversation{}, &model.ModerationTurn{}))
+
+	tests := []struct {
+		name      string
+		body      string
+		assistant string
+	}{
+		{
+			name:      "openai chat completions",
+			assistant: "distinctive assistant history for chat",
+			body:      `{"model":"gpt-4o","messages":[{"role":"user","content":"first user message"},{"role":"assistant","content":"distinctive assistant history for chat"},{"role":"user","content":"current user message"}]}`,
+		},
+		{
+			name:      "openai responses",
+			assistant: "distinctive assistant history for responses",
+			body:      `{"model":"gpt-4o","input":[{"type":"message","role":"user","content":"first user message"},{"type":"message","role":"assistant","content":"distinctive assistant history for responses"},{"type":"message","role":"user","content":"current user message"}]}`,
+		},
+		{
+			name:      "gemini",
+			assistant: "distinctive assistant history for gemini",
+			body:      `{"model":"gemini-2.5-pro","contents":[{"role":"user","parts":[{"text":"first user message"}]},{"role":"model","parts":[{"text":"distinctive assistant history for gemini"}]},{"role":"user","parts":[{"text":"current user message"}]}]}`,
+		},
+		{
+			name:      "gemini generateContentRequest wrapper",
+			assistant: "distinctive assistant history for gemini wrapper",
+			body:      `{"generateContentRequest":{"contents":[{"role":"user","parts":[{"text":"first user message"}]},{"role":"model","parts":[{"text":"distinctive assistant history for gemini wrapper"}]},{"role":"user","parts":[{"text":"current user message"}]}]}}`,
+		},
+		{
+			name:      "claude",
+			assistant: "distinctive assistant history for claude",
+			body:      `{"model":"claude-sonnet","messages":[{"role":"user","content":"first user message"},{"role":"assistant","content":"distinctive assistant history for claude"},{"role":"user","content":"current user message"}]}`,
+		},
+	}
+
+	userID := 950003
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			conversationKey := fmt.Sprintf("format-history-%d", time.Now().UnixNano())
+			now := time.Now().Unix()
+			conversation := &model.ModerationConversation{
+				UserID:          userID,
+				ConversationID:  conversationKey,
+				Status:          model.ModerationConversationActive,
+				FirstActivityAt: now,
+				LastActivityAt:  now,
+				ExpiresAt:       now + 3600,
+			}
+			require.NoError(t, model.DB.Create(conversation).Error)
+			turn := &model.ModerationTurn{
+				ConversationID:  conversation.ID,
+				UserID:          userID,
+				ConversationKey: conversationKey,
+				RoundNumber:     1,
+				UserPrompt:      "first user message",
+				AssistantReply:  model.ModerationText(tt.assistant),
+				ResponseStatus:  "success",
+				ExpiresAt:       now + 3600,
+			}
+			require.NoError(t, encryptModerationTurnContent(turn))
+			require.NoError(t, model.DB.Create(turn).Error)
+			t.Cleanup(func() {
+				require.NoError(t, model.DB.Where("conversation_key = ?", conversationKey).Delete(&model.ModerationTurn{}).Error)
+				require.NoError(t, model.DB.Where("conversation_id = ?", conversationKey).Delete(&model.ModerationConversation{}).Error)
+			})
+
+			recorder := httptest.NewRecorder()
+			ginContext, _ := gin.CreateTestContext(recorder)
+			ginContext.Request = httptest.NewRequest("POST", "/v1/chat/completions", strings.NewReader(tt.body))
+			storage, err := common.CreateBodyStorage([]byte(tt.body))
+			require.NoError(t, err)
+			ginContext.Set(common.KeyBodyStorage, storage)
+			t.Cleanup(func() { _ = storage.Close() })
+			common.SetContextKey(ginContext, common.RequestIdKey, "format-history-request")
+
+			assert.Equal(t, conversationKey, ResolveModerationConversationIDForUser(ginContext, userID))
+		})
+	}
+}
+
+func TestResolveModerationConversationIDDoesNotGuessBetweenSplitConversations(t *testing.T) {
+	require.NoError(t, model.DB.AutoMigrate(&model.ModerationConversation{}, &model.ModerationTurn{}))
+
+	userID := 950004
+	now := time.Now().Unix()
+	blockedKey := fmt.Sprintf("split-blocked-%d", time.Now().UnixNano())
+	activeKey := fmt.Sprintf("split-active-%d", time.Now().UnixNano())
+	blockedConversation := &model.ModerationConversation{
+		UserID:          userID,
+		ConversationID:  blockedKey,
+		Status:          model.ModerationConversationBlocked,
+		FirstActivityAt: now,
+		LastActivityAt:  now,
+		ExpiresAt:       now + 3600,
+	}
+	activeConversation := &model.ModerationConversation{
+		UserID:          userID,
+		ConversationID:  activeKey,
+		Status:          model.ModerationConversationActive,
+		FirstActivityAt: now,
+		LastActivityAt:  now,
+		ExpiresAt:       now + 3600,
+	}
+	require.NoError(t, model.DB.Create(blockedConversation).Error)
+	require.NoError(t, model.DB.Create(activeConversation).Error)
+	blockedTurn := &model.ModerationTurn{
+		ConversationID:  blockedConversation.ID,
+		UserID:          userID,
+		ConversationKey: blockedKey,
+		RoundNumber:     1,
+		UserPrompt:      "first message",
+		AssistantReply:  "distinctive blocked response from split history",
+		ResponseStatus:  "success",
+		ExpiresAt:       now + 3600,
+	}
+	activeTurn := &model.ModerationTurn{
+		ConversationID:  activeConversation.ID,
+		UserID:          userID,
+		ConversationKey: activeKey,
+		RoundNumber:     1,
+		UserPrompt:      "first message\nsecond message",
+		AssistantReply:  "distinctive active response from split history",
+		ResponseStatus:  "success",
+		ExpiresAt:       now + 3600,
+	}
+	require.NoError(t, encryptModerationTurnContent(blockedTurn))
+	require.NoError(t, encryptModerationTurnContent(activeTurn))
+	require.NoError(t, model.DB.Create(blockedTurn).Error)
+	require.NoError(t, model.DB.Create(activeTurn).Error)
+	t.Cleanup(func() {
+		require.NoError(t, model.DB.Where("conversation_key IN ?", []string{blockedKey, activeKey}).Delete(&model.ModerationTurn{}).Error)
+		require.NoError(t, model.DB.Where("conversation_id IN ?", []string{blockedKey, activeKey}).Delete(&model.ModerationConversation{}).Error)
+	})
+
+	requestBody := `{"model":"gpt-4o","messages":[{"role":"user","content":"first message"},{"role":"assistant","content":"distinctive blocked response from split history"},{"role":"user","content":"second message"},{"role":"assistant","content":"distinctive active response from split history"},{"role":"user","content":"third message"}]}`
+	recorder := httptest.NewRecorder()
+	ginContext, _ := gin.CreateTestContext(recorder)
+	ginContext.Request = httptest.NewRequest("POST", "/v1/chat/completions", strings.NewReader(requestBody))
+	storage, err := common.CreateBodyStorage([]byte(requestBody))
+	require.NoError(t, err)
+	ginContext.Set(common.KeyBodyStorage, storage)
+	t.Cleanup(func() { _ = storage.Close() })
+	common.SetContextKey(ginContext, common.RequestIdKey, "split-history-request")
+
+	resolvedKey := ResolveModerationConversationIDForUser(ginContext, userID)
+	assert.NotEqual(t, blockedKey, resolvedKey)
+	assert.NotEqual(t, activeKey, resolvedKey)
+	assert.Equal(t, "conv_split-history-request", resolvedKey)
+}
+
+func TestResolveModerationConversationIDReusesConversationAfterHistoryTruncation(t *testing.T) {
+	require.NoError(t, model.DB.AutoMigrate(&model.ModerationConversation{}, &model.ModerationTurn{}))
+
+	userID := 950001
+	conversationKey := fmt.Sprintf("rikkahub-history-%d", time.Now().UnixNano())
+	now := time.Now().Unix()
+	conversation := &model.ModerationConversation{
+		UserID:          userID,
+		ConversationID:  conversationKey,
+		Status:          model.ModerationConversationActive,
+		FirstActivityAt: now,
+		LastActivityAt:  now,
+		ExpiresAt:       now + 3600,
+	}
+	require.NoError(t, model.DB.Create(conversation).Error)
+	turn := &model.ModerationTurn{
+		ConversationID:  conversation.ID,
+		UserID:          userID,
+		ConversationKey: conversationKey,
+		RoundNumber:     1,
+		UserPrompt:      "first message",
+		AssistantReply:  "a distinctive first answer",
+		ResponseStatus:  "success",
+		ExpiresAt:       now + 3600,
+	}
+	require.NoError(t, encryptModerationTurnContent(turn))
+	require.NoError(t, model.DB.Create(turn).Error)
+	t.Cleanup(func() {
+		require.NoError(t, model.DB.Where("conversation_key = ?", conversationKey).Delete(&model.ModerationTurn{}).Error)
+		require.NoError(t, model.DB.Where("conversation_id = ?", conversationKey).Delete(&model.ModerationConversation{}).Error)
+	})
+
+	// Simulate RikkaHub's context window dropping the first user message while
+	// retaining the previous assistant response in the next request.
+	requestBody := `{"model":"gpt-4o","messages":[{"role":"assistant","content":"a distinctive first answer"},{"role":"user","content":"second message"}]}`
+	recorder := httptest.NewRecorder()
+	ginContext, _ := gin.CreateTestContext(recorder)
+	ginContext.Request = httptest.NewRequest("POST", "/v1/chat/completions", strings.NewReader(requestBody))
+	storage, err := common.CreateBodyStorage([]byte(requestBody))
+	require.NoError(t, err)
+	ginContext.Set(common.KeyBodyStorage, storage)
+	t.Cleanup(func() { _ = storage.Close() })
+	common.SetContextKey(ginContext, common.RequestIdKey, "rikkahub-history-request")
+
+	assert.Equal(t, conversationKey, ResolveModerationConversationIDForUser(ginContext, userID))
 }
 
 func TestExtractReviewJSONSupportsChoicesAndDirectMap(t *testing.T) {
@@ -858,6 +1139,9 @@ func TestFinalizeModerationUserWhitelist(t *testing.T) {
 
 func TestModerationViolationRetentionWindow(t *testing.T) {
 	require.NoError(t, model.DB.AutoMigrate(
+		&model.ModerationConversation{},
+		&model.ModerationTurn{},
+		&model.ModerationJob{},
 		&model.ModerationViolation{},
 		&model.ModerationNotification{},
 		&model.ModerationTokenState{},
@@ -898,6 +1182,35 @@ func TestModerationViolationRetentionWindow(t *testing.T) {
 	t.Cleanup(func() {
 		_ = model.DB.Where("user_id = ?", userID).Delete(&model.ModerationViolation{}).Error
 	})
+
+	// The active retention configuration is authoritative even for rows whose
+	// original expiry was written under a longer configuration.
+	staleConversation := &model.ModerationConversation{
+		UserID:          userID,
+		ConversationID:  "conv-stale-retention",
+		Status:          model.ModerationConversationActive,
+		FirstActivityAt: now - 2*24*3600,
+		LastActivityAt:  now - 2*24*3600,
+		ExpiresAt:       now + 4*24*3600,
+	}
+	require.NoError(t, model.DB.Create(staleConversation).Error)
+	staleTurn := &model.ModerationTurn{
+		ConversationID:  staleConversation.ID,
+		UserID:          userID,
+		ConversationKey: staleConversation.ConversationID,
+		RoundNumber:     1,
+		ResponseStatus:  "success",
+		CreatedAt:       now - 2*24*3600,
+		ExpiresAt:       now + 4*24*3600,
+	}
+	require.NoError(t, model.DB.Create(staleTurn).Error)
+	require.NoError(t, model.DeleteExpiredModerationContent(now, 24*3600))
+	var staleConversationCount int64
+	require.NoError(t, model.DB.Model(&model.ModerationConversation{}).Where("id = ?", staleConversation.ID).Count(&staleConversationCount).Error)
+	assert.Zero(t, staleConversationCount)
+	var staleTurnCount int64
+	require.NoError(t, model.DB.Model(&model.ModerationTurn{}).Where("id = ?", staleTurn.ID).Count(&staleTurnCount).Error)
+	assert.Zero(t, staleTurnCount)
 
 	// Default cutoff (7 days ago) should only count the recent one
 	count, err := model.CountRecentUserModerationViolationsWithTx(model.DB, userID, 0)

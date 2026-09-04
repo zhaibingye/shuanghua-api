@@ -220,7 +220,10 @@ func ListContentModerationConversations(c *gin.Context) {
 	})
 	limit := parseModerationLimit(c.Query("limit"))
 	offset := parseModerationOffset(c.Query("offset"))
-	query := model.DB.Model(&model.ModerationConversation{})
+	now := common.GetTimestamp()
+	cutoff := now - int64(setting.GetContentModerationSetting().GetViolationRetentionDuration().Seconds())
+	query := model.DB.Model(&model.ModerationConversation{}).
+		Where("expires_at > ? AND last_activity_at >= ?", now, cutoff)
 	if userID := parsePositiveInt(c.Query("user_id")); userID > 0 {
 		query = query.Where("user_id = ?", userID)
 	}
@@ -257,7 +260,9 @@ func GetContentModerationConversation(c *gin.Context) {
 		return
 	}
 	var conversation model.ModerationConversation
-	if err := model.DB.First(&conversation, conversationID).Error; err != nil {
+	now := common.GetTimestamp()
+	cutoff := now - int64(setting.GetContentModerationSetting().GetViolationRetentionDuration().Seconds())
+	if err := model.DB.Where("id = ? AND expires_at > ? AND last_activity_at >= ?", conversationID, now, cutoff).First(&conversation).Error; err != nil {
 		writeModerationDatabaseError(c, err)
 		return
 	}
@@ -266,19 +271,19 @@ func GetContentModerationConversation(c *gin.Context) {
 	violations := make([]model.ModerationViolation, 0)
 	actions := make([]model.ModerationAction, 0)
 	notifications := make([]model.ModerationNotification, 0)
-	if err := model.DB.Where("conversation_id = ?", conversationID).Order("round_number asc").Find(&turns).Error; err != nil {
+	if err := model.DB.Where("conversation_id = ? AND created_at >= ? AND expires_at > ?", conversationID, cutoff, now).Order("round_number asc").Find(&turns).Error; err != nil {
 		writeModerationDatabaseError(c, err)
 		return
 	}
-	if err := model.DB.Where("conversation_id = ?", conversationID).Order("id asc").Find(&jobs).Error; err != nil {
+	if err := model.DB.Where("conversation_id = ? AND created_at >= ? AND expires_at > ?", conversationID, cutoff, now).Order("id asc").Find(&jobs).Error; err != nil {
 		writeModerationDatabaseError(c, err)
 		return
 	}
-	if err := model.DB.Where("user_id = ? AND conversation_id = ?", conversation.UserID, conversation.ConversationID).Order("id asc").Find(&violations).Error; err != nil {
+	if err := model.DB.Where("user_id = ? AND conversation_id = ? AND created_at >= ? AND expires_at > ?", conversation.UserID, conversation.ConversationID, cutoff, now).Order("id asc").Find(&violations).Error; err != nil {
 		writeModerationDatabaseError(c, err)
 		return
 	}
-	if err := model.DB.Where("user_id = ? AND conversation_id = ?", conversation.UserID, conversation.ConversationID).Order("id asc").Find(&actions).Error; err != nil {
+	if err := model.DB.Where("user_id = ? AND conversation_id = ? AND created_at >= ?", conversation.UserID, conversation.ConversationID, cutoff).Order("id asc").Find(&actions).Error; err != nil {
 		writeModerationDatabaseError(c, err)
 		return
 	}
@@ -415,7 +420,10 @@ func ListContentModerationViolations(c *gin.Context) {
 	})
 	limit := parseModerationLimit(c.Query("limit"))
 	offset := parseModerationOffset(c.Query("offset"))
-	query := model.DB.Model(&model.ModerationViolation{})
+	now := common.GetTimestamp()
+	cutoff := now - int64(setting.GetContentModerationSetting().GetViolationRetentionDuration().Seconds())
+	query := model.DB.Model(&model.ModerationViolation{}).
+		Where("expires_at > ? AND created_at >= ?", now, cutoff)
 	if userID := parsePositiveInt(c.Query("user_id")); userID > 0 {
 		query = query.Where("user_id = ?", userID)
 	}
@@ -442,6 +450,127 @@ func ListContentModerationViolations(c *gin.Context) {
 		return
 	}
 	c.JSON(http.StatusOK, gin.H{"success": true, "data": violations, "total": total})
+}
+
+func ListContentModerationUsers(c *gin.Context) {
+	recordManageAudit(c, "moderation.users_list", map[string]interface{}{
+		"user_id": c.Query("user_id"),
+		"status":  c.Query("status"),
+	})
+	users, total, err := service.ListModerationUsers(
+		strings.TrimSpace(c.Query("status")),
+		parsePositiveInt(c.Query("user_id")),
+		parseModerationLimit(c.Query("limit")),
+		parseModerationOffset(c.Query("offset")),
+	)
+	if err != nil {
+		writeModerationDatabaseError(c, err)
+		return
+	}
+	c.JSON(http.StatusOK, gin.H{"success": true, "data": users, "total": total})
+}
+
+func GetContentModerationUser(c *gin.Context) {
+	userID := parsePositiveInt(c.Param("id"))
+	if userID <= 0 {
+		c.JSON(http.StatusBadRequest, gin.H{"success": false, "message": "invalid user id"})
+		return
+	}
+	recordManageAudit(c, "moderation.user_view", map[string]interface{}{"id": userID})
+	detail, err := service.GetModerationUserDetail(userID, strings.TrimSpace(c.Query("conversation_mode")))
+	if err != nil {
+		writeModerationDatabaseError(c, err)
+		return
+	}
+	c.JSON(http.StatusOK, gin.H{"success": true, "data": detail})
+}
+
+func UpdateContentModerationUser(c *gin.Context) {
+	userID := parsePositiveInt(c.Param("id"))
+	if userID <= 0 {
+		c.JSON(http.StatusBadRequest, gin.H{"success": false, "message": "invalid user id"})
+		return
+	}
+	if err := validateModerationTargetRole(c, userID); err != nil {
+		writeModerationDatabaseError(c, err)
+		return
+	}
+	var request struct {
+		ViolationCount *int   `json:"violation_count"`
+		Note           string `json:"note"`
+	}
+	if err := common.DecodeJson(c.Request.Body, &request); err != nil || request.ViolationCount == nil {
+		c.JSON(http.StatusBadRequest, gin.H{"success": false, "message": "invalid moderation user record"})
+		return
+	}
+	if err := service.UpdateModerationUserRecord(userID, c.GetInt("id"), c.GetInt("role"), *request.ViolationCount, request.Note); err != nil {
+		writeModerationDatabaseError(c, err)
+		return
+	}
+	recordManageAudit(c, "moderation.user_update", map[string]interface{}{
+		"id":              userID,
+		"violation_count": *request.ViolationCount,
+	})
+	c.JSON(http.StatusOK, gin.H{"success": true})
+}
+
+func UpdateContentModerationUserStatus(c *gin.Context) {
+	userID := parsePositiveInt(c.Param("id"))
+	if userID <= 0 {
+		c.JSON(http.StatusBadRequest, gin.H{"success": false, "message": "invalid user id"})
+		return
+	}
+	if err := validateModerationTargetRole(c, userID); err != nil {
+		writeModerationDatabaseError(c, err)
+		return
+	}
+	var request struct {
+		Enabled *bool  `json:"enabled"`
+		Reason  string `json:"reason"`
+	}
+	if err := common.DecodeJson(c.Request.Body, &request); err != nil || request.Enabled == nil {
+		c.JSON(http.StatusBadRequest, gin.H{"success": false, "message": "invalid account status request"})
+		return
+	}
+	if err := service.SetModerationUserAccountStatus(userID, c.GetInt("id"), c.GetInt("role"), *request.Enabled, request.Reason); err != nil {
+		writeModerationDatabaseError(c, err)
+		return
+	}
+	action := "disabled"
+	if *request.Enabled {
+		action = "enabled"
+	}
+	recordManageAudit(c, "moderation.user_status", map[string]interface{}{"id": userID, "status": action})
+	c.JSON(http.StatusOK, gin.H{"success": true})
+}
+
+func DeleteContentModerationUserHistory(c *gin.Context) {
+	userID := parsePositiveInt(c.Param("id"))
+	if userID <= 0 {
+		c.JSON(http.StatusBadRequest, gin.H{"success": false, "message": "invalid user id"})
+		return
+	}
+	if err := validateModerationTargetRole(c, userID); err != nil {
+		writeModerationDatabaseError(c, err)
+		return
+	}
+	if err := service.DeleteModerationUserHistory(userID, c.GetInt("id"), c.GetInt("role")); err != nil {
+		writeModerationDatabaseError(c, err)
+		return
+	}
+	recordManageAudit(c, "moderation.user_history_delete", map[string]interface{}{"id": userID})
+	c.JSON(http.StatusOK, gin.H{"success": true})
+}
+
+func validateModerationTargetRole(c *gin.Context, userID int) error {
+	var target model.User
+	if err := model.DB.Unscoped().Select("role").First(&target, userID).Error; err != nil {
+		return err
+	}
+	if !canManageTargetRole(c.GetInt("role"), target.Role) {
+		return service.ErrModerationUserPermissionDenied
+	}
+	return nil
 }
 
 func parseModerationLimit(value string) int {
@@ -480,11 +609,19 @@ func parsePositiveInt64(value string) int64 {
 }
 
 func writeModerationDatabaseError(c *gin.Context, err error) {
+	if errors.Is(err, service.ErrModerationUserPermissionDenied) {
+		c.JSON(http.StatusForbidden, gin.H{"success": false, "message": err.Error()})
+		return
+	}
+	if errors.Is(err, service.ErrInvalidModerationUserRequest) {
+		c.JSON(http.StatusBadRequest, gin.H{"success": false, "message": err.Error()})
+		return
+	}
 	if errors.Is(err, gorm.ErrRecordNotFound) {
 		c.JSON(http.StatusNotFound, gin.H{"success": false, "message": "content moderation record not found"})
 		return
 	}
-	if errors.Is(err, model.ErrModerationAccountNotDisabled) {
+	if errors.Is(err, model.ErrModerationAccountNotDisabled) || errors.Is(err, model.ErrModerationUserHistoryOnly) {
 		c.JSON(http.StatusConflict, gin.H{"success": false, "message": err.Error()})
 		return
 	}

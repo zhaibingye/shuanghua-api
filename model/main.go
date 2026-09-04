@@ -1,6 +1,7 @@
 package model
 
 import (
+	"errors"
 	"fmt"
 	"log"
 	"net/url"
@@ -314,6 +315,170 @@ func is64BitIntegerType(dbType common.DatabaseType, dataType string) bool {
 	}
 }
 
+type moderationViolationIndexColumn struct {
+	Name string `gorm:"column:column_name"`
+}
+
+func moderationViolationIndexInfo(indexName string) (bool, bool, []string, error) {
+	const tableName = "moderation_violations"
+	if DB == nil {
+		return false, false, nil, errors.New("database is unavailable")
+	}
+	desiredDatabase := common.MainDatabaseType()
+	var columns []moderationViolationIndexColumn
+	indexExists := false
+	indexUnique := false
+	switch desiredDatabase {
+	case common.DatabaseTypeSQLite:
+		var indexes []struct {
+			Name   string `gorm:"column:name"`
+			Unique int    `gorm:"column:unique"`
+		}
+		if err := DB.Raw("PRAGMA index_list('moderation_violations')").Scan(&indexes).Error; err != nil {
+			return false, false, nil, err
+		}
+		for _, index := range indexes {
+			if index.Name == indexName {
+				indexExists = true
+				indexUnique = index.Unique == 1
+				break
+			}
+		}
+		if indexExists {
+			var indexColumns []struct {
+				Seq  int    `gorm:"column:seqno"`
+				Name string `gorm:"column:name"`
+			}
+			if err := DB.Raw("PRAGMA index_info('idx_moderation_violations_user_conversation_actor')").Scan(&indexColumns).Error; err != nil {
+				return false, false, nil, err
+			}
+			for _, column := range indexColumns {
+				columns = append(columns, moderationViolationIndexColumn{Name: column.Name})
+			}
+		}
+	case common.DatabaseTypeMySQL:
+		var indexColumns []struct {
+			NonUnique  int    `gorm:"column:non_unique"`
+			ColumnName string `gorm:"column:column_name"`
+		}
+		if err := DB.Raw("SELECT NON_UNIQUE AS non_unique, COLUMN_NAME AS column_name FROM information_schema.statistics WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = ? AND INDEX_NAME = ? ORDER BY SEQ_IN_INDEX", tableName, indexName).Scan(&indexColumns).Error; err != nil {
+			return false, false, nil, err
+		}
+		if len(indexColumns) > 0 {
+			indexExists = true
+			indexUnique = indexColumns[0].NonUnique == 0
+			for _, column := range indexColumns {
+				columns = append(columns, moderationViolationIndexColumn{Name: column.ColumnName})
+			}
+		}
+	case common.DatabaseTypePostgreSQL:
+		var indexCount int64
+		if err := DB.Raw("SELECT COUNT(*) FROM pg_indexes WHERE schemaname = current_schema() AND tablename = ? AND indexname = ?", tableName, indexName).Scan(&indexCount).Error; err != nil {
+			return false, false, nil, err
+		}
+		indexExists = indexCount > 0
+		if indexExists {
+			var indexRows []struct {
+				Unique     bool   `gorm:"column:is_unique"`
+				ColumnName string `gorm:"column:column_name"`
+			}
+			if err := DB.Raw(`
+				SELECT i.indisunique AS is_unique, a.attname AS column_name
+				FROM pg_class AS table_class
+				JOIN pg_index AS i ON i.indrelid = table_class.oid
+				JOIN pg_class AS index_class ON index_class.oid = i.indexrelid
+				JOIN LATERAL unnest(i.indkey) WITH ORDINALITY AS key_columns(attnum, ordinal) ON true
+				JOIN pg_attribute AS a ON a.attrelid = table_class.oid AND a.attnum = key_columns.attnum
+				WHERE table_class.relnamespace = current_schema()::regnamespace
+				  AND table_class.relname = ?
+				  AND index_class.relname = ?
+				ORDER BY key_columns.ordinal`, tableName, indexName).Scan(&indexRows).Error; err != nil {
+				return false, false, nil, err
+			}
+			if len(indexRows) > 0 {
+				indexUnique = indexRows[0].Unique
+				for _, column := range indexRows {
+					columns = append(columns, moderationViolationIndexColumn{Name: column.ColumnName})
+				}
+			}
+		}
+	default:
+		return false, false, nil, fmt.Errorf("unsupported primary database type: %s", desiredDatabase)
+	}
+	return indexExists, indexUnique, func() []string {
+		result := make([]string, 0, len(columns))
+		for _, column := range columns {
+			result = append(result, column.Name)
+		}
+		return result
+	}(), nil
+}
+
+func migrateModerationViolationUniqueIndex() error {
+	const indexName = "idx_moderation_violations_user_conversation_actor"
+	migrator := DB.Migrator()
+	if !migrator.HasTable(&ModerationViolation{}) {
+		return nil
+	}
+	indexExists, indexUnique, columns, err := moderationViolationIndexInfo(indexName)
+	if err != nil {
+		return err
+	}
+	desiredColumns := []string{"user_id", "conversation_id", "turn_id", "user_violation"}
+	indexIsCurrent := indexUnique && len(columns) == len(desiredColumns)
+	if indexIsCurrent {
+		for i := range desiredColumns {
+			if columns[i] != desiredColumns[i] {
+				indexIsCurrent = false
+				break
+			}
+		}
+	}
+	if indexIsCurrent {
+		return nil
+	}
+	// The previous index did not include the user or turn, and old versions
+	// could also have rows that differ only by actor. Keep the first row for
+	// each moderation event before installing the stricter idempotency key.
+	var violations []ModerationViolation
+	if err := DB.Select("id, user_id, conversation_id, turn_id, user_violation").
+		Order("id asc").Find(&violations).Error; err != nil {
+		return err
+	}
+	type eventKey struct {
+		UserID         int
+		ConversationID string
+		TurnID         int64
+		UserViolation  bool
+	}
+	seen := make(map[eventKey]struct{}, len(violations))
+	duplicateIDs := make([]int64, 0)
+	for _, violation := range violations {
+		key := eventKey{violation.UserID, violation.ConversationID, violation.TurnID, violation.UserViolation}
+		if _, exists := seen[key]; exists {
+			duplicateIDs = append(duplicateIDs, violation.ID)
+			continue
+		}
+		seen[key] = struct{}{}
+	}
+	const deleteBatchSize = 500
+	for start := 0; start < len(duplicateIDs); start += deleteBatchSize {
+		end := start + deleteBatchSize
+		if end > len(duplicateIDs) {
+			end = len(duplicateIDs)
+		}
+		if err := DB.Where("id IN ?", duplicateIDs[start:end]).Delete(&ModerationViolation{}).Error; err != nil {
+			return err
+		}
+	}
+	if indexExists {
+		if err := migrator.DropIndex(&ModerationViolation{}, indexName); err != nil {
+			return err
+		}
+	}
+	return migrator.CreateIndex(&ModerationViolation{}, indexName)
+}
+
 func migrateDB() error {
 	if err := migrateTokenKeyUniqueness(DB); err != nil {
 		return err
@@ -357,6 +522,7 @@ func migrateDB() error {
 		&ModerationTurn{},
 		&ModerationTokenState{},
 		&ModerationAccountState{},
+		&ModerationUserRecord{},
 		&ModerationJob{},
 		&ModerationViolation{},
 		&ModerationNotification{},
@@ -376,6 +542,9 @@ func migrateDB() error {
 	if err != nil {
 		return err
 	}
+	if err := migrateModerationViolationUniqueIndex(); err != nil {
+		return err
+	}
 	if err := InitializeUserAuthVersions(); err != nil {
 		return err
 	}
@@ -391,6 +560,110 @@ func migrateDB() error {
 			return err
 		}
 	}
+<<<<<<< HEAD
+=======
+	if err := EnsureInviteStatisticsSynced(); err != nil {
+		return err
+	}
+	return nil
+}
+
+func migrateDBFast() error {
+
+	var wg sync.WaitGroup
+
+	migrations := []struct {
+		model interface{}
+		name  string
+	}{
+		{&Channel{}, "Channel"},
+		{&Token{}, "Token"},
+		{&User{}, "User"},
+		{&UserSession{}, "UserSession"},
+		{&AuthFlow{}, "AuthFlow"},
+		{&ExternalIdentityClaim{}, "ExternalIdentityClaim"},
+		{&PasskeyCredential{}, "PasskeyCredential"},
+		{&Option{}, "Option"},
+		{&Redemption{}, "Redemption"},
+		{&Ability{}, "Ability"},
+		{&Log{}, "Log"},
+		{&Midjourney{}, "Midjourney"},
+		{&TopUp{}, "TopUp"},
+		{&QuotaData{}, "QuotaData"},
+		{&Task{}, "Task"},
+		{&Model{}, "Model"},
+		{&Vendor{}, "Vendor"},
+		{&PrefillGroup{}, "PrefillGroup"},
+		{&Setup{}, "Setup"},
+		{&TwoFA{}, "TwoFA"},
+		{&TwoFABackupCode{}, "TwoFABackupCode"},
+		{&Checkin{}, "Checkin"},
+		{&InviteRebate{}, "InviteRebate"},
+		{&ModerationConversation{}, "ModerationConversation"},
+		{&ModerationTurn{}, "ModerationTurn"},
+		{&ModerationTokenState{}, "ModerationTokenState"},
+		{&ModerationAccountState{}, "ModerationAccountState"},
+		{&ModerationUserRecord{}, "ModerationUserRecord"},
+		{&ModerationJob{}, "ModerationJob"},
+		{&ModerationViolation{}, "ModerationViolation"},
+		{&ModerationNotification{}, "ModerationNotification"},
+		{&ModerationAction{}, "ModerationAction"},
+		{&SubscriptionOrder{}, "SubscriptionOrder"},
+		{&UserSubscription{}, "UserSubscription"},
+		{&SubscriptionPreConsumeRecord{}, "SubscriptionPreConsumeRecord"},
+		{&CustomOAuthProvider{}, "CustomOAuthProvider"},
+		{&UserOAuthBinding{}, "UserOAuthBinding"},
+		{&PerfMetric{}, "PerfMetric"},
+		{&SystemInstance{}, "SystemInstance"},
+		{&SystemTask{}, "SystemTask"},
+		{&SystemTaskLock{}, "SystemTaskLock"},
+	}
+	// 动态计算migration数量，确保errChan缓冲区足够大
+	errChan := make(chan error, len(migrations))
+
+	for _, m := range migrations {
+		wg.Add(1)
+		go func(model interface{}, name string) {
+			defer wg.Done()
+			if err := DB.AutoMigrate(model); err != nil {
+				errChan <- fmt.Errorf("failed to migrate %s: %v", name, err)
+			}
+		}(m.model, m.name)
+	}
+
+	// Wait for all migrations to complete
+	wg.Wait()
+	close(errChan)
+
+	// Check for any errors
+	for err := range errChan {
+		if err != nil {
+			return err
+		}
+	}
+	if err := migrateModerationViolationUniqueIndex(); err != nil {
+		return err
+	}
+	if err := InitializeUserAuthVersions(); err != nil {
+		return err
+	}
+	if err := InitializeExternalIdentityClaims(); err != nil {
+		return err
+	}
+	if common.UsingMainDatabase(common.DatabaseTypeSQLite) {
+		if err := ensureSubscriptionPlanTableSQLite(); err != nil {
+			return err
+		}
+	} else {
+		if err := DB.AutoMigrate(&SubscriptionPlan{}); err != nil {
+			return err
+		}
+	}
+	if err := EnsureInviteStatisticsSynced(); err != nil {
+		return err
+	}
+	common.SysLog("database migrated")
+>>>>>>> 100e6b1 (feat: enhance content moderation user management)
 	return nil
 }
 

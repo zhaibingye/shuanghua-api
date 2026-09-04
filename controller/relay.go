@@ -134,14 +134,7 @@ func Relay(c *gin.Context, relayFormat types.RelayFormat) {
 	isResponsesCompaction := relayInfo.RelayMode == relayconstant.RelayModeResponsesCompact
 	isUserWhitelisted := relayInfo.UserId > 0 && moderationConfig.IsUserWhitelisted(relayInfo.UserId)
 	if moderationEnabled && !isGeminiCountTokens && !isResponsesCompaction && !isUserWhitelisted && service.IsModerationRequestSupported(request) {
-		conversationID := service.ResolveModerationConversationID(c)
-		if conversationID == "" {
-			reqID := relayInfo.RequestId
-			if reqID == "" {
-				reqID = common.NewRequestId()
-			}
-			conversationID = "conv_" + reqID
-		}
+		conversationID := service.ResolveModerationConversationIDForUser(c, relayInfo.UserId)
 		common.SetContextKey(c, constant.ContextKeyModerationConversationID, conversationID)
 		c.Header("X-Conversation-ID", conversationID)
 		if relayInfo.UserId > 0 {

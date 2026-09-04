@@ -24,6 +24,8 @@ import type {
   ContentModerationSettingsUpdate,
   ModerationConversationDetailResponse,
   ModerationConversationListResponse,
+  ModerationUserDetailResponse,
+  ModerationUserListResponse,
   ModerationViolationListResponse,
   FetchUpstreamRatiosRequest,
   LogCleanupTask,
@@ -116,6 +118,62 @@ export async function restoreContentModerationUser(id: number, reason: string) {
   const res = await api.post<{ success: boolean }>(
     `/api/moderation/users/${id}/restore`,
     { reason }
+  )
+  return res.data
+}
+
+export async function listContentModerationUsers(params?: {
+  status?: 'active' | 'history' | 'all'
+  user_id?: number
+  limit?: number
+  offset?: number
+}) {
+  const res = await api.get<ModerationUserListResponse>(
+    '/api/moderation/users',
+    {
+      params,
+    }
+  )
+  return res.data
+}
+
+export async function getContentModerationUser(
+  id: number,
+  conversationMode: 'violations' | 'all' = 'violations'
+) {
+  const res = await api.get<ModerationUserDetailResponse>(
+    `/api/moderation/users/${id}`,
+    { params: { conversation_mode: conversationMode } }
+  )
+  return res.data
+}
+
+export async function updateContentModerationUser(
+  id: number,
+  payload: { violation_count: number; note: string }
+) {
+  const res = await api.put<{ success: boolean }>(
+    `/api/moderation/users/${id}`,
+    payload
+  )
+  return res.data
+}
+
+export async function updateContentModerationUserStatus(
+  id: number,
+  enabled: boolean,
+  reason: string
+) {
+  const res = await api.patch<{ success: boolean }>(
+    `/api/moderation/users/${id}/status`,
+    { enabled, reason }
+  )
+  return res.data
+}
+
+export async function deleteContentModerationUserHistory(id: number) {
+  const res = await api.delete<{ success: boolean }>(
+    `/api/moderation/users/${id}/history`
   )
   return res.data
 }

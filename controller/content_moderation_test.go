@@ -40,6 +40,56 @@ func setupModerationTestDB(t *testing.T) {
 	model.InitOptionMap()
 }
 
+func TestModerationUserStatusRejectsPeerAdministrator(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	setupModerationTestDB(t)
+
+	target := &model.User{Id: 2, Username: "target-admin", Password: "password", Role: common.RoleAdminUser, Status: common.UserStatusEnabled, AffCode: "target-admin-aff"}
+	require.NoError(t, model.DB.Create(target).Error)
+
+	recorder := httptest.NewRecorder()
+	c, _ := gin.CreateTestContext(recorder)
+	c.Request = httptest.NewRequest(http.MethodPatch, "/api/moderation/users/2/status", strings.NewReader(`{"enabled":false,"reason":"should be rejected"}`))
+	c.Set("id", 3)
+	c.Set("role", common.RoleAdminUser)
+	c.Params = gin.Params{{Key: "id", Value: "2"}}
+
+	UpdateContentModerationUserStatus(c)
+	require.Equal(t, http.StatusForbidden, recorder.Code)
+}
+
+func TestModerationUserMutationsRequireExplicitValues(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	setupModerationTestDB(t)
+
+	target := &model.User{Id: 2, Username: "target-user", Password: "password", Role: common.RoleCommonUser, Status: common.UserStatusEnabled, AffCode: "target-user-aff"}
+	require.NoError(t, model.DB.Create(target).Error)
+
+	tests := []struct {
+		name    string
+		method  string
+		path    string
+		body    string
+		handler gin.HandlerFunc
+	}{
+		{name: "missing violation count", method: http.MethodPut, path: "/api/moderation/users/2", body: `{"note":"must not clear the count"}`, handler: UpdateContentModerationUser},
+		{name: "missing account enabled flag", method: http.MethodPatch, path: "/api/moderation/users/2/status", body: `{"reason":"must not disable the account"}`, handler: UpdateContentModerationUserStatus},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			recorder := httptest.NewRecorder()
+			c, _ := gin.CreateTestContext(recorder)
+			c.Request = httptest.NewRequest(tt.method, tt.path, strings.NewReader(tt.body))
+			c.Set("id", 3)
+			c.Set("role", common.RoleAdminUser)
+			c.Params = gin.Params{{Key: "id", Value: "2"}}
+
+			tt.handler(c)
+			require.Equal(t, http.StatusBadRequest, recorder.Code)
+		})
+	}
+}
+
 func TestUpdateContentModerationSettingsAllowsCustomHTTPURLAndPolicyPrompt(t *testing.T) {
 	gin.SetMode(gin.TestMode)
 	setupModerationTestDB(t)

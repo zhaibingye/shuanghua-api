@@ -306,6 +306,11 @@ func SetApiRouter(router *gin.Engine) {
 			moderationRoute.POST("/conversations/:id/unblock", middleware.AdminAuth(), controller.UnblockContentModerationConversation)
 			moderationRoute.GET("/violations", middleware.AdminAuth(), controller.ListContentModerationViolations)
 			moderationRoute.POST("/violations/:id/resolve", middleware.AdminAuth(), controller.ResolveContentModerationViolation)
+			moderationRoute.GET("/users", middleware.AdminAuth(), controller.ListContentModerationUsers)
+			moderationRoute.GET("/users/:id", middleware.AdminAuth(), controller.GetContentModerationUser)
+			moderationRoute.PUT("/users/:id", middleware.AdminAuth(), controller.UpdateContentModerationUser)
+			moderationRoute.PATCH("/users/:id/status", middleware.AdminAuth(), controller.UpdateContentModerationUserStatus)
+			moderationRoute.DELETE("/users/:id/history", middleware.AdminAuth(), controller.DeleteContentModerationUserHistory)
 			moderationRoute.POST("/users/:id/restore", middleware.RootAuth(), controller.RestoreContentModerationUser)
 		}
 
