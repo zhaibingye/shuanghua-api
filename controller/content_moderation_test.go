@@ -185,6 +185,81 @@ func TestUpdateContentModerationSettingsResetsEmptyPolicyPromptToDefault(t *test
 	assert.Equal(t, setting.DefaultContentModerationPolicyPrompt, getResp.Data.PolicyPrompt)
 }
 
+func TestUpdateContentModerationSettingsChannels(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	setupModerationTestDB(t)
+
+	// Valid update with mixed delimiters (comma, full-width comma, spaces)
+	updateReqBody := `{
+		"enabled": true,
+		"channels": "10, 2， 5 10",
+		"provider": "responses",
+		"base_url": "http://66.154.103.123:8317/v1/responses",
+		"api_key": "test-key",
+		"model": "gpt-4o-mini",
+		"timeout_seconds": 30,
+		"max_retries": 3,
+		"normal_sample_rate": 10,
+		"elevated_sample_rate": 50,
+		"prompt_version": "v1",
+		"policy_prompt": "Policy"
+	}`
+
+	recorder := httptest.NewRecorder()
+	c, _ := gin.CreateTestContext(recorder)
+	c.Request = httptest.NewRequest(http.MethodPut, "/api/moderation/settings", strings.NewReader(updateReqBody))
+	c.Request.Header.Set("Content-Type", "application/json")
+	c.Set("id", 1)
+	c.Set("role", 100)
+
+	UpdateContentModerationSettings(c)
+	require.Equal(t, http.StatusOK, recorder.Code)
+
+	// Verify GET returns normalized channels and channel_ids
+	getRecorder := httptest.NewRecorder()
+	getC, _ := gin.CreateTestContext(getRecorder)
+	getC.Request = httptest.NewRequest(http.MethodGet, "/api/moderation/settings", nil)
+	getC.Set("id", 1)
+	getC.Set("role", 100)
+
+	GetContentModerationSettings(getC)
+	require.Equal(t, http.StatusOK, getRecorder.Code)
+
+	var getResp struct {
+		Success bool                              `json:"success"`
+		Data    contentModerationSettingsResponse `json:"data"`
+	}
+	require.NoError(t, common.Unmarshal(getRecorder.Body.Bytes(), &getResp))
+	assert.True(t, getResp.Success)
+	assert.Equal(t, "2, 5, 10", getResp.Data.Channels)
+	assert.Equal(t, []int{2, 5, 10}, getResp.Data.ChannelIDs)
+
+	// Invalid update with non-integer channel ID
+	invalidReqBody := `{
+		"enabled": true,
+		"channels": "1, abc, 3",
+		"provider": "responses",
+		"base_url": "http://66.154.103.123:8317/v1/responses",
+		"api_key": "test-key",
+		"model": "gpt-4o-mini",
+		"timeout_seconds": 30,
+		"max_retries": 3,
+		"normal_sample_rate": 10,
+		"elevated_sample_rate": 50,
+		"prompt_version": "v1",
+		"policy_prompt": "Policy"
+	}`
+	badRecorder := httptest.NewRecorder()
+	badC, _ := gin.CreateTestContext(badRecorder)
+	badC.Request = httptest.NewRequest(http.MethodPut, "/api/moderation/settings", strings.NewReader(invalidReqBody))
+	badC.Request.Header.Set("Content-Type", "application/json")
+	badC.Set("id", 1)
+	badC.Set("role", 100)
+
+	UpdateContentModerationSettings(badC)
+	assert.Equal(t, http.StatusBadRequest, badRecorder.Code)
+}
+
 func TestListContentModerationConversationsFiltering(t *testing.T) {
 	gin.SetMode(gin.TestMode)
 	setupModerationTestDB(t)
@@ -287,4 +362,111 @@ func TestListContentModerationConversationsFiltering(t *testing.T) {
 			assert.Len(t, resp.Data, tt.expectedCount)
 		})
 	}
+}
+
+func TestUpdateContentModerationSettingsUserWhitelistAndRetentionDays(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	setupModerationTestDB(t)
+
+	// Verify defaults initially
+	getRecorder := httptest.NewRecorder()
+	getC, _ := gin.CreateTestContext(getRecorder)
+	getC.Request = httptest.NewRequest(http.MethodGet, "/api/moderation/settings", nil)
+	getC.Set("id", 1)
+	getC.Set("role", 100)
+
+	GetContentModerationSettings(getC)
+	require.Equal(t, http.StatusOK, getRecorder.Code)
+
+	var initialResp struct {
+		Success bool                              `json:"success"`
+		Data    contentModerationSettingsResponse `json:"data"`
+	}
+	require.NoError(t, common.Unmarshal(getRecorder.Body.Bytes(), &initialResp))
+	assert.Equal(t, "1", initialResp.Data.UserWhitelist)
+	assert.Equal(t, []int{1}, initialResp.Data.UserWhitelistIDs)
+	assert.Equal(t, 7, initialResp.Data.ViolationRetentionDays)
+
+	// Update user whitelist to "2, 5" and retention days to 14
+	// Note: root admin ID 1 should automatically be included!
+	updateReqBody := `{
+		"enabled": false,
+		"channels": "1, 2",
+		"user_whitelist": "2, 5",
+		"violation_retention_days": 14,
+		"provider": "responses",
+		"base_url": "",
+		"api_key": "",
+		"model": "gpt-4o-mini",
+		"timeout_seconds": 30,
+		"max_retries": 3,
+		"normal_sample_rate": 10,
+		"elevated_sample_rate": 50,
+		"prompt_version": "v1",
+		"policy_prompt": "Standard policy"
+	}`
+
+	recorder := httptest.NewRecorder()
+	c, _ := gin.CreateTestContext(recorder)
+	c.Request = httptest.NewRequest(http.MethodPut, "/api/moderation/settings", strings.NewReader(updateReqBody))
+	c.Request.Header.Set("Content-Type", "application/json")
+	c.Set("id", 1)
+	c.Set("role", 100)
+
+	UpdateContentModerationSettings(c)
+	require.Equal(t, http.StatusOK, recorder.Code)
+
+	// Verify updated values via GET
+	getRecorder2 := httptest.NewRecorder()
+	getC2, _ := gin.CreateTestContext(getRecorder2)
+	getC2.Request = httptest.NewRequest(http.MethodGet, "/api/moderation/settings", nil)
+	getC2.Set("id", 1)
+	getC2.Set("role", 100)
+
+	GetContentModerationSettings(getC2)
+	require.Equal(t, http.StatusOK, getRecorder2.Code)
+
+	var updatedResp struct {
+		Success bool                              `json:"success"`
+		Data    contentModerationSettingsResponse `json:"data"`
+	}
+	require.NoError(t, common.Unmarshal(getRecorder2.Body.Bytes(), &updatedResp))
+	// 1 was automatically added and sorted
+	assert.Equal(t, "1, 2, 5", updatedResp.Data.UserWhitelist)
+	assert.Equal(t, []int{1, 2, 5}, updatedResp.Data.UserWhitelistIDs)
+	assert.Equal(t, 14, updatedResp.Data.ViolationRetentionDays)
+
+	// Invalid user whitelist should be rejected with 400
+	invalidWhitelistBody := `{
+		"enabled": false,
+		"user_whitelist": "1, abc, 3",
+		"provider": "responses",
+		"prompt_version": "v1"
+	}`
+	badRecorder := httptest.NewRecorder()
+	badC, _ := gin.CreateTestContext(badRecorder)
+	badC.Request = httptest.NewRequest(http.MethodPut, "/api/moderation/settings", strings.NewReader(invalidWhitelistBody))
+	badC.Request.Header.Set("Content-Type", "application/json")
+	badC.Set("id", 1)
+	badC.Set("role", 100)
+
+	UpdateContentModerationSettings(badC)
+	assert.Equal(t, http.StatusBadRequest, badRecorder.Code)
+
+	// Invalid retention days (< 1 or > 365) should be rejected with 400
+	invalidRetentionBody := `{
+		"enabled": false,
+		"violation_retention_days": 400,
+		"provider": "responses",
+		"prompt_version": "v1"
+	}`
+	badRecorder2 := httptest.NewRecorder()
+	badC2, _ := gin.CreateTestContext(badRecorder2)
+	badC2.Request = httptest.NewRequest(http.MethodPut, "/api/moderation/settings", strings.NewReader(invalidRetentionBody))
+	badC2.Request.Header.Set("Content-Type", "application/json")
+	badC2.Set("id", 1)
+	badC2.Set("role", 100)
+
+	UpdateContentModerationSettings(badC2)
+	assert.Equal(t, http.StatusBadRequest, badRecorder2.Code)
 }

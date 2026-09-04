@@ -29,21 +29,25 @@ import (
 )
 
 const (
-	moderationConversationRetention    = 7 * 24 * time.Hour
-	moderationViolationRetention       = 180 * 24 * time.Hour
-	moderationUserViolationThreshold   = 3
-	moderationHighConfidence           = 0.85
-	moderationAssistantConfidence      = 0.75
-	moderationMaxCategories            = 32
-	moderationMaxCategoryLength        = 128
-	moderationMaxReasonCodeLength      = 128
-	moderationJobBatchSize             = 20
-	moderationMaxRequestBytes          = 4 << 20
-	moderationMaxResponseBytes         = 1 << 20
-	moderationAlertTypeViolation       = "violation"
-	moderationAlertTypeAccountDisabled = "account_disabled"
-	moderationConversationHeader       = "X-Conversation-ID"
+	moderationConversationRetention     = 7 * 24 * time.Hour
+	defaultModerationViolationRetention = 7 * 24 * time.Hour
+	moderationUserViolationThreshold    = 3
+	moderationHighConfidence            = 0.85
+	moderationAssistantConfidence       = 0.75
+	moderationMaxCategories             = 32
+	moderationMaxCategoryLength         = 128
+	moderationMaxReasonCodeLength       = 128
+	moderationJobBatchSize              = 20
+	moderationMaxRequestBytes           = 4 << 20
+	moderationMaxResponseBytes          = 1 << 20
+	moderationAlertTypeViolation        = "violation"
+	moderationAlertTypeAccountDisabled  = "account_disabled"
+	moderationConversationHeader        = "X-Conversation-ID"
 )
+
+func getModerationViolationRetention() time.Duration {
+	return setting.GetContentModerationSetting().GetViolationRetentionDuration()
+}
 
 var moderationResponseWriterKey = constant.ContextKeyModerationCapture
 
@@ -129,7 +133,8 @@ func BeginModerationCapture(c *gin.Context, request dto.Request) (string, bool) 
 	if c == nil || request == nil || !moderationRequestSupported(request) {
 		return "", false
 	}
-	if !setting.GetContentModerationSetting().Enabled && !common.GetContextKeyBool(c, constant.ContextKeyModerationEnabledAtStart) {
+	config := setting.GetContentModerationSetting()
+	if !config.HasModeratedChannels() && !common.GetContextKeyBool(c, constant.ContextKeyModerationEnabledAtStart) {
 		return "", false
 	}
 	conversationID := common.GetContextKeyString(c, constant.ContextKeyModerationConversationID)
@@ -368,6 +373,20 @@ func FinalizeModeration(c *gin.Context, info *relaycommon.RelayInfo, relayErr *t
 	if c == nil || info == nil || info.UserId <= 0 {
 		return
 	}
+	channelID := 0
+	if info.ChannelMeta != nil {
+		channelID = info.ChannelId
+	}
+	if channelID <= 0 {
+		channelID = common.GetContextKeyInt(c, constant.ContextKeyChannelId)
+	}
+	moderationSetting := setting.GetContentModerationSetting()
+	if info != nil && moderationSetting.IsUserWhitelisted(info.UserId) {
+		return
+	}
+	if !moderationSetting.ShouldModerateChannel(channelID) {
+		return
+	}
 	content, ok := common.GetContextKeyType[ModerationRequestContent](c, constant.ContextKeyModerationRequestContent)
 	if !ok {
 		return
@@ -390,6 +409,7 @@ func FinalizeModeration(c *gin.Context, info *relaycommon.RelayInfo, relayErr *t
 	turn := model.ModerationTurn{
 		UserID:          info.UserId,
 		ConversationKey: conversationID,
+		ChannelID:       channelID,
 		RequestID:       info.RequestId,
 		SystemPrompt:    model.ModerationText(content.SystemPrompt),
 		UserPrompt:      model.ModerationText(content.UserPrompt),
@@ -656,7 +676,7 @@ func moderationReviewPlanWithDB(db *gorm.DB, userID, round int, systemPrompt, us
 	if localModerationRiskSignal(text) {
 		return true, "local_risk_signal"
 	}
-	violations, err := model.CountRecentUserModerationViolationsWithTx(db, userID, time.Now().Add(-moderationViolationRetention).Unix())
+	violations, err := model.CountRecentUserModerationViolationsWithTx(db, userID, time.Now().Add(-getModerationViolationRetention()).Unix())
 	if err != nil {
 		logger.LogWarn(context.Background(), fmt.Sprintf("content moderation violation count failed: %v", err))
 	}
@@ -1062,7 +1082,7 @@ func retryModerationNotifications(ctx context.Context) error {
 		if err := model.DB.First(&turn, violation.TurnID).Error; err != nil {
 			if errors.Is(err, gorm.ErrRecordNotFound) {
 				// Timeline text expires after seven days, while notification
-				// metadata remains available for 180 days. The notification
+				// metadata remains available for the configured violation retention window. The notification
 				// body needs only the non-content identifiers below.
 				turn = model.ModerationTurn{
 					UserID:          violation.UserID,
@@ -1437,7 +1457,8 @@ func applyModerationDecision(ctx context.Context, turn *model.ModerationTurn, de
 		return err
 	}
 	now := common.GetTimestamp()
-	expiresAt := time.Now().Add(moderationViolationRetention).Unix()
+	retention := getModerationViolationRetention()
+	expiresAt := time.Now().Add(retention).Unix()
 	if isUserViolation {
 		if err := recordModerationViolation(turn, decision, true, string(categories), now, expiresAt); err != nil {
 			return err
@@ -1457,7 +1478,7 @@ func applyModerationDecision(ctx context.Context, turn *model.ModerationTurn, de
 		return err
 	}
 	if isUserViolation {
-		count, err := model.CountRecentUserModerationViolations(turn.UserID, time.Now().Add(-moderationViolationRetention).Unix())
+		count, err := model.CountRecentUserModerationViolations(turn.UserID, time.Now().Add(-retention).Unix())
 		if err != nil {
 			return err
 		}
@@ -1695,5 +1716,5 @@ func CleanupContentModerationData() error {
 	if err := model.DeleteExpiredModerationContent(now); err != nil {
 		return err
 	}
-	return model.DeleteExpiredModerationMetadata(now)
+	return model.DeleteExpiredModerationMetadata(now, int64(getModerationViolationRetention().Seconds()))
 }

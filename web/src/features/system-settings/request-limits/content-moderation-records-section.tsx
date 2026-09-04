@@ -234,6 +234,11 @@ function ConversationDetail(props: ConversationDetailProps) {
             <span>
               {t('Round')} {turn.round_number}
             </span>
+            {turn.channel_id ? (
+              <span>
+                {t('Channel')} #{turn.channel_id}
+              </span>
+            ) : null}
             <span>{statusLabel(turn.response_status, t)}</span>
             <span>{turn.model}</span>
             <span>{displayTime(turn.created_at)}</span>
