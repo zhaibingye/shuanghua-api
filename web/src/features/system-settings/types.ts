@@ -87,6 +87,7 @@ export type ModerationTurn = {
   review_required: boolean
   review_trigger?: string
   created_at: number
+  content_unavailable?: boolean
 }
 
 export type ModerationJob = {
@@ -101,6 +102,8 @@ export type ModerationJob = {
   expires_at: number
   request_payload?: string
   response_payload?: string
+  request_payload_unavailable?: boolean
+  response_payload_unavailable?: boolean
   last_error?: string
 }
 

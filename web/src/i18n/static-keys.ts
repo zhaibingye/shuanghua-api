@@ -552,6 +552,18 @@ export const STATIC_I18N_KEYS = [
   'The model that was requested',
   'The upstream channel that served the requests',
 
+  // Content moderation dynamic numeric setting labels
+  'Violation retention (days)',
+  'Request timeout (seconds)',
+  'Retry count',
+  'Normal user sample rate (%)',
+  'Elevated-risk sample rate (%)',
+
+  // Content moderation settings
+  'A moderation API key is required when content moderation is enabled.',
+  'Enter the provider base URL. The format-specific endpoint is appended automatically; custom full endpoint URLs are also supported.',
+  'Moderation API base URL',
+
   // Misc
   'Cancel',
   'Status',
