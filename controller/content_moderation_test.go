@@ -40,6 +40,95 @@ func setupModerationTestDB(t *testing.T) {
 	model.InitOptionMap()
 }
 
+func TestGetContentModerationConversationKeepsMetadataWhenContentCannotBeDecrypted(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	setupModerationTestDB(t)
+	require.NoError(t, model.DB.AutoMigrate(
+		&model.ModerationTurn{},
+		&model.ModerationJob{},
+		&model.ModerationViolation{},
+		&model.ModerationAction{},
+		&model.ModerationNotification{},
+	))
+
+	previousCryptoSecret := common.CryptoSecret
+	t.Cleanup(func() { common.CryptoSecret = previousCryptoSecret })
+	common.CryptoSecret = "moderation-history-secret"
+	encrypt := func(value string) string {
+		encrypted, err := common.EncryptSecret(value)
+		require.NoError(t, err)
+		return encrypted
+	}
+
+	now := common.GetTimestamp()
+	conversation := &model.ModerationConversation{
+		UserID:          2,
+		ConversationID:  "history-conversation",
+		Status:          model.ModerationConversationActive,
+		FirstActivityAt: now,
+		LastActivityAt:  now,
+		ExpiresAt:       now + 3600,
+	}
+	require.NoError(t, model.DB.Create(conversation).Error)
+	turn := &model.ModerationTurn{
+		ConversationID:  conversation.ID,
+		UserID:          conversation.UserID,
+		ConversationKey: conversation.ConversationID,
+		RoundNumber:     1,
+		SystemPrompt:    model.ModerationText(encrypt("system")),
+		UserPrompt:      model.ModerationText(encrypt("user")),
+		AssistantReply:  model.ModerationText(encrypt("assistant")),
+		ResponseStatus:  "success",
+		CreatedAt:       now,
+		UpdatedAt:       now,
+		ExpiresAt:       now + 3600,
+	}
+	require.NoError(t, model.DB.Create(turn).Error)
+	job := &model.ModerationJob{
+		TurnID:          turn.ID,
+		ConversationID:  conversation.ID,
+		UserID:          conversation.UserID,
+		Status:          model.ModerationJobSuccess,
+		RequestPayload:  model.ModerationText(encrypt("request")),
+		ResponsePayload: model.ModerationText(encrypt("response")),
+		Provider:        "responses",
+		Model:           "moderation-model",
+		PromptVersion:   "v1",
+		ExpiresAt:       now + 3600,
+		CreatedAt:       now,
+		UpdatedAt:       now,
+	}
+	require.NoError(t, model.DB.Create(job).Error)
+
+	common.CryptoSecret = "a-different-secret"
+	recorder := httptest.NewRecorder()
+	c, _ := gin.CreateTestContext(recorder)
+	c.Request = httptest.NewRequest(http.MethodGet, "/api/moderation/conversations/"+fmt.Sprint(conversation.ID), nil)
+	c.Params = gin.Params{{Key: "id", Value: fmt.Sprint(conversation.ID)}}
+	c.Set("id", 1)
+	c.Set("role", common.RoleRootUser)
+
+	GetContentModerationConversation(c)
+	require.Equal(t, http.StatusOK, recorder.Code)
+	var response struct {
+		Data struct {
+			Turns []struct {
+				SystemPrompt       string `json:"system_prompt"`
+				ContentUnavailable bool   `json:"content_unavailable"`
+			} `json:"turns"`
+			Jobs []struct {
+				ResponsePayloadUnavailable bool `json:"response_payload_unavailable"`
+			} `json:"jobs"`
+		} `json:"data"`
+	}
+	require.NoError(t, common.Unmarshal(recorder.Body.Bytes(), &response))
+	require.Len(t, response.Data.Turns, 1)
+	require.Len(t, response.Data.Jobs, 1)
+	assert.True(t, response.Data.Turns[0].ContentUnavailable)
+	assert.Empty(t, response.Data.Turns[0].SystemPrompt)
+	assert.True(t, response.Data.Jobs[0].ResponsePayloadUnavailable)
+}
+
 func TestModerationUserStatusRejectsPeerAdministrator(t *testing.T) {
 	gin.SetMode(gin.TestMode)
 	setupModerationTestDB(t)
@@ -148,6 +237,94 @@ func TestUpdateContentModerationSettingsAllowsCustomHTTPURLAndPolicyPrompt(t *te
 	assert.Equal(t, "Custom policy prompt for safety.", getResp.Data.PolicyPrompt)
 	assert.Equal(t, setting.DefaultContentModerationPolicyPrompt, getResp.Data.DefaultPolicyPrompt)
 	assert.True(t, getResp.Data.APIKeyConfigured)
+}
+
+func TestUpdateContentModerationSettingsPreservesConfiguredAPIKeyWhenBlank(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	setupModerationTestDB(t)
+
+	updateSettings := func(apiKey string) *httptest.ResponseRecorder {
+		body := fmt.Sprintf(`{
+			"enabled": true,
+			"provider": "responses",
+			"base_url": "https://proxy.example/v1",
+			"api_key": %q,
+			"model": "gpt-5-mini",
+			"timeout_seconds": 30,
+			"max_retries": 3,
+			"normal_sample_rate": 10,
+			"elevated_sample_rate": 50,
+			"prompt_version": "v1"
+		}`, apiKey)
+		recorder := httptest.NewRecorder()
+		c, _ := gin.CreateTestContext(recorder)
+		c.Request = httptest.NewRequest(http.MethodPut, "/api/moderation/settings", strings.NewReader(body))
+		c.Request.Header.Set("Content-Type", "application/json")
+		c.Set("id", 1)
+		c.Set("role", 100)
+		UpdateContentModerationSettings(c)
+		return recorder
+	}
+
+	firstResponse := updateSettings("first-key")
+	require.Equal(t, http.StatusOK, firstResponse.Code)
+	common.OptionMapRWMutex.RLock()
+	savedAPIKey := common.OptionMap[setting.ContentModerationAPIKeyOption]
+	common.OptionMapRWMutex.RUnlock()
+	require.NotEmpty(t, savedAPIKey)
+
+	secondResponse := updateSettings("")
+	require.Equal(t, http.StatusOK, secondResponse.Code)
+	common.OptionMapRWMutex.RLock()
+	storedAPIKey := common.OptionMap[setting.ContentModerationAPIKeyOption]
+	common.OptionMapRWMutex.RUnlock()
+	storedPlaintextKey, err := common.DecryptSecret(storedAPIKey)
+	require.NoError(t, err)
+	assert.Equal(t, "first-key", storedPlaintextKey)
+
+	getRecorder := httptest.NewRecorder()
+	getContext, _ := gin.CreateTestContext(getRecorder)
+	getContext.Request = httptest.NewRequest(http.MethodGet, "/api/moderation/settings", nil)
+	getContext.Set("id", 1)
+	getContext.Set("role", 100)
+	GetContentModerationSettings(getContext)
+	require.Equal(t, http.StatusOK, getRecorder.Code)
+	var response struct {
+		Data contentModerationSettingsResponse `json:"data"`
+	}
+	require.NoError(t, common.Unmarshal(getRecorder.Body.Bytes(), &response))
+	assert.True(t, response.Data.APIKeyConfigured)
+}
+
+func TestUpdateContentModerationSettingsRejectsMissingAPIKeyWhenEnabled(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	setupModerationTestDB(t)
+
+	recorder := httptest.NewRecorder()
+	c, _ := gin.CreateTestContext(recorder)
+	c.Request = httptest.NewRequest(http.MethodPut, "/api/moderation/settings", strings.NewReader(`{
+		"enabled": true,
+		"provider": "gemini",
+		"base_url": "https://moderation.example.test/custom-endpoint",
+		"api_key": "",
+		"model": "gemini-3-flash-preview",
+		"timeout_seconds": 30,
+		"max_retries": 3,
+		"normal_sample_rate": 10,
+		"elevated_sample_rate": 50,
+		"prompt_version": "v1"
+	}`))
+	c.Request.Header.Set("Content-Type", "application/json")
+	c.Set("id", 1)
+	c.Set("role", 100)
+
+	UpdateContentModerationSettings(c)
+	require.Equal(t, http.StatusBadRequest, recorder.Code)
+	var response struct {
+		Message string `json:"message"`
+	}
+	require.NoError(t, common.Unmarshal(recorder.Body.Bytes(), &response))
+	assert.Contains(t, response.Message, "API key")
 }
 
 func TestUpdateContentModerationSettingsRejectsInvalidPolicyPromptControlChars(t *testing.T) {

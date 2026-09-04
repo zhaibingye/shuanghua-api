@@ -133,6 +133,10 @@ export function ContentModerationSection(props: ContentModerationSectionProps) {
     name: 'provider',
   })
   const isGeminiProvider = selectedProvider === 'gemini'
+  const providerItems = [
+    { value: 'responses', label: t('OpenAI Responses') },
+    { value: 'gemini', label: t('Gemini') },
+  ]
 
   useEffect(() => {
     const data = query.data?.data
@@ -169,6 +173,19 @@ export function ContentModerationSection(props: ContentModerationSectionProps) {
   }
 
   const onSubmit = async (values: ContentModerationFormValues) => {
+    if (
+      values.enabled &&
+      values.api_key.trim() === '' &&
+      !query.data?.data.api_key_configured
+    ) {
+      form.setError('api_key', {
+        type: 'required',
+        message: t(
+          'A moderation API key is required when content moderation is enabled.'
+        ),
+      })
+      return
+    }
     await mutation.mutateAsync(values)
   }
 
@@ -266,18 +283,22 @@ export function ContentModerationSection(props: ContentModerationSectionProps) {
               render={({ field }) => (
                 <FormItem>
                   <FormLabel>{t('Moderation API format')}</FormLabel>
-                  <Select value={field.value} onValueChange={field.onChange}>
+                  <Select
+                    items={providerItems}
+                    value={field.value}
+                    onValueChange={field.onChange}
+                  >
                     <FormControl>
-                      <SelectTrigger>
+                      <SelectTrigger className='w-full'>
                         <SelectValue />
                       </SelectTrigger>
                     </FormControl>
-                    <SelectContent>
+                    <SelectContent alignItemWithTrigger={false}>
                       <SelectGroup>
                         <SelectItem value='responses'>
                           {t('OpenAI Responses')}
                         </SelectItem>
-                        <SelectItem value='gemini'>Gemini</SelectItem>
+                        <SelectItem value='gemini'>{t('Gemini')}</SelectItem>
                       </SelectGroup>
                     </SelectContent>
                   </Select>
@@ -299,7 +320,9 @@ export function ContentModerationSection(props: ContentModerationSectionProps) {
                   <FormControl>
                     <Input
                       placeholder={
-                        isGeminiProvider ? 'gemini-2.5-flash' : 'gpt-4.1-mini'
+                        isGeminiProvider
+                          ? 'gemini-3-flash-preview'
+                          : 'gpt-5-mini'
                       }
                       {...field}
                     />
@@ -314,19 +337,21 @@ export function ContentModerationSection(props: ContentModerationSectionProps) {
             name='base_url'
             render={({ field }) => (
               <FormItem>
-                <FormLabel>{t('Moderation API URL')}</FormLabel>
+                <FormLabel>{t('Moderation API base URL')}</FormLabel>
                 <FormControl>
                   <Input
                     placeholder={
                       isGeminiProvider
-                        ? 'https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent'
-                        : 'https://api.openai.com/v1/responses'
+                        ? 'https://generativelanguage.googleapis.com/v1beta'
+                        : 'https://api.openai.com/v1'
                     }
                     {...field}
                   />
                 </FormControl>
                 <FormDescription>
-                  {t('Leave blank to use the provider default endpoint.')}
+                  {t(
+                    'Enter the provider base URL. The format-specific endpoint is appended automatically; custom full endpoint URLs are also supported.'
+                  )}
                 </FormDescription>
                 <FormMessage />
               </FormItem>

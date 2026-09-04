@@ -16,7 +16,11 @@ along with this program. If not, see <https://www.gnu.org/licenses/>.
 
 For commercial licensing, please contact support@quantumnous.com
 */
-export { DataTablePagination } from './core/pagination'
+export {
+  DataTablePagination,
+  DataTablePaginationControls,
+  type DataTablePaginationControlsProps,
+} from './core/pagination'
 export { DataTableColumnHeader } from './core/column-header'
 export { BadgeCell } from './core/badge-cell'
 export { BadgeListCell } from './core/badge-list-cell'

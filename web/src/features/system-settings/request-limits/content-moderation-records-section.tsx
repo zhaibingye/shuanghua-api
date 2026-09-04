@@ -17,21 +17,14 @@ along with this program. If not, see <https://www.gnu.org/licenses/>.
 For commercial licensing, please contact support@quantumnous.com
 */
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
-import {
-  ChevronLeft,
-  ChevronRight,
-  RefreshCw,
-  RotateCcw,
-  Search,
-  X,
-} from 'lucide-react'
+import { X } from 'lucide-react'
 import { useCallback, useMemo, useState } from 'react'
 import { useTranslation } from 'react-i18next'
 import { toast } from 'sonner'
 
+import { DataTablePaginationControls } from '@/components/data-table'
 import { Badge } from '@/components/ui/badge'
 import { Button } from '@/components/ui/button'
-import { Input } from '@/components/ui/input'
 import {
   Select,
   SelectContent,
@@ -42,7 +35,11 @@ import {
 } from '@/components/ui/select'
 import { Textarea } from '@/components/ui/textarea'
 import { CompactDateTimeRangePicker } from '@/features/usage-logs/components/compact-date-time-range-picker'
-import { cn } from '@/lib/utils'
+import {
+  LogsFilterField,
+  LogsFilterInput,
+  LogsFilterToolbar,
+} from '@/features/usage-logs/components/logs-filter-toolbar'
 
 import {
   getContentModerationConversation,
@@ -278,28 +275,34 @@ export function ConversationDetail(props: ConversationDetailProps) {
             <span>{displayTime(turn.created_at)}</span>
           </div>
           <div className='grid gap-3 text-sm'>
-            <div className='overflow-hidden rounded-lg border border-sky-500/25 bg-sky-500/5'>
-              <div className='border-b border-sky-500/20 px-3 py-2 font-medium text-sky-700 dark:text-sky-300'>
+            <div className='bg-card overflow-hidden rounded-lg border'>
+              <div className='bg-muted/40 border-b px-3 py-2 font-medium'>
                 {t('System prompt')}
               </div>
               <p className='max-h-56 overflow-auto px-3 py-3 leading-6 break-words whitespace-pre-wrap'>
-                {turn.system_prompt || '—'}
+                {turn.content_unavailable
+                  ? t('Content unavailable')
+                  : turn.system_prompt || '—'}
               </p>
             </div>
-            <div className='overflow-hidden rounded-lg border border-amber-500/25 bg-amber-500/5'>
-              <div className='border-b border-amber-500/20 px-3 py-2 font-medium text-amber-700 dark:text-amber-300'>
+            <div className='bg-card overflow-hidden rounded-lg border'>
+              <div className='bg-muted/40 border-b px-3 py-2 font-medium'>
                 {t('User prompt')}
               </div>
               <p className='max-h-72 overflow-auto px-3 py-3 leading-6 break-words whitespace-pre-wrap'>
-                {turn.user_prompt || '—'}
+                {turn.content_unavailable
+                  ? t('Content unavailable')
+                  : turn.user_prompt || '—'}
               </p>
             </div>
-            <div className='overflow-hidden rounded-lg border border-emerald-500/25 bg-emerald-500/5'>
-              <div className='border-b border-emerald-500/20 px-3 py-2 font-medium text-emerald-700 dark:text-emerald-300'>
+            <div className='bg-card overflow-hidden rounded-lg border'>
+              <div className='bg-muted/40 border-b px-3 py-2 font-medium'>
                 {t('Assistant response')}
               </div>
               <p className='max-h-72 overflow-auto px-3 py-3 leading-7 break-words whitespace-pre-wrap'>
-                {turn.assistant_reply || '—'}
+                {turn.content_unavailable
+                  ? t('Content unavailable')
+                  : turn.assistant_reply || '—'}
               </p>
             </div>
           </div>
@@ -325,10 +328,16 @@ export function ConversationDetail(props: ConversationDetailProps) {
             {job.last_error && (
               <p className='text-destructive mt-2'>{job.last_error}</p>
             )}
-            {job.response_payload && (
-              <pre className='bg-muted mt-2 max-h-64 overflow-auto rounded p-3 font-mono text-xs leading-5 break-words whitespace-pre-wrap'>
-                {formatModerationPayload(job.response_payload)}
-              </pre>
+            {job.response_payload_unavailable ? (
+              <p className='text-destructive mt-2 text-xs'>
+                {t('Content unavailable')}
+              </p>
+            ) : (
+              job.response_payload && (
+                <pre className='bg-muted mt-2 max-h-64 overflow-auto rounded p-3 font-mono text-xs leading-5 break-words whitespace-pre-wrap'>
+                  {formatModerationPayload(job.response_payload)}
+                </pre>
+              )
             )}
           </div>
         ))}
@@ -441,7 +450,6 @@ const initialFilters: ModerationFilterState = {
 
 export function ContentModerationRecordsSection() {
   const { t } = useTranslation()
-  const queryClient = useQueryClient()
   const [selectedID, setSelectedID] = useState<number | null>(null)
   const [page, setPage] = useState(1)
   const [pageSize, setPageSize] = useState(20)
@@ -512,44 +520,103 @@ export function ContentModerationRecordsSection() {
     setPage(1)
   }, [])
 
-  const handleRefresh = useCallback(() => {
-    queryClient.invalidateQueries({ queryKey: ['moderation-conversations'] })
-  }, [queryClient])
-
   const handleKeyDown = useCallback(
-    (e: React.KeyboardEvent<HTMLInputElement>) => {
-      if (e.key === 'Enter') {
+    (event: React.KeyboardEvent<HTMLInputElement>) => {
+      if (event.key === 'Enter') {
         handleSearch()
       }
     },
     [handleSearch]
   )
 
-  const handleRemoveFilter = useCallback(
-    (key: keyof ModerationFilterState | 'timeRange') => {
-      if (key === 'timeRange') {
-        setDraftFilters((prev) => ({
-          ...prev,
-          startTime: undefined,
-          endTime: undefined,
-        }))
-        setAppliedFilters((prev) => ({
-          ...prev,
-          startTime: undefined,
-          endTime: undefined,
-        }))
-      } else {
-        const defaultVal = key === 'status' ? 'all' : ''
-        setDraftFilters((prev) => ({ ...prev, [key]: defaultVal }))
-        setAppliedFilters((prev) => ({ ...prev, [key]: defaultVal }))
-      }
-      setPage(1)
-    },
-    []
-  )
-
   const total = query.data?.total ?? 0
   const totalPages = Math.max(1, Math.ceil(total / pageSize))
+  const dateRangeFilter = (
+    <LogsFilterField wide>
+      <CompactDateTimeRangePicker
+        start={draftFilters.startTime}
+        end={draftFilters.endTime}
+        onChange={({ start, end }) =>
+          setDraftFilters((current) => ({
+            ...current,
+            startTime: start,
+            endTime: end,
+          }))
+        }
+      />
+    </LogsFilterField>
+  )
+  const statusFilter = (
+    <LogsFilterField>
+      <Select
+        items={[
+          { value: 'all', label: t('All Status') },
+          { value: 'active', label: t('Active') },
+          { value: 'blocked', label: t('Blocked') },
+          { value: 'resolved', label: t('Resolved') },
+        ]}
+        value={draftFilters.status}
+        onValueChange={(value) =>
+          setDraftFilters((current) => ({
+            ...current,
+            status: value ?? 'all',
+          }))
+        }
+      >
+        <SelectTrigger>
+          <SelectValue placeholder={t('All Status')} />
+        </SelectTrigger>
+        <SelectContent alignItemWithTrigger={false}>
+          <SelectGroup>
+            <SelectItem value='all'>{t('All Status')}</SelectItem>
+            <SelectItem value='active'>{t('Active')}</SelectItem>
+            <SelectItem value='blocked'>{t('Blocked')}</SelectItem>
+            <SelectItem value='resolved'>{t('Resolved')}</SelectItem>
+          </SelectGroup>
+        </SelectContent>
+      </Select>
+    </LogsFilterField>
+  )
+  const userIDFilter = (
+    <LogsFilterField>
+      <LogsFilterInput
+        type='number'
+        min={1}
+        placeholder={t('User ID')}
+        value={draftFilters.userId}
+        onChange={(event) =>
+          setDraftFilters((current) => ({
+            ...current,
+            userId: event.target.value,
+          }))
+        }
+        onKeyDown={handleKeyDown}
+      />
+    </LogsFilterField>
+  )
+  const conversationIDFilter = (
+    <LogsFilterField>
+      <LogsFilterInput
+        placeholder={t('Conversation ID')}
+        value={draftFilters.conversationId}
+        onChange={(event) =>
+          setDraftFilters((current) => ({
+            ...current,
+            conversationId: event.target.value,
+          }))
+        }
+        onKeyDown={handleKeyDown}
+      />
+    </LogsFilterField>
+  )
+  const stats = (
+    <div className='flex flex-wrap items-center gap-2 text-xs font-medium sm:text-sm'>
+      <span className='text-muted-foreground/80'>{t('Total:')}</span>
+      <span className='text-foreground tabular-nums'>
+        {total.toLocaleString()}
+      </span>
+    </div>
+  )
 
   return (
     <SettingsSection title={t('Moderation Records')}>
@@ -561,170 +628,36 @@ export function ContentModerationRecordsSection() {
         </p>
       </div>
 
-      {/* Quick Filter Bar */}
-      <div className='bg-card/50 space-y-3 rounded-xl border p-3.5'>
-        <div className='grid grid-cols-1 gap-2.5 sm:grid-cols-2 lg:grid-cols-4'>
-          <CompactDateTimeRangePicker
-            start={draftFilters.startTime}
-            end={draftFilters.endTime}
-            onChange={({ start, end }) =>
-              setDraftFilters((prev) => ({
-                ...prev,
-                startTime: start,
-                endTime: end,
-              }))
-            }
-          />
-
-          <Select
-            value={draftFilters.status}
-            onValueChange={(val) =>
-              setDraftFilters((prev) => ({ ...prev, status: val ?? 'all' }))
-            }
-          >
-            <SelectTrigger className='h-8 text-sm'>
-              <SelectValue placeholder={t('All Status')} />
-            </SelectTrigger>
-            <SelectContent>
-              <SelectGroup>
-                <SelectItem value='all'>{t('All Status')}</SelectItem>
-                <SelectItem value='active'>{t('Active')}</SelectItem>
-                <SelectItem value='blocked'>{t('Blocked')}</SelectItem>
-                <SelectItem value='resolved'>{t('Resolved')}</SelectItem>
-              </SelectGroup>
-            </SelectContent>
-          </Select>
-
-          <Input
-            type='number'
-            min={1}
-            placeholder={t('User ID')}
-            value={draftFilters.userId}
-            onChange={(e) =>
-              setDraftFilters((prev) => ({ ...prev, userId: e.target.value }))
-            }
-            onKeyDown={handleKeyDown}
-            className='h-8 text-sm'
-          />
-
-          <Input
-            placeholder={t('Conversation ID')}
-            value={draftFilters.conversationId}
-            onChange={(e) =>
-              setDraftFilters((prev) => ({
-                ...prev,
-                conversationId: e.target.value,
-              }))
-            }
-            onKeyDown={handleKeyDown}
-            className='h-8 text-sm'
-          />
-        </div>
-
-        {/* Filter actions and stats row */}
-        <div className='flex flex-wrap items-center justify-between gap-2 border-t pt-1'>
-          <div className='flex flex-wrap items-center gap-2'>
-            <Button
-              type='button'
-              size='sm'
-              onClick={handleSearch}
-              disabled={query.isFetching}
-              className='h-8 px-3'
-            >
-              <Search className='mr-1.5 size-3.5' />
-              <span>{t('Search')}</span>
-            </Button>
-            <Button
-              type='button'
-              variant='outline'
-              size='sm'
-              onClick={handleReset}
-              disabled={!hasActiveFilters}
-              className='h-8 px-3'
-            >
-              <RotateCcw className='mr-1.5 size-3.5' />
-              <span>{t('Reset')}</span>
-            </Button>
-            <Button
-              type='button'
-              variant='outline'
-              size='sm'
-              onClick={handleRefresh}
-              disabled={query.isFetching}
-              className='h-8 px-3'
-            >
-              <RefreshCw
-                className={cn(
-                  'size-3.5 mr-1.5',
-                  query.isFetching && 'animate-spin'
-                )}
-              />
-              <span>{t('Refresh')}</span>
-            </Button>
-          </div>
-
-          <div className='text-muted-foreground text-xs'>
-            {t('Total Count')}: {total}
-          </div>
-        </div>
-
-        {/* Active filter badges */}
-        {hasActiveFilters && (
-          <div className='flex flex-wrap items-center gap-1.5 pt-1'>
-            {appliedFilters.status !== 'all' && (
-              <Badge variant='secondary' className='gap-1 text-xs font-normal'>
-                <span>
-                  {t('Status')}: {statusLabel(appliedFilters.status, t)}
-                </span>
-                <X
-                  className='hover:text-foreground size-3 cursor-pointer'
-                  onClick={() => handleRemoveFilter('status')}
-                />
-              </Badge>
-            )}
-            {appliedFilters.userId.trim() !== '' && (
-              <Badge variant='secondary' className='gap-1 text-xs font-normal'>
-                <span>
-                  {t('User')}: #{appliedFilters.userId}
-                </span>
-                <X
-                  className='hover:text-foreground size-3 cursor-pointer'
-                  onClick={() => handleRemoveFilter('userId')}
-                />
-              </Badge>
-            )}
-            {appliedFilters.conversationId.trim() !== '' && (
-              <Badge variant='secondary' className='gap-1 text-xs font-normal'>
-                <span>
-                  {t('Conversation')}: {appliedFilters.conversationId}
-                </span>
-                <X
-                  className='hover:text-foreground size-3 cursor-pointer'
-                  onClick={() => handleRemoveFilter('conversationId')}
-                />
-              </Badge>
-            )}
-            {(appliedFilters.startTime || appliedFilters.endTime) && (
-              <Badge variant='secondary' className='gap-1 text-xs font-normal'>
-                <span>{t('Date Range')}</span>
-                <X
-                  className='hover:text-foreground size-3 cursor-pointer'
-                  onClick={() => handleRemoveFilter('timeRange')}
-                />
-              </Badge>
-            )}
-            <Button
-              type='button'
-              variant='ghost'
-              size='sm'
-              onClick={handleReset}
-              className='text-muted-foreground hover:text-foreground h-6 px-2 text-xs'
-            >
-              {t('Clear all')}
-            </Button>
-          </div>
-        )}
-      </div>
+      <LogsFilterToolbar
+        stats={stats}
+        primaryFilters={
+          <>
+            {dateRangeFilter}
+            {statusFilter}
+            {userIDFilter}
+            {conversationIDFilter}
+          </>
+        }
+        mobilePinnedFilters={dateRangeFilter}
+        mobileFilters={
+          <>
+            {statusFilter}
+            {userIDFilter}
+            {conversationIDFilter}
+          </>
+        }
+        mobileFilterCount={
+          [
+            appliedFilters.status !== 'all' ? appliedFilters.status : undefined,
+            appliedFilters.userId.trim(),
+            appliedFilters.conversationId.trim(),
+          ].filter(Boolean).length
+        }
+        hasActiveFilters={hasActiveFilters}
+        onSearch={handleSearch}
+        searchLoading={query.isFetching}
+        onReset={handleReset}
+      />
 
       {query.isLoading && (
         <p className='text-muted-foreground text-sm'>
@@ -747,63 +680,19 @@ export function ContentModerationRecordsSection() {
         ))}
       </div>
 
-      {/* Pagination controls */}
-      {total > 0 && (
-        <div className='flex flex-wrap items-center justify-between gap-3 pt-2 text-sm'>
-          <div className='text-muted-foreground flex items-center gap-2 text-xs'>
-            <span>{t('Rows per page')}</span>
-            <Select
-              value={String(pageSize)}
-              onValueChange={(val) => {
-                if (val) {
-                  setPageSize(Number(val))
-                  setPage(1)
-                }
-              }}
-            >
-              <SelectTrigger className='h-8 w-[72px] text-xs'>
-                <SelectValue />
-              </SelectTrigger>
-              <SelectContent>
-                <SelectItem value='10'>10</SelectItem>
-                <SelectItem value='20'>20</SelectItem>
-                <SelectItem value='50'>50</SelectItem>
-              </SelectContent>
-            </Select>
-          </div>
-          {totalPages > 1 && (
-            <div className='flex items-center gap-2'>
-              <span className='text-muted-foreground text-xs'>
-                {page} / {totalPages}
-              </span>
-              <div className='flex items-center gap-1'>
-                <Button
-                  type='button'
-                  variant='outline'
-                  size='sm'
-                  className='h-8 px-2.5'
-                  onClick={() => setPage((p) => Math.max(1, p - 1))}
-                  disabled={page <= 1 || query.isFetching}
-                >
-                  <ChevronLeft className='size-4' />
-                  <span className='sr-only'>{t('Go to previous page')}</span>
-                </Button>
-                <Button
-                  type='button'
-                  variant='outline'
-                  size='sm'
-                  className='h-8 px-2.5'
-                  onClick={() => setPage((p) => Math.min(totalPages, p + 1))}
-                  disabled={page >= totalPages || query.isFetching}
-                >
-                  <ChevronRight className='size-4' />
-                  <span className='sr-only'>{t('Go to next page')}</span>
-                </Button>
-              </div>
-            </div>
-          )}
-        </div>
-      )}
+      <div className='pt-2'>
+        <DataTablePaginationControls
+          currentPage={page}
+          totalPages={totalPages}
+          pageSize={pageSize}
+          totalRows={total}
+          onPageChange={setPage}
+          onPageSizeChange={(nextPageSize) => {
+            setPageSize(nextPageSize)
+            setPage(1)
+          }}
+        />
+      </div>
 
       {detailQuery.isLoading && (
         <p className='text-muted-foreground text-sm'>

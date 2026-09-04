@@ -23,6 +23,7 @@ import (
 	"github.com/QuantumNous/new-api/model"
 	relaycommon "github.com/QuantumNous/new-api/relay/common"
 	"github.com/QuantumNous/new-api/relaykit/dto"
+	"github.com/QuantumNous/new-api/relaykit/relayconvert/reasoning"
 	"github.com/QuantumNous/new-api/relaykit/types"
 	"github.com/QuantumNous/new-api/setting"
 	"github.com/gin-gonic/gin"
@@ -2084,11 +2085,12 @@ type moderationDecision struct {
 }
 
 type moderationReviewPayload struct {
-	Model        string `json:"model"`
-	Instructions string `json:"instructions"`
-	Input        string `json:"input"`
-	Store        bool   `json:"store"`
-	Text         any    `json:"text,omitempty"`
+	Model        string            `json:"model"`
+	Instructions string            `json:"instructions"`
+	Input        string            `json:"input"`
+	Store        bool              `json:"store"`
+	Reasoning    map[string]string `json:"reasoning,omitempty"`
+	Text         any               `json:"text,omitempty"`
 }
 
 func ProcessContentModerationQueue(ctx context.Context) error {
@@ -2244,6 +2246,7 @@ func reviewModerationTurn(ctx context.Context, turn *model.ModerationTurn, confi
 		Instructions: prompt,
 		Input:        input,
 		Store:        false,
+		Reasoning:    map[string]string{"effort": reasoning.LevelLow},
 	}
 	var response map[string]any
 	var raw []byte
@@ -2289,12 +2292,13 @@ func ValidateContentModerationURL(rawURL string) error {
 }
 
 func moderationEndpoint(config setting.ContentModerationSetting, provider string) (string, error) {
+	provider = strings.ToLower(strings.TrimSpace(provider))
 	endpoint := strings.TrimSpace(config.BaseURL)
 	if endpoint == "" {
 		if provider == "gemini" {
-			endpoint = "https://generativelanguage.googleapis.com/v1beta/models/" + url.PathEscape(config.Model) + ":generateContent"
+			endpoint = "https://generativelanguage.googleapis.com/v1beta"
 		} else {
-			endpoint = "https://api.openai.com/v1/responses"
+			endpoint = "https://api.openai.com/v1"
 		}
 	}
 	if strings.Contains(endpoint, "{model}") {
@@ -2304,13 +2308,43 @@ func moderationEndpoint(config setting.ContentModerationSetting, provider string
 		}
 		endpoint = strings.ReplaceAll(endpoint, "{model}", url.PathEscape(modelName))
 	}
+	if endpoint = appendModerationEndpointSuffix(endpoint, provider, config.Model); endpoint == "" {
+		return "", errors.New("content moderation API URL is empty")
+	}
 	if err := ValidateContentModerationURL(endpoint); err != nil {
 		return "", err
 	}
 	return endpoint, nil
 }
 
+func appendModerationEndpointSuffix(endpoint, provider, modelName string) string {
+	parsed, err := url.Parse(endpoint)
+	if err != nil {
+		return endpoint
+	}
+	path := strings.TrimRight(parsed.Path, "/")
+	switch provider {
+	case "responses":
+		if !strings.HasSuffix(path, "/v1") {
+			return endpoint
+		}
+		parsed.Path = path + "/responses"
+	case "gemini":
+		if !strings.HasSuffix(path, "/v1beta") || strings.TrimSpace(modelName) == "" {
+			return endpoint
+		}
+		parsed.Path = path + "/models/" + url.PathEscape(strings.TrimSpace(modelName)) + ":generateContent"
+	default:
+		return endpoint
+	}
+	return parsed.String()
+}
+
 func moderationHTTPClient(ctx context.Context, config setting.ContentModerationSetting, provider string, payload any) (map[string]any, []byte, error) {
+	apiKey := strings.TrimSpace(config.APIKey)
+	if apiKey == "" {
+		return nil, nil, errors.New("content moderation API key is required")
+	}
 	if ctx == nil {
 		ctx = context.Background()
 	}
@@ -2337,13 +2371,9 @@ func moderationHTTPClient(ctx context.Context, config setting.ContentModerationS
 	}
 	req.Header.Set("Content-Type", "application/json")
 	if provider == "gemini" {
-		if config.APIKey != "" {
-			req.Header.Set("x-goog-api-key", config.APIKey)
-		}
+		req.Header.Set("x-goog-api-key", apiKey)
 	} else {
-		if config.APIKey != "" {
-			req.Header.Set("Authorization", "Bearer "+config.APIKey)
-		}
+		req.Header.Set("Authorization", "Bearer "+apiKey)
 	}
 	client := GetHttpClient()
 	if client == nil {
@@ -2402,24 +2432,37 @@ func callGeminiModeration(ctx context.Context, config setting.ContentModerationS
 		"systemInstruction": map[string]any{
 			"parts": []any{map[string]any{"text": prompt}},
 		},
-		"contents": []any{map[string]any{"role": "user", "parts": []any{map[string]any{"text": input}}}},
-		"generationConfig": map[string]any{
-			"responseMimeType": "application/json",
-			"responseSchema": map[string]any{
-				"type": "OBJECT",
-				"properties": map[string]any{
-					"decision":    map[string]any{"type": "STRING", "enum": []string{"allow", "block", "review"}},
-					"actor":       map[string]any{"type": "STRING", "enum": []string{"none", "user", "assistant", "both"}},
-					"severity":    map[string]any{"type": "STRING", "enum": []string{"none", "low", "medium", "high", "critical"}},
-					"categories":  map[string]any{"type": "ARRAY", "maxItems": moderationMaxCategories, "items": map[string]any{"type": "STRING", "maxLength": moderationMaxCategoryLength}},
-					"confidence":  map[string]any{"type": "NUMBER", "description": "A number from 0 to 1 inclusive"},
-					"reason_code": map[string]any{"type": "STRING", "maxLength": moderationMaxReasonCodeLength},
-				},
-				"required": []string{"decision", "actor", "severity", "categories", "confidence", "reason_code"},
-			},
-		},
+		"contents":         []any{map[string]any{"role": "user", "parts": []any{map[string]any{"text": input}}}},
+		"generationConfig": moderationGeminiGenerationConfig(config.Model),
 	}
 	return moderationHTTPClient(ctx, config, "gemini", payload)
+}
+
+func moderationGeminiGenerationConfig(modelName string) map[string]any {
+	generationConfig := map[string]any{
+		"responseMimeType": "application/json",
+		"responseSchema": map[string]any{
+			"type": "OBJECT",
+			"properties": map[string]any{
+				"decision":    map[string]any{"type": "STRING", "enum": []string{"allow", "block", "review"}},
+				"actor":       map[string]any{"type": "STRING", "enum": []string{"none", "user", "assistant", "both"}},
+				"severity":    map[string]any{"type": "STRING", "enum": []string{"none", "low", "medium", "high", "critical"}},
+				"categories":  map[string]any{"type": "ARRAY", "maxItems": moderationMaxCategories, "items": map[string]any{"type": "STRING", "maxLength": moderationMaxCategoryLength}},
+				"confidence":  map[string]any{"type": "NUMBER", "description": "A number from 0 to 1 inclusive"},
+				"reason_code": map[string]any{"type": "STRING", "maxLength": moderationMaxReasonCodeLength},
+			},
+			"required": []string{"decision", "actor", "severity", "categories", "confidence", "reason_code"},
+		},
+	}
+	// Gemini 2.5 and older thinking models use thinkingBudget rather than
+	// thinkingLevel. Content moderation deliberately does not derive or send a
+	// budget for those models; newer Gemini models use the low native level.
+	if reasoning.GeminiThinkingControlForModel(modelName) == reasoning.GeminiControlLevel {
+		generationConfig["thinkingConfig"] = map[string]string{
+			"thinkingLevel": reasoning.GeminiThinkingLevel(reasoning.LevelLow),
+		}
+	}
+	return generationConfig
 }
 
 func extractReviewJSON(response map[string]any) string {

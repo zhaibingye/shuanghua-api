@@ -149,15 +149,6 @@ export function ContentModerationUsersSection() {
   return (
     <SettingsSection title={t('Violating Users')}>
       <div className='space-y-4'>
-        <div className='rounded-xl border border-amber-500/25 bg-amber-500/5 p-4'>
-          <p className='text-sm font-medium'>{t('Moderation user notes')}</p>
-          <p className='text-muted-foreground mt-1 text-sm'>
-            {t(
-              'This page tracks users with active user violations in the configured retention window. The count is editable for operator bookkeeping; changing it does not delete original audit records.'
-            )}
-          </p>
-        </div>
-
         <div className='flex flex-col gap-3 rounded-xl border p-3 sm:flex-row sm:items-center sm:justify-between'>
           <div className='bg-muted/50 flex flex-wrap gap-1 rounded-lg p-1'>
             <Button

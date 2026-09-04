@@ -2,6 +2,7 @@ package controller
 
 import (
 	"errors"
+	"fmt"
 	"io"
 	"net/http"
 	"net/url"
@@ -155,8 +156,7 @@ func UpdateContentModerationSettings(c *gin.Context) {
 		}
 	}
 	currentConfig := setting.GetContentModerationSetting()
-	apiKeyRequired := baseURL == ""
-	if request.Enabled && (modelName == "" || (apiKeyRequired && apiKey == "" && strings.TrimSpace(currentConfig.APIKey) == "")) {
+	if request.Enabled && (modelName == "" || (apiKey == "" && strings.TrimSpace(currentConfig.APIKey) == "")) {
 		c.JSON(http.StatusBadRequest, gin.H{"success": false, "message": "model and API key are required when content moderation is enabled"})
 		return
 	}
@@ -252,6 +252,29 @@ func ListContentModerationConversations(c *gin.Context) {
 	c.JSON(http.StatusOK, gin.H{"success": true, "data": conversations, "total": total})
 }
 
+func decryptModerationTurnForDisplay(turn *model.ModerationTurn) error {
+	if turn == nil {
+		return errors.New("invalid moderation turn")
+	}
+	var decryptionErrors []error
+	decrypt := func(value model.ModerationText) model.ModerationText {
+		decrypted, err := service.DecryptModerationStoredText(string(value))
+		if err != nil {
+			decryptionErrors = append(decryptionErrors, err)
+			return ""
+		}
+		return model.ModerationText(decrypted)
+	}
+	turn.SystemPrompt = decrypt(turn.SystemPrompt)
+	turn.UserPrompt = decrypt(turn.UserPrompt)
+	turn.AssistantReply = decrypt(turn.AssistantReply)
+	if len(decryptionErrors) == 0 {
+		return nil
+	}
+	turn.ContentUnavailable = true
+	return errors.Join(decryptionErrors...)
+}
+
 func GetContentModerationConversation(c *gin.Context) {
 	recordManageAudit(c, "moderation.conversation_view", map[string]interface{}{"id": c.Param("id")})
 	conversationID, err := strconv.ParseInt(c.Param("id"), 10, 64)
@@ -298,24 +321,27 @@ func GetContentModerationConversation(c *gin.Context) {
 		}
 	}
 	for i := range turns {
-		if err := service.DecryptModerationTurnContent(&turns[i]); err != nil {
-			writeModerationDatabaseError(c, err)
-			return
+		if err := decryptModerationTurnForDisplay(&turns[i]); err != nil {
+			common.SysError(fmt.Sprintf("failed to decrypt moderation turn %d: %v", turns[i].ID, err))
 		}
 	}
 	for i := range jobs {
 		requestPayload, decryptErr := service.DecryptModerationStoredText(string(jobs[i].RequestPayload))
 		if decryptErr != nil {
-			writeModerationDatabaseError(c, decryptErr)
-			return
+			common.SysError(fmt.Sprintf("failed to decrypt moderation job %d request payload: %v", jobs[i].ID, decryptErr))
+			jobs[i].RequestPayload = ""
+			jobs[i].RequestPayloadUnavailable = true
+		} else {
+			jobs[i].RequestPayload = model.ModerationText(requestPayload)
 		}
 		responsePayload, decryptErr := service.DecryptModerationStoredText(string(jobs[i].ResponsePayload))
 		if decryptErr != nil {
-			writeModerationDatabaseError(c, decryptErr)
-			return
+			common.SysError(fmt.Sprintf("failed to decrypt moderation job %d response payload: %v", jobs[i].ID, decryptErr))
+			jobs[i].ResponsePayload = ""
+			jobs[i].ResponsePayloadUnavailable = true
+		} else {
+			jobs[i].ResponsePayload = model.ModerationText(responsePayload)
 		}
-		jobs[i].RequestPayload = model.ModerationText(requestPayload)
-		jobs[i].ResponsePayload = model.ModerationText(responsePayload)
 	}
 	c.JSON(http.StatusOK, gin.H{"success": true, "data": gin.H{
 		"conversation":  conversation,

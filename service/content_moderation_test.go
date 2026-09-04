@@ -137,6 +137,195 @@ func TestReviewModerationTurnSupportsResponsesAndGeminiProviders(t *testing.T) {
 	assert.Equal(t, "allow", geminiDecision.Decision)
 }
 
+func TestModerationProvidersUseLowReasoningWithoutLegacyGeminiBudget(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
+		body, err := io.ReadAll(request.Body)
+		require.NoError(t, err)
+		var payload map[string]any
+		require.NoError(t, common.Unmarshal(body, &payload))
+		writer.Header().Set("Content-Type", "application/json")
+		decisionJSON := `{"decision":"allow","actor":"none","severity":"none","categories":[],"confidence":0,"reason_code":"safe"}`
+		if request.Header.Get("x-goog-api-key") != "" {
+			generationConfig, ok := payload["generationConfig"].(map[string]any)
+			require.True(t, ok)
+			thinkingConfig, ok := generationConfig["thinkingConfig"].(map[string]any)
+			if strings.HasSuffix(request.URL.Path, "/legacy") {
+				assert.False(t, ok)
+				assert.NotContains(t, generationConfig, "thinkingBudget")
+			} else {
+				require.True(t, ok)
+				assert.Equal(t, "LOW", thinkingConfig["thinkingLevel"])
+			}
+			response, marshalErr := common.Marshal(map[string]any{
+				"candidates": []any{map[string]any{"content": map[string]any{"parts": []any{map[string]any{"text": decisionJSON}}}}},
+			})
+			require.NoError(t, marshalErr)
+			_, err = writer.Write(response)
+			require.NoError(t, err)
+			return
+		}
+
+		reasoning, ok := payload["reasoning"].(map[string]any)
+		require.True(t, ok)
+		assert.Equal(t, "low", reasoning["effort"])
+		response, marshalErr := common.Marshal(map[string]string{"output_text": decisionJSON})
+		require.NoError(t, marshalErr)
+		_, err = writer.Write(response)
+		require.NoError(t, err)
+	}))
+	defer server.Close()
+
+	originalHTTPClient := httpClient
+	originalProtectedHTTPClient := ssrfProtectedHTTPClient
+	httpClient = server.Client()
+	ssrfProtectedHTTPClient = nil
+	t.Cleanup(func() {
+		httpClient = originalHTTPClient
+		ssrfProtectedHTTPClient = originalProtectedHTTPClient
+	})
+
+	turn := &model.ModerationTurn{
+		SystemPrompt:   model.ModerationText("system"),
+		UserPrompt:     model.ModerationText("user"),
+		AssistantReply: model.ModerationText("assistant"),
+		ResponseStatus: "success",
+	}
+	_, _, err := reviewModerationTurn(context.Background(), turn, setting.ContentModerationSetting{
+		Provider:       "responses",
+		BaseURL:        server.URL,
+		APIKey:         "responses-key",
+		Model:          "gpt-5-mini",
+		TimeoutSeconds: 2,
+	})
+	require.NoError(t, err)
+
+	_, _, err = reviewModerationTurn(context.Background(), turn, setting.ContentModerationSetting{
+		Provider:       "gemini",
+		BaseURL:        server.URL,
+		APIKey:         "gemini-key",
+		Model:          "gemini-3-flash-preview",
+		TimeoutSeconds: 2,
+	})
+	require.NoError(t, err)
+
+	_, _, err = reviewModerationTurn(context.Background(), turn, setting.ContentModerationSetting{
+		Provider:       "gemini",
+		BaseURL:        server.URL + "/legacy",
+		APIKey:         "gemini-key",
+		Model:          "gemini-2.5-flash",
+		TimeoutSeconds: 2,
+	})
+	require.NoError(t, err)
+
+	legacyConfig := moderationGeminiGenerationConfig("gemini-1.5-pro")
+	assert.NotContains(t, legacyConfig, "thinkingConfig")
+}
+
+func TestProcessContentModerationQueueSkipsCustomEndpointWithoutAPIKey(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(_ http.ResponseWriter, _ *http.Request) {
+		t.Errorf("content moderation request was sent without an API key")
+	}))
+	defer server.Close()
+
+	originalHTTPClient := httpClient
+	originalProtectedHTTPClient := ssrfProtectedHTTPClient
+	httpClient = server.Client()
+	ssrfProtectedHTTPClient = nil
+	t.Cleanup(func() {
+		httpClient = originalHTTPClient
+		ssrfProtectedHTTPClient = originalProtectedHTTPClient
+	})
+
+	common.OptionMapRWMutex.Lock()
+	previousOptions := make(map[string]string, len(common.OptionMap))
+	for key, value := range common.OptionMap {
+		previousOptions[key] = value
+	}
+	if common.OptionMap == nil {
+		common.OptionMap = make(map[string]string)
+	}
+	common.OptionMap[setting.ContentModerationEnabledOption] = "true"
+	common.OptionMap[setting.ContentModerationBaseURLOption] = server.URL
+	common.OptionMap[setting.ContentModerationAPIKeyOption] = ""
+	common.OptionMap[setting.ContentModerationModelOption] = "moderation-model"
+	common.OptionMap[setting.ContentModerationProviderOption] = "responses"
+	common.OptionMap[setting.ContentModerationTimeoutSecondsOption] = "2"
+	common.OptionMap[setting.ContentModerationMaxRetriesOption] = "1"
+	common.OptionMap[setting.ContentModerationPromptVersionOption] = "v1"
+	common.OptionMapRWMutex.Unlock()
+	t.Cleanup(func() {
+		common.OptionMapRWMutex.Lock()
+		common.OptionMap = previousOptions
+		common.OptionMapRWMutex.Unlock()
+	})
+
+	require.NoError(t, model.DB.AutoMigrate(
+		&model.ModerationConversation{},
+		&model.ModerationTurn{},
+		&model.ModerationJob{},
+		&model.ModerationNotification{},
+	))
+
+	userID := 980001
+	conversationKey := fmt.Sprintf("moderation-custom-endpoint-%d", time.Now().UnixNano())
+	now := common.GetTimestamp()
+	conversation := &model.ModerationConversation{
+		UserID:          userID,
+		ConversationID:  conversationKey,
+		Status:          model.ModerationConversationActive,
+		FirstActivityAt: now,
+		LastActivityAt:  now,
+		ExpiresAt:       now + 3600,
+	}
+	require.NoError(t, model.DB.Create(conversation).Error)
+
+	turn := &model.ModerationTurn{
+		ConversationID:  conversation.ID,
+		UserID:          userID,
+		ConversationKey: conversationKey,
+		RoundNumber:     1,
+		SystemPrompt:    model.ModerationText("system"),
+		UserPrompt:      model.ModerationText("user"),
+		AssistantReply:  model.ModerationText("assistant"),
+		ResponseStatus:  "success",
+		RelayFormat:     string(types.RelayFormatOpenAIResponses),
+		Model:           "gpt-5.3-codex-spark",
+		ReviewRequired:  true,
+		CreatedAt:       now,
+		UpdatedAt:       now,
+		ExpiresAt:       now + 3600,
+	}
+	require.NoError(t, encryptModerationTurnContent(turn))
+	require.NoError(t, model.DB.Create(turn).Error)
+
+	job := &model.ModerationJob{
+		TurnID:         turn.ID,
+		ConversationID: conversation.ID,
+		UserID:         userID,
+		Status:         model.ModerationJobPending,
+		NextAttemptAt:  now,
+		Provider:       "responses",
+		Model:          "moderation-model",
+		PromptVersion:  "v1",
+		ExpiresAt:      now + 3600,
+		CreatedAt:      now,
+		UpdatedAt:      now,
+	}
+	require.NoError(t, model.DB.Create(job).Error)
+	t.Cleanup(func() {
+		_ = model.DB.Delete(job).Error
+		_ = model.DB.Delete(turn).Error
+		_ = model.DB.Delete(conversation).Error
+	})
+
+	require.NoError(t, ProcessContentModerationQueue(context.Background()))
+
+	var storedJob model.ModerationJob
+	require.NoError(t, model.DB.First(&storedJob, job.ID).Error)
+	assert.Equal(t, model.ModerationJobPending, storedJob.Status)
+	assert.Zero(t, storedJob.Attempts)
+}
+
 func TestApplyModerationDecisionNotifiesAssistantForMixedActorConfidence(t *testing.T) {
 	require.NoError(t, model.DB.AutoMigrate(
 		&model.ModerationConversation{},
@@ -422,6 +611,27 @@ func TestModerationEndpointExpandsGeminiModelPlaceholder(t *testing.T) {
 	}, "gemini")
 	require.NoError(t, err)
 	assert.Equal(t, "https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent", endpoint)
+
+	endpoint, err = moderationEndpoint(setting.ContentModerationSetting{
+		BaseURL: "https://api.openai.com/v1",
+		Model:   "gpt-5-mini",
+	}, "responses")
+	require.NoError(t, err)
+	assert.Equal(t, "https://api.openai.com/v1/responses", endpoint)
+
+	endpoint, err = moderationEndpoint(setting.ContentModerationSetting{
+		BaseURL: "https://generativelanguage.googleapis.com/v1beta",
+		Model:   "gemini-3-flash-preview",
+	}, "gemini")
+	require.NoError(t, err)
+	assert.Equal(t, "https://generativelanguage.googleapis.com/v1beta/models/gemini-3-flash-preview:generateContent", endpoint)
+
+	endpoint, err = moderationEndpoint(setting.ContentModerationSetting{
+		BaseURL: "https://proxy.example/review",
+		Model:   "gpt-5-mini",
+	}, "responses")
+	require.NoError(t, err)
+	assert.Equal(t, "https://proxy.example/review", endpoint)
 
 	_, err = moderationEndpoint(setting.ContentModerationSetting{BaseURL: "https://example.com/{model}"}, "gemini")
 	require.Error(t, err)

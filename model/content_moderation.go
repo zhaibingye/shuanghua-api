@@ -88,6 +88,7 @@ type ModerationTurn struct {
 	CreatedAt                 int64          `json:"created_at" gorm:"autoCreateTime;not null;index"`
 	UpdatedAt                 int64          `json:"updated_at" gorm:"autoUpdateTime;not null"`
 	ExpiresAt                 int64          `json:"expires_at" gorm:"not null;index"`
+	ContentUnavailable        bool           `json:"content_unavailable,omitempty" gorm:"-"`
 }
 
 // ModerationTokenState remembers token statuses changed by moderation so an
@@ -137,23 +138,25 @@ type ModerationUserRecord struct {
 }
 
 type ModerationJob struct {
-	ID              int64          `json:"id" gorm:"primaryKey"`
-	TurnID          int64          `json:"turn_id" gorm:"not null;uniqueIndex"`
-	ConversationID  int64          `json:"conversation_row_id" gorm:"not null;index"`
-	UserID          int            `json:"user_id" gorm:"not null;index"`
-	Status          string         `json:"status" gorm:"type:varchar(16);not null;index"`
-	Attempts        int            `json:"attempts" gorm:"not null;default:0"`
-	NextAttemptAt   int64          `json:"next_attempt_at" gorm:"not null;index"`
-	LockedAt        int64          `json:"locked_at,omitempty" gorm:"not null;default:0"`
-	RequestPayload  ModerationText `json:"request_payload,omitempty" gorm:"type:text"`
-	ResponsePayload ModerationText `json:"response_payload,omitempty" gorm:"type:text"`
-	LastError       string         `json:"last_error,omitempty" gorm:"type:text"`
-	Provider        string         `json:"provider" gorm:"type:varchar(32)"`
-	Model           string         `json:"model" gorm:"type:varchar(128)"`
-	PromptVersion   string         `json:"prompt_version" gorm:"type:varchar(32)"`
-	ExpiresAt       int64          `json:"expires_at" gorm:"not null;index"`
-	CreatedAt       int64          `json:"created_at" gorm:"autoCreateTime;not null;index"`
-	UpdatedAt       int64          `json:"updated_at" gorm:"autoUpdateTime;not null"`
+	ID                         int64          `json:"id" gorm:"primaryKey"`
+	TurnID                     int64          `json:"turn_id" gorm:"not null;uniqueIndex"`
+	ConversationID             int64          `json:"conversation_row_id" gorm:"not null;index"`
+	UserID                     int            `json:"user_id" gorm:"not null;index"`
+	Status                     string         `json:"status" gorm:"type:varchar(16);not null;index"`
+	Attempts                   int            `json:"attempts" gorm:"not null;default:0"`
+	NextAttemptAt              int64          `json:"next_attempt_at" gorm:"not null;index"`
+	LockedAt                   int64          `json:"locked_at,omitempty" gorm:"not null;default:0"`
+	RequestPayload             ModerationText `json:"request_payload,omitempty" gorm:"type:text"`
+	ResponsePayload            ModerationText `json:"response_payload,omitempty" gorm:"type:text"`
+	LastError                  string         `json:"last_error,omitempty" gorm:"type:text"`
+	Provider                   string         `json:"provider" gorm:"type:varchar(32)"`
+	Model                      string         `json:"model" gorm:"type:varchar(128)"`
+	PromptVersion              string         `json:"prompt_version" gorm:"type:varchar(32)"`
+	ExpiresAt                  int64          `json:"expires_at" gorm:"not null;index"`
+	CreatedAt                  int64          `json:"created_at" gorm:"autoCreateTime;not null;index"`
+	UpdatedAt                  int64          `json:"updated_at" gorm:"autoUpdateTime;not null"`
+	RequestPayloadUnavailable  bool           `json:"request_payload_unavailable,omitempty" gorm:"-"`
+	ResponsePayloadUnavailable bool           `json:"response_payload_unavailable,omitempty" gorm:"-"`
 }
 
 type ModerationViolation struct {
