@@ -167,6 +167,41 @@ export type ModerationViolationListResponse = {
   total: number
 }
 
+export type ModerationUser = {
+  record_id: number
+  user_id: number
+  username: string
+  display_name: string
+  email: string
+  account_status: number
+  record_status: 'active' | 'history'
+  violation_count: number
+  actual_violation_count: number
+  max_violation_count: number
+  last_violation_at: number
+  note: string
+  archived_at?: number
+  created_at: number
+  updated_at: number
+}
+
+export type ModerationUserDetail = {
+  user: ModerationUser
+  conversations: ModerationConversation[]
+  violations: ModerationViolation[]
+}
+
+export type ModerationUserListResponse = {
+  success: boolean
+  data: ModerationUser[]
+  total: number
+}
+
+export type ModerationUserDetailResponse = {
+  success: boolean
+  data: ModerationUserDetail
+}
+
 export type UpdateOptionRequest = {
   key: string
   value: string | boolean | number

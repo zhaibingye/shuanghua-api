@@ -62,6 +62,14 @@ function displayTime(timestamp: number) {
   return new Date(timestamp * 1000).toLocaleString()
 }
 
+function formatModerationPayload(value: string) {
+  try {
+    return JSON.stringify(JSON.parse(value), null, 2)
+  } catch {
+    return value
+  }
+}
+
 function statusLabel(status: string, t: (key: string) => string) {
   const labels: Record<string, string> = {
     active: 'Active',
@@ -124,9 +132,10 @@ function ConversationRow(props: ConversationRowProps) {
 type ConversationDetailProps = {
   detail: ModerationConversationDetail
   onRefresh: () => void
+  onClose: () => void
 }
 
-function ConversationDetail(props: ConversationDetailProps) {
+export function ConversationDetail(props: ConversationDetailProps) {
   const { t } = useTranslation()
   const queryClient = useQueryClient()
   const [actionReason, setActionReason] = useState('')
@@ -154,9 +163,18 @@ function ConversationDetail(props: ConversationDetailProps) {
   const restoreMutation = useMutation({
     mutationFn: (reason: string) =>
       restoreContentModerationUser(props.detail.conversation.user_id, reason),
-    onSuccess: () => {
+    onSuccess: async () => {
       setActionReason('')
       toast.success(t('Account restored'))
+      await Promise.all([
+        queryClient.invalidateQueries({
+          queryKey: ['moderation-conversations'],
+        }),
+        queryClient.invalidateQueries({
+          queryKey: ['moderation-conversation', props.detail.conversation.id],
+        }),
+      ])
+      props.onRefresh()
     },
     onError: () => toast.error(t('Failed to update moderation record')),
   })
@@ -172,16 +190,22 @@ function ConversationDetail(props: ConversationDetailProps) {
     onSuccess: async () => {
       setActionReason('')
       toast.success(t('Violation resolved'))
-      await queryClient.invalidateQueries({
-        queryKey: ['moderation-conversation', props.detail.conversation.id],
-      })
+      await Promise.all([
+        queryClient.invalidateQueries({
+          queryKey: ['moderation-conversation', props.detail.conversation.id],
+        }),
+        queryClient.invalidateQueries({
+          queryKey: ['moderation-conversations'],
+        }),
+      ])
+      props.onRefresh()
     },
     onError: () => toast.error(t('Failed to update moderation record')),
   })
 
   return (
     <div className='bg-muted/20 space-y-5 rounded-xl border p-4'>
-      <div className='flex flex-wrap items-center justify-between gap-2'>
+      <div className='flex flex-wrap items-start justify-between gap-2'>
         <div>
           <h4 className='font-semibold'>{t('Timeline')}</h4>
           <p className='text-muted-foreground text-sm'>
@@ -189,7 +213,17 @@ function ConversationDetail(props: ConversationDetailProps) {
             {statusLabel(props.detail.conversation.status, t)}
           </p>
         </div>
-        <div className='flex flex-wrap gap-2'>
+        <div className='flex flex-wrap items-center gap-2'>
+          <Button
+            type='button'
+            variant='ghost'
+            size='icon-sm'
+            onClick={props.onClose}
+            aria-label={t('Close details')}
+            title={t('Close details')}
+          >
+            <X />
+          </Button>
           {props.detail.conversation.status === 'blocked' && (
             <Button
               type='button'
@@ -243,22 +277,28 @@ function ConversationDetail(props: ConversationDetailProps) {
             <span>{turn.model}</span>
             <span>{displayTime(turn.created_at)}</span>
           </div>
-          <div className='space-y-2 text-sm'>
-            <div>
-              <p className='font-medium'>{t('System prompt')}</p>
-              <p className='break-words whitespace-pre-wrap'>
+          <div className='grid gap-3 text-sm'>
+            <div className='overflow-hidden rounded-lg border border-sky-500/25 bg-sky-500/5'>
+              <div className='border-b border-sky-500/20 px-3 py-2 font-medium text-sky-700 dark:text-sky-300'>
+                {t('System prompt')}
+              </div>
+              <p className='max-h-56 overflow-auto px-3 py-3 leading-6 break-words whitespace-pre-wrap'>
                 {turn.system_prompt || '—'}
               </p>
             </div>
-            <div>
-              <p className='font-medium'>{t('User prompt')}</p>
-              <p className='break-words whitespace-pre-wrap'>
+            <div className='overflow-hidden rounded-lg border border-amber-500/25 bg-amber-500/5'>
+              <div className='border-b border-amber-500/20 px-3 py-2 font-medium text-amber-700 dark:text-amber-300'>
+                {t('User prompt')}
+              </div>
+              <p className='max-h-72 overflow-auto px-3 py-3 leading-6 break-words whitespace-pre-wrap'>
                 {turn.user_prompt || '—'}
               </p>
             </div>
-            <div>
-              <p className='font-medium'>{t('Assistant response')}</p>
-              <p className='break-words whitespace-pre-wrap'>
+            <div className='overflow-hidden rounded-lg border border-emerald-500/25 bg-emerald-500/5'>
+              <div className='border-b border-emerald-500/20 px-3 py-2 font-medium text-emerald-700 dark:text-emerald-300'>
+                {t('Assistant response')}
+              </div>
+              <p className='max-h-72 overflow-auto px-3 py-3 leading-7 break-words whitespace-pre-wrap'>
                 {turn.assistant_reply || '—'}
               </p>
             </div>
@@ -286,8 +326,8 @@ function ConversationDetail(props: ConversationDetailProps) {
               <p className='text-destructive mt-2'>{job.last_error}</p>
             )}
             {job.response_payload && (
-              <pre className='bg-muted mt-2 max-h-48 overflow-auto rounded p-2 text-xs break-words whitespace-pre-wrap'>
-                {job.response_payload}
+              <pre className='bg-muted mt-2 max-h-64 overflow-auto rounded p-3 font-mono text-xs leading-5 break-words whitespace-pre-wrap'>
+                {formatModerationPayload(job.response_payload)}
               </pre>
             )}
           </div>
@@ -439,9 +479,7 @@ export function ContentModerationRecordsSection() {
       )
     }
     if (appliedFilters.endTime) {
-      params.end_timestamp = Math.floor(
-        appliedFilters.endTime.getTime() / 1000
-      )
+      params.end_timestamp = Math.floor(appliedFilters.endTime.getTime() / 1000)
     }
     return params
   }, [appliedFilters, page, pageSize])
@@ -518,13 +556,13 @@ export function ContentModerationRecordsSection() {
       <div className='flex items-center justify-between gap-3'>
         <p className='text-muted-foreground text-sm'>
           {t(
-            'Administrators can inspect the retained timeline and resolve false positives.'
+            'Review retained moderation timelines here. Marking a result as a false positive keeps the original record but excludes it from the future violation count; it does not automatically restore an account.'
           )}
         </p>
       </div>
 
       {/* Quick Filter Bar */}
-      <div className='bg-card/50 rounded-xl border p-3.5 space-y-3'>
+      <div className='bg-card/50 space-y-3 rounded-xl border p-3.5'>
         <div className='grid grid-cols-1 gap-2.5 sm:grid-cols-2 lg:grid-cols-4'>
           <CompactDateTimeRangePicker
             start={draftFilters.startTime}
@@ -584,7 +622,7 @@ export function ContentModerationRecordsSection() {
         </div>
 
         {/* Filter actions and stats row */}
-        <div className='flex flex-wrap items-center justify-between gap-2 pt-1 border-t'>
+        <div className='flex flex-wrap items-center justify-between gap-2 border-t pt-1'>
           <div className='flex flex-wrap items-center gap-2'>
             <Button
               type='button'
@@ -593,7 +631,7 @@ export function ContentModerationRecordsSection() {
               disabled={query.isFetching}
               className='h-8 px-3'
             >
-              <Search className='size-3.5 mr-1.5' />
+              <Search className='mr-1.5 size-3.5' />
               <span>{t('Search')}</span>
             </Button>
             <Button
@@ -604,7 +642,7 @@ export function ContentModerationRecordsSection() {
               disabled={!hasActiveFilters}
               className='h-8 px-3'
             >
-              <RotateCcw className='size-3.5 mr-1.5' />
+              <RotateCcw className='mr-1.5 size-3.5' />
               <span>{t('Reset')}</span>
             </Button>
             <Button
@@ -634,43 +672,43 @@ export function ContentModerationRecordsSection() {
         {hasActiveFilters && (
           <div className='flex flex-wrap items-center gap-1.5 pt-1'>
             {appliedFilters.status !== 'all' && (
-              <Badge variant='secondary' className='text-xs gap-1 font-normal'>
+              <Badge variant='secondary' className='gap-1 text-xs font-normal'>
                 <span>
                   {t('Status')}: {statusLabel(appliedFilters.status, t)}
                 </span>
                 <X
-                  className='size-3 cursor-pointer hover:text-foreground'
+                  className='hover:text-foreground size-3 cursor-pointer'
                   onClick={() => handleRemoveFilter('status')}
                 />
               </Badge>
             )}
             {appliedFilters.userId.trim() !== '' && (
-              <Badge variant='secondary' className='text-xs gap-1 font-normal'>
+              <Badge variant='secondary' className='gap-1 text-xs font-normal'>
                 <span>
                   {t('User')}: #{appliedFilters.userId}
                 </span>
                 <X
-                  className='size-3 cursor-pointer hover:text-foreground'
+                  className='hover:text-foreground size-3 cursor-pointer'
                   onClick={() => handleRemoveFilter('userId')}
                 />
               </Badge>
             )}
             {appliedFilters.conversationId.trim() !== '' && (
-              <Badge variant='secondary' className='text-xs gap-1 font-normal'>
+              <Badge variant='secondary' className='gap-1 text-xs font-normal'>
                 <span>
                   {t('Conversation')}: {appliedFilters.conversationId}
                 </span>
                 <X
-                  className='size-3 cursor-pointer hover:text-foreground'
+                  className='hover:text-foreground size-3 cursor-pointer'
                   onClick={() => handleRemoveFilter('conversationId')}
                 />
               </Badge>
             )}
             {(appliedFilters.startTime || appliedFilters.endTime) && (
-              <Badge variant='secondary' className='text-xs gap-1 font-normal'>
+              <Badge variant='secondary' className='gap-1 text-xs font-normal'>
                 <span>{t('Date Range')}</span>
                 <X
-                  className='size-3 cursor-pointer hover:text-foreground'
+                  className='hover:text-foreground size-3 cursor-pointer'
                   onClick={() => handleRemoveFilter('timeRange')}
                 />
               </Badge>
@@ -680,7 +718,7 @@ export function ContentModerationRecordsSection() {
               variant='ghost'
               size='sm'
               onClick={handleReset}
-              className='h-6 text-xs px-2 text-muted-foreground hover:text-foreground'
+              className='text-muted-foreground hover:text-foreground h-6 px-2 text-xs'
             >
               {t('Clear all')}
             </Button>
@@ -712,7 +750,7 @@ export function ContentModerationRecordsSection() {
       {/* Pagination controls */}
       {total > 0 && (
         <div className='flex flex-wrap items-center justify-between gap-3 pt-2 text-sm'>
-          <div className='flex items-center gap-2 text-muted-foreground text-xs'>
+          <div className='text-muted-foreground flex items-center gap-2 text-xs'>
             <span>{t('Rows per page')}</span>
             <Select
               value={String(pageSize)}
@@ -776,6 +814,7 @@ export function ContentModerationRecordsSection() {
         <ConversationDetail
           detail={detailQuery.data.data}
           onRefresh={() => query.refetch()}
+          onClose={() => setSelectedID(null)}
         />
       )}
     </SettingsSection>

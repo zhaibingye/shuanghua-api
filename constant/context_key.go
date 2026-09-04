@@ -76,8 +76,10 @@ const (
 
 	// Content moderation request metadata is kept in the request context until
 	// the relay response has been fully written, then persisted asynchronously.
-	ContextKeyModerationRequestContent ContextKey = "moderation_request_content"
-	ContextKeyModerationConversationID ContextKey = "moderation_conversation_id"
-	ContextKeyModerationCapture        ContextKey = "moderation_capture"
-	ContextKeyModerationEnabledAtStart ContextKey = "moderation_enabled_at_start"
+	ContextKeyModerationRequestContent         ContextKey = "moderation_request_content"
+	ContextKeyModerationConversationID         ContextKey = "moderation_conversation_id"
+	ContextKeyModerationConversationIDExplicit ContextKey = "moderation_conversation_id_explicit"
+	ContextKeyModerationConversationEvidence   ContextKey = "moderation_conversation_evidence"
+	ContextKeyModerationCapture                ContextKey = "moderation_capture"
+	ContextKeyModerationEnabledAtStart         ContextKey = "moderation_enabled_at_start"
 )

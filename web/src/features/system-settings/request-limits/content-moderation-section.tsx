@@ -20,7 +20,7 @@ import { zodResolver } from '@hookform/resolvers/zod'
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import { RotateCcw } from 'lucide-react'
 import { useEffect, type ChangeEvent } from 'react'
-import { useForm } from 'react-hook-form'
+import { useForm, useWatch } from 'react-hook-form'
 import { useTranslation } from 'react-i18next'
 import { toast } from 'sonner'
 import * as z from 'zod'
@@ -128,6 +128,11 @@ export function ContentModerationSection(props: ContentModerationSectionProps) {
     resolver: zodResolver(contentModerationSchema),
     defaultValues: { ...fallbackValues, ...props.defaultValues },
   })
+  const selectedProvider = useWatch({
+    control: form.control,
+    name: 'provider',
+  })
+  const isGeminiProvider = selectedProvider === 'gemini'
 
   useEffect(() => {
     const data = query.data?.data
@@ -213,18 +218,18 @@ export function ContentModerationSection(props: ContentModerationSectionProps) {
             name='channels'
             render={({ field }) => (
               <FormItem>
-                <FormLabel>{t('Moderation channels')}</FormLabel>
+                <FormLabel>{t('Channels to moderate')}</FormLabel>
                 <FormControl>
                   <Input
                     placeholder={t(
-                      'e.g. 1, 2, 3 (leave blank to disable moderation for all channels)'
+                      'e.g. 1, 2, 3 (only these channels will be reviewed)'
                     )}
                     {...field}
                   />
                 </FormControl>
                 <FormDescription>
                   {t(
-                    'Only conversations on the specified channels will be reviewed and recorded. Enter channel IDs separated by commas or spaces. Leave blank to moderate no channels.'
+                    'Content moderation only runs for requests routed through these channel IDs. Separate IDs with commas or spaces. Leave empty to disable moderation.'
                   )}
                 </FormDescription>
                 <FormMessage />
@@ -236,18 +241,18 @@ export function ContentModerationSection(props: ContentModerationSectionProps) {
             name='user_whitelist'
             render={({ field }) => (
               <FormItem>
-                <FormLabel>{t('User whitelist')}</FormLabel>
+                <FormLabel>{t('Users excluded from moderation')}</FormLabel>
                 <FormControl>
                   <Input
                     placeholder={t(
-                      'e.g. 1, 2, 3 (root admin ID: 1 is always whitelisted)'
+                      'e.g. 1, 2, 3 (these users will be skipped)'
                     )}
                     {...field}
                   />
                 </FormControl>
                 <FormDescription>
                   {t(
-                    'Users in the whitelist will completely bypass content moderation, will not be reviewed, and no conversation records will be saved. Enter user IDs separated by commas or spaces. The super administrator (ID: 1) is whitelisted by default.'
+                    'These user IDs completely bypass content moderation: their requests are not reviewed and no moderation conversation records are saved. Separate IDs with commas or spaces. The root administrator (ID: 1) is always excluded.'
                   )}
                 </FormDescription>
                 <FormMessage />
@@ -278,7 +283,7 @@ export function ContentModerationSection(props: ContentModerationSectionProps) {
                   </Select>
                   <FormDescription>
                     {t(
-                      'This configuration is independent from relay channels.'
+                      'This selects the request format used when calling the moderation model; it does not change your relay channel format.'
                     )}
                   </FormDescription>
                   <FormMessage />
@@ -292,7 +297,12 @@ export function ContentModerationSection(props: ContentModerationSectionProps) {
                 <FormItem>
                   <FormLabel>{t('Moderation model')}</FormLabel>
                   <FormControl>
-                    <Input placeholder='gpt-4.1-mini' {...field} />
+                    <Input
+                      placeholder={
+                        isGeminiProvider ? 'gemini-2.5-flash' : 'gpt-4.1-mini'
+                      }
+                      {...field}
+                    />
                   </FormControl>
                   <FormMessage />
                 </FormItem>
@@ -307,7 +317,11 @@ export function ContentModerationSection(props: ContentModerationSectionProps) {
                 <FormLabel>{t('Moderation API URL')}</FormLabel>
                 <FormControl>
                   <Input
-                    placeholder='https://api.openai.com/v1/responses'
+                    placeholder={
+                      isGeminiProvider
+                        ? 'https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent'
+                        : 'https://api.openai.com/v1/responses'
+                    }
                     {...field}
                   />
                 </FormControl>
@@ -343,14 +357,29 @@ export function ContentModerationSection(props: ContentModerationSectionProps) {
               </FormItem>
             )}
           />
+          <p className='text-muted-foreground text-sm'>
+            {t(
+              'Sampling applies after the first three rounds when no local risk signal is found. The normal rate is used for users without recent violations; the elevated rate is used after one recent violation. Users with two or more recent violations are always reviewed.'
+            )}
+          </p>
           <div className='grid gap-4 sm:grid-cols-2 md:grid-cols-3 lg:grid-cols-5'>
             {(
               [
-                ['violation_retention_days', 'Violation window (days)', 1, 365],
-                ['timeout_seconds', 'Timeout seconds', 1, 120],
-                ['max_retries', 'Maximum retries', 1, 5],
-                ['normal_sample_rate', 'Normal sample rate', 0, 100],
-                ['elevated_sample_rate', 'Elevated sample rate', 0, 100],
+                [
+                  'violation_retention_days',
+                  'Violation retention (days)',
+                  1,
+                  365,
+                ],
+                ['timeout_seconds', 'Request timeout (seconds)', 1, 120],
+                ['max_retries', 'Retry count', 1, 5],
+                ['normal_sample_rate', 'Normal user sample rate (%)', 0, 100],
+                [
+                  'elevated_sample_rate',
+                  'Elevated-risk sample rate (%)',
+                  0,
+                  100,
+                ],
               ] as const
             ).map(([name, label, min, max]) => (
               <FormField
