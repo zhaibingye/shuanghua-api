@@ -64,6 +64,9 @@ export const DEFAULT_CONTENT_MODERATION_POLICY_PROMPT =
 
 const contentModerationSchema = z.object({
   enabled: z.boolean(),
+  channels: z.string().max(2048),
+  user_whitelist: z.string().max(2048),
+  violation_retention_days: z.number().int().min(1).max(365),
   provider: z.enum(['responses', 'gemini']),
   base_url: z.string().max(2048),
   api_key: z.string().max(4096),
@@ -84,6 +87,9 @@ type ContentModerationSectionProps = {
 
 const fallbackValues: ContentModerationFormValues = {
   enabled: false,
+  channels: '',
+  user_whitelist: '1',
+  violation_retention_days: 7,
   provider: 'responses',
   base_url: '',
   api_key: '',
@@ -128,6 +134,9 @@ export function ContentModerationSection(props: ContentModerationSectionProps) {
     if (!data) return
     form.reset({
       enabled: data.enabled,
+      channels: data.channels ?? '',
+      user_whitelist: data.user_whitelist ?? '1',
+      violation_retention_days: data.violation_retention_days ?? 7,
       provider: data.provider,
       base_url: data.base_url,
       api_key: '',
@@ -197,6 +206,52 @@ export function ContentModerationSection(props: ContentModerationSectionProps) {
                   />
                 </FormControl>
               </SettingsSwitchItem>
+            )}
+          />
+          <FormField
+            control={form.control}
+            name='channels'
+            render={({ field }) => (
+              <FormItem>
+                <FormLabel>{t('Moderation channels')}</FormLabel>
+                <FormControl>
+                  <Input
+                    placeholder={t(
+                      'e.g. 1, 2, 3 (leave blank to disable moderation for all channels)'
+                    )}
+                    {...field}
+                  />
+                </FormControl>
+                <FormDescription>
+                  {t(
+                    'Only conversations on the specified channels will be reviewed and recorded. Enter channel IDs separated by commas or spaces. Leave blank to moderate no channels.'
+                  )}
+                </FormDescription>
+                <FormMessage />
+              </FormItem>
+            )}
+          />
+          <FormField
+            control={form.control}
+            name='user_whitelist'
+            render={({ field }) => (
+              <FormItem>
+                <FormLabel>{t('User whitelist')}</FormLabel>
+                <FormControl>
+                  <Input
+                    placeholder={t(
+                      'e.g. 1, 2, 3 (root admin ID: 1 is always whitelisted)'
+                    )}
+                    {...field}
+                  />
+                </FormControl>
+                <FormDescription>
+                  {t(
+                    'Users in the whitelist will completely bypass content moderation, will not be reviewed, and no conversation records will be saved. Enter user IDs separated by commas or spaces. The super administrator (ID: 1) is whitelisted by default.'
+                  )}
+                </FormDescription>
+                <FormMessage />
+              </FormItem>
             )}
           />
           <div className='grid gap-4 md:grid-cols-2'>
@@ -288,9 +343,10 @@ export function ContentModerationSection(props: ContentModerationSectionProps) {
               </FormItem>
             )}
           />
-          <div className='grid gap-4 md:grid-cols-4'>
+          <div className='grid gap-4 sm:grid-cols-2 md:grid-cols-3 lg:grid-cols-5'>
             {(
               [
+                ['violation_retention_days', 'Violation window (days)', 1, 365],
                 ['timeout_seconds', 'Timeout seconds', 1, 120],
                 ['max_retries', 'Maximum retries', 1, 5],
                 ['normal_sample_rate', 'Normal sample rate', 0, 100],

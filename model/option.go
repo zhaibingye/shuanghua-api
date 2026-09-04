@@ -179,6 +179,9 @@ func InitOptionMap() {
 	common.OptionMap["AutomaticRetryStatusCodes"] = operation_setting.AutomaticRetryStatusCodesToString()
 	common.OptionMap["ExposeRatioEnabled"] = strconv.FormatBool(ratio_setting.IsExposeRatioEnabled())
 	common.OptionMap[setting.ContentModerationEnabledOption] = "false"
+	common.OptionMap[setting.ContentModerationChannelsOption] = ""
+	common.OptionMap[setting.ContentModerationUserWhitelistOption] = setting.DefaultContentModerationUserWhitelist
+	common.OptionMap[setting.ContentModerationViolationRetentionDaysOption] = strconv.Itoa(setting.DefaultContentModerationViolationRetentionDays)
 	common.OptionMap[setting.ContentModerationProviderOption] = setting.DefaultContentModerationProvider
 	common.OptionMap[setting.ContentModerationBaseURLOption] = ""
 	common.OptionMap[setting.ContentModerationAPIKeyOption] = ""

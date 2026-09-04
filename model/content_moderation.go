@@ -47,7 +47,7 @@ func (ModerationText) GormDBDataType(db *gorm.DB, _ *schema.Field) string {
 
 // ModerationConversation keeps conversation-level state. The text itself is
 // stored in ModerationTurn and expires seven days after the last activity.
-// Conversation metadata is retained long enough to support the 180-day
+// Conversation metadata is retained long enough to support the configured
 // account-abuse window and administrator decisions.
 type ModerationConversation struct {
 	ID              int64  `json:"id" gorm:"primaryKey"`
@@ -72,6 +72,7 @@ type ModerationTurn struct {
 	UserID          int            `json:"user_id" gorm:"not null;index;uniqueIndex:idx_moderation_turns_conversation_round,priority:1"`
 	ConversationKey string         `json:"conversation_id" gorm:"type:varchar(128);not null;uniqueIndex:idx_moderation_turns_conversation_round,priority:2"`
 	RoundNumber     int            `json:"round_number" gorm:"not null;uniqueIndex:idx_moderation_turns_conversation_round,priority:3"`
+	ChannelID       int            `json:"channel_id,omitempty" gorm:"index"`
 	RequestID       string         `json:"request_id" gorm:"type:varchar(128);index"`
 	SystemPrompt    ModerationText `json:"system_prompt" gorm:"type:text"`
 	UserPrompt      ModerationText `json:"user_prompt" gorm:"type:text"`
@@ -212,7 +213,7 @@ func CountRecentUserModerationViolationsWithTx(tx *gorm.DB, userID int, cutoff i
 		return 0, errors.New("invalid moderation user database or user")
 	}
 	if cutoff <= 0 {
-		cutoff = time.Now().Add(-180 * 24 * time.Hour).Unix()
+		cutoff = time.Now().Add(-7 * 24 * time.Hour).Unix()
 	}
 	var count int64
 	err := tx.Model(&ModerationViolation{}).
@@ -507,14 +508,18 @@ func RestoreUserAndTokensAfterModeration(userID int, now int64) (bool, error) {
 	return changed, err
 }
 
-func DeleteExpiredModerationMetadata(now int64) error {
+func DeleteExpiredModerationMetadata(now int64, retentionSeconds ...int64) error {
 	if now <= 0 {
 		now = common.GetTimestamp()
 	}
 	if err := DB.Where("expires_at <= ?", now).Delete(&ModerationViolation{}).Error; err != nil {
 		return err
 	}
-	cutoff := now - 180*24*60*60
+	var retention int64 = 7 * 24 * 60 * 60
+	if len(retentionSeconds) > 0 && retentionSeconds[0] > 0 {
+		retention = retentionSeconds[0]
+	}
+	cutoff := now - retention
 	if err := DB.Where("created_at <= ?", cutoff).Delete(&ModerationNotification{}).Error; err != nil {
 		return err
 	}

@@ -130,27 +130,8 @@ func Relay(c *gin.Context, relayFormat types.RelayFormat) {
 	moderationEnabled := moderationConfig.Enabled
 	isGeminiCountTokens := relayFormat == types.RelayFormatGemini && strings.Contains(c.Request.URL.Path, ":countTokens")
 	isResponsesCompaction := relayInfo.RelayMode == relayconstant.RelayModeResponsesCompact
-	if moderationEnabled && !isGeminiCountTokens && !isResponsesCompaction && service.IsModerationRequestSupported(request) {
-		moderationURLInvalid := service.ValidateContentModerationURL(moderationConfig.BaseURL) != nil
-		apiKeyRequired := strings.TrimSpace(moderationConfig.BaseURL) == ""
-		if (apiKeyRequired && strings.TrimSpace(moderationConfig.APIKey) == "") || strings.TrimSpace(moderationConfig.Model) == "" || moderationURLInvalid {
-			newAPIError = types.NewErrorWithStatusCode(
-				errors.New("content moderation is enabled but not configured"),
-				types.ErrorCodeContentModerationUnavailable,
-				http.StatusServiceUnavailable,
-				types.ErrOptionWithSkipRetry(),
-			)
-			return
-		}
-		if relayInfo.UserId <= 0 {
-			newAPIError = types.NewErrorWithStatusCode(
-				errors.New("content moderation requires an authenticated user"),
-				types.ErrorCodeContentModerationConversationRequired,
-				http.StatusBadRequest,
-				types.ErrOptionWithSkipRetry(),
-			)
-			return
-		}
+	isUserWhitelisted := relayInfo.UserId > 0 && moderationConfig.IsUserWhitelisted(relayInfo.UserId)
+	if moderationEnabled && !isGeminiCountTokens && !isResponsesCompaction && !isUserWhitelisted && service.IsModerationRequestSupported(request) {
 		conversationID := service.ResolveModerationConversationID(c)
 		if conversationID == "" {
 			reqID := relayInfo.RequestId
@@ -161,35 +142,59 @@ func Relay(c *gin.Context, relayFormat types.RelayFormat) {
 		}
 		common.SetContextKey(c, constant.ContextKeyModerationConversationID, conversationID)
 		c.Header("X-Conversation-ID", conversationID)
-		blocked, moderationErr := model.IsModerationConversationBlocked(relayInfo.UserId, conversationID)
-		if moderationErr != nil {
-			logger.LogWarn(c, fmt.Sprintf("content moderation block lookup failed: %v", moderationErr))
-			newAPIError = types.NewErrorWithStatusCode(
-				errors.New("content moderation state is unavailable"),
-				types.ErrorCodeContentModerationUnavailable,
-				http.StatusServiceUnavailable,
-				types.ErrOptionWithSkipRetry(),
-			)
-			return
+		if relayInfo.UserId > 0 {
+			blocked, moderationErr := model.IsModerationConversationBlocked(relayInfo.UserId, conversationID)
+			if moderationErr != nil {
+				logger.LogWarn(c, fmt.Sprintf("content moderation block lookup failed: %v", moderationErr))
+				newAPIError = types.NewErrorWithStatusCode(
+					errors.New("content moderation state is unavailable"),
+					types.ErrorCodeContentModerationUnavailable,
+					http.StatusServiceUnavailable,
+					types.ErrOptionWithSkipRetry(),
+				)
+				return
+			}
+			if blocked {
+				newAPIError = types.NewErrorWithStatusCode(
+					model.ErrModerationConversationBlocked,
+					types.ErrorCodeContentModerationBlocked,
+					http.StatusForbidden,
+					types.ErrOptionWithSkipRetry(),
+				)
+				return
+			}
 		}
-		if blocked {
-			newAPIError = types.NewErrorWithStatusCode(
-				model.ErrModerationConversationBlocked,
-				types.ErrorCodeContentModerationBlocked,
-				http.StatusForbidden,
-				types.ErrOptionWithSkipRetry(),
-			)
-			return
+		if moderationConfig.HasModeratedChannels() {
+			moderationURLInvalid := service.ValidateContentModerationURL(moderationConfig.BaseURL) != nil
+			apiKeyRequired := strings.TrimSpace(moderationConfig.BaseURL) == ""
+			if (apiKeyRequired && strings.TrimSpace(moderationConfig.APIKey) == "") || strings.TrimSpace(moderationConfig.Model) == "" || moderationURLInvalid {
+				newAPIError = types.NewErrorWithStatusCode(
+					errors.New("content moderation is enabled but not configured"),
+					types.ErrorCodeContentModerationUnavailable,
+					http.StatusServiceUnavailable,
+					types.ErrOptionWithSkipRetry(),
+				)
+				return
+			}
+			if relayInfo.UserId <= 0 {
+				newAPIError = types.NewErrorWithStatusCode(
+					errors.New("content moderation requires an authenticated user"),
+					types.ErrorCodeContentModerationConversationRequired,
+					http.StatusBadRequest,
+					types.ErrOptionWithSkipRetry(),
+				)
+				return
+			}
+			common.SetContextKey(c, constant.ContextKeyModerationEnabledAtStart, true)
+			service.BeginModerationCapture(c, request)
+			// Save the parsed request even when channel selection, billing, or
+			// upstream processing fails before a relay handler can enrich it with
+			// the effective system prompt.
+			service.SetModerationRequestContent(c, request)
+			defer func() {
+				service.FinalizeModeration(c, relayInfo, newAPIError)
+			}()
 		}
-		common.SetContextKey(c, constant.ContextKeyModerationEnabledAtStart, true)
-		service.BeginModerationCapture(c, request)
-		// Save the parsed request even when channel selection, billing, or
-		// upstream processing fails before a relay handler can enrich it with
-		// the effective system prompt.
-		service.SetModerationRequestContent(c, request)
-		defer func() {
-			service.FinalizeModeration(c, relayInfo, newAPIError)
-		}()
 	}
 
 	needSensitiveCheck := setting.ShouldCheckPromptSensitive()

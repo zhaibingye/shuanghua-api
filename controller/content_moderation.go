@@ -5,6 +5,7 @@ import (
 	"io"
 	"net/http"
 	"net/url"
+	"slices"
 	"strconv"
 	"strings"
 
@@ -17,52 +18,73 @@ import (
 )
 
 type contentModerationSettingsResponse struct {
-	Enabled             bool   `json:"enabled"`
-	Provider            string `json:"provider"`
-	BaseURL             string `json:"base_url"`
-	Model               string `json:"model"`
-	TimeoutSeconds      int    `json:"timeout_seconds"`
-	MaxRetries          int    `json:"max_retries"`
-	NormalSampleRate    int    `json:"normal_sample_rate"`
-	ElevatedSampleRate  int    `json:"elevated_sample_rate"`
-	PromptVersion       string `json:"prompt_version"`
-	PolicyPrompt        string `json:"policy_prompt"`
-	DefaultPolicyPrompt string `json:"default_policy_prompt"`
-	APIKeyConfigured    bool   `json:"api_key_configured"`
+	Enabled                bool   `json:"enabled"`
+	Channels               string `json:"channels"`
+	ChannelIDs             []int  `json:"channel_ids"`
+	UserWhitelist          string `json:"user_whitelist"`
+	UserWhitelistIDs       []int  `json:"user_whitelist_ids"`
+	ViolationRetentionDays int    `json:"violation_retention_days"`
+	Provider               string `json:"provider"`
+	BaseURL                string `json:"base_url"`
+	Model                  string `json:"model"`
+	TimeoutSeconds         int    `json:"timeout_seconds"`
+	MaxRetries             int    `json:"max_retries"`
+	NormalSampleRate       int    `json:"normal_sample_rate"`
+	ElevatedSampleRate     int    `json:"elevated_sample_rate"`
+	PromptVersion          string `json:"prompt_version"`
+	PolicyPrompt           string `json:"policy_prompt"`
+	DefaultPolicyPrompt    string `json:"default_policy_prompt"`
+	APIKeyConfigured       bool   `json:"api_key_configured"`
 }
 
 type contentModerationSettingsRequest struct {
-	Enabled            bool   `json:"enabled"`
-	Provider           string `json:"provider"`
-	BaseURL            string `json:"base_url"`
-	APIKey             string `json:"api_key"`
-	Model              string `json:"model"`
-	TimeoutSeconds     int    `json:"timeout_seconds"`
-	MaxRetries         int    `json:"max_retries"`
-	NormalSampleRate   int    `json:"normal_sample_rate"`
-	ElevatedSampleRate int    `json:"elevated_sample_rate"`
-	PromptVersion      string `json:"prompt_version"`
-	PolicyPrompt       string `json:"policy_prompt"`
+	Enabled                bool   `json:"enabled"`
+	Channels               string `json:"channels"`
+	UserWhitelist          string `json:"user_whitelist"`
+	ViolationRetentionDays int    `json:"violation_retention_days"`
+	Provider               string `json:"provider"`
+	BaseURL                string `json:"base_url"`
+	APIKey                 string `json:"api_key"`
+	Model                  string `json:"model"`
+	TimeoutSeconds         int    `json:"timeout_seconds"`
+	MaxRetries             int    `json:"max_retries"`
+	NormalSampleRate       int    `json:"normal_sample_rate"`
+	ElevatedSampleRate     int    `json:"elevated_sample_rate"`
+	PromptVersion          string `json:"prompt_version"`
+	PolicyPrompt           string `json:"policy_prompt"`
 }
 
 func GetContentModerationSettings(c *gin.Context) {
 	recordManageAudit(c, "moderation.settings_view", nil)
 	config := setting.GetContentModerationSetting()
+	channelIDs := config.ChannelIDs
+	if channelIDs == nil {
+		channelIDs = []int{}
+	}
+	userWhitelistIDs := config.UserWhitelistIDs
+	if userWhitelistIDs == nil {
+		userWhitelistIDs = []int{}
+	}
 	c.JSON(http.StatusOK, gin.H{
 		"success": true,
 		"data": contentModerationSettingsResponse{
-			Enabled:             config.Enabled,
-			Provider:            config.Provider,
-			BaseURL:             config.BaseURL,
-			Model:               config.Model,
-			TimeoutSeconds:      config.TimeoutSeconds,
-			MaxRetries:          config.MaxRetries,
-			NormalSampleRate:    config.NormalSampleRate,
-			ElevatedSampleRate:  config.ElevatedSampleRate,
-			PromptVersion:       config.PromptVersion,
-			PolicyPrompt:        config.PolicyPrompt,
-			DefaultPolicyPrompt: setting.DefaultContentModerationPolicyPrompt,
-			APIKeyConfigured:    strings.TrimSpace(config.APIKey) != "",
+			Enabled:                config.Enabled,
+			Channels:               config.Channels,
+			ChannelIDs:             channelIDs,
+			UserWhitelist:          config.UserWhitelist,
+			UserWhitelistIDs:       userWhitelistIDs,
+			ViolationRetentionDays: config.ViolationRetentionDays,
+			Provider:               config.Provider,
+			BaseURL:                config.BaseURL,
+			Model:                  config.Model,
+			TimeoutSeconds:         config.TimeoutSeconds,
+			MaxRetries:             config.MaxRetries,
+			NormalSampleRate:       config.NormalSampleRate,
+			ElevatedSampleRate:     config.ElevatedSampleRate,
+			PromptVersion:          config.PromptVersion,
+			PolicyPrompt:           config.PolicyPrompt,
+			DefaultPolicyPrompt:    setting.DefaultContentModerationPolicyPrompt,
+			APIKeyConfigured:       strings.TrimSpace(config.APIKey) != "",
 		},
 	})
 }
@@ -86,7 +108,30 @@ func UpdateContentModerationSettings(c *gin.Context) {
 	if policyPrompt == "" {
 		policyPrompt = setting.DefaultContentModerationPolicyPrompt
 	}
-	if len(modelName) > 128 || len(apiKey) > 4096 || len(baseURL) > 2048 || len(promptVersion) > 32 || len(policyPrompt) > 16384 {
+	parsedChannelIDs, err := setting.ValidateChannelIDsString(request.Channels)
+	if err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"success": false, "message": "channel IDs must be positive integers separated by commas or spaces"})
+		return
+	}
+	normalizedChannels := setting.FormatChannelIDs(parsedChannelIDs)
+	parsedUserWhitelistIDs, err := setting.ValidateUserIDsString(request.UserWhitelist)
+	if err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"success": false, "message": "user whitelist IDs must be positive integers separated by commas or spaces"})
+		return
+	}
+	if !slices.Contains(parsedUserWhitelistIDs, setting.RootAdminUserID) {
+		parsedUserWhitelistIDs = append([]int{setting.RootAdminUserID}, parsedUserWhitelistIDs...)
+		slices.Sort(parsedUserWhitelistIDs)
+	}
+	normalizedUserWhitelist := setting.FormatUserIDs(parsedUserWhitelistIDs)
+	if request.ViolationRetentionDays == 0 {
+		request.ViolationRetentionDays = setting.DefaultContentModerationViolationRetentionDays
+	}
+	if request.ViolationRetentionDays < 1 || request.ViolationRetentionDays > 365 {
+		c.JSON(http.StatusBadRequest, gin.H{"success": false, "message": "violation retention days must be between 1 and 365"})
+		return
+	}
+	if len(modelName) > 128 || len(apiKey) > 4096 || len(baseURL) > 2048 || len(promptVersion) > 32 || len(policyPrompt) > 16384 || len(normalizedChannels) > 2048 || len(normalizedUserWhitelist) > 2048 {
 		c.JSON(http.StatusBadRequest, gin.H{"success": false, "message": "content moderation setting is too long"})
 		return
 	}
@@ -125,16 +170,19 @@ func UpdateContentModerationSettings(c *gin.Context) {
 	}
 
 	values := map[string]string{
-		setting.ContentModerationEnabledOption:            strconv.FormatBool(request.Enabled),
-		setting.ContentModerationProviderOption:           request.Provider,
-		setting.ContentModerationBaseURLOption:            baseURL,
-		setting.ContentModerationModelOption:              modelName,
-		setting.ContentModerationTimeoutSecondsOption:     strconv.Itoa(request.TimeoutSeconds),
-		setting.ContentModerationMaxRetriesOption:         strconv.Itoa(request.MaxRetries),
-		setting.ContentModerationNormalSampleRateOption:   strconv.Itoa(request.NormalSampleRate),
-		setting.ContentModerationElevatedSampleRateOption: strconv.Itoa(request.ElevatedSampleRate),
-		setting.ContentModerationPromptVersionOption:      promptVersion,
-		setting.ContentModerationPolicyPromptOption:       policyPrompt,
+		setting.ContentModerationEnabledOption:                strconv.FormatBool(request.Enabled),
+		setting.ContentModerationChannelsOption:               normalizedChannels,
+		setting.ContentModerationUserWhitelistOption:          normalizedUserWhitelist,
+		setting.ContentModerationViolationRetentionDaysOption: strconv.Itoa(request.ViolationRetentionDays),
+		setting.ContentModerationProviderOption:               request.Provider,
+		setting.ContentModerationBaseURLOption:                baseURL,
+		setting.ContentModerationModelOption:                  modelName,
+		setting.ContentModerationTimeoutSecondsOption:         strconv.Itoa(request.TimeoutSeconds),
+		setting.ContentModerationMaxRetriesOption:             strconv.Itoa(request.MaxRetries),
+		setting.ContentModerationNormalSampleRateOption:       strconv.Itoa(request.NormalSampleRate),
+		setting.ContentModerationElevatedSampleRateOption:     strconv.Itoa(request.ElevatedSampleRate),
+		setting.ContentModerationPromptVersionOption:          promptVersion,
+		setting.ContentModerationPolicyPromptOption:           policyPrompt,
 	}
 	effectiveAPIKey := apiKey
 	if effectiveAPIKey == "" {
@@ -155,8 +203,11 @@ func UpdateContentModerationSettings(c *gin.Context) {
 		return
 	}
 	recordManageAudit(c, "moderation.settings_update", map[string]interface{}{
-		"provider": request.Provider,
-		"enabled":  request.Enabled,
+		"provider":                 request.Provider,
+		"enabled":                  request.Enabled,
+		"channels":                 normalizedChannels,
+		"user_whitelist":           normalizedUserWhitelist,
+		"violation_retention_days": request.ViolationRetentionDays,
 	})
 	c.JSON(http.StatusOK, gin.H{"success": true})
 }

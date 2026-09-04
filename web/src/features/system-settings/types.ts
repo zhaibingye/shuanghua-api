@@ -31,6 +31,11 @@ export type SystemOptionsResponse = {
 
 export type ContentModerationSettings = {
   enabled: boolean
+  channels?: string
+  channel_ids?: number[]
+  user_whitelist?: string
+  user_whitelist_ids?: number[]
+  violation_retention_days?: number
   provider: 'responses' | 'gemini'
   base_url: string
   model: string
@@ -71,6 +76,7 @@ export type ModerationConversation = {
 export type ModerationTurn = {
   id: number
   round_number: number
+  channel_id?: number
   request_id: string
   system_prompt: string
   user_prompt: string

@@ -623,3 +623,317 @@ func TestExtractReviewJSONSupportsChoicesAndDirectMap(t *testing.T) {
 	assert.Equal(t, "allow", parsed["decision"])
 	assert.Equal(t, "none", parsed["actor"])
 }
+
+func TestFinalizeModerationChannelFilter(t *testing.T) {
+	require.NoError(t, model.DB.AutoMigrate(
+		&model.ModerationConversation{},
+		&model.ModerationTurn{},
+		&model.ModerationJob{},
+	))
+
+	common.OptionMapRWMutex.Lock()
+	if common.OptionMap == nil {
+		common.OptionMap = make(map[string]string)
+	}
+	prevEnabled := common.OptionMap[setting.ContentModerationEnabledOption]
+	prevChannels := common.OptionMap[setting.ContentModerationChannelsOption]
+	common.OptionMap[setting.ContentModerationEnabledOption] = "true"
+	common.OptionMap[setting.ContentModerationChannelsOption] = "2, 3"
+	common.OptionMapRWMutex.Unlock()
+
+	t.Cleanup(func() {
+		common.OptionMapRWMutex.Lock()
+		common.OptionMap[setting.ContentModerationEnabledOption] = prevEnabled
+		common.OptionMap[setting.ContentModerationChannelsOption] = prevChannels
+		common.OptionMapRWMutex.Unlock()
+	})
+
+	userID := 920001
+	convID := fmt.Sprintf("conv-filter-%d", time.Now().UnixNano())
+	t.Cleanup(func() {
+		turnIDs := model.DB.Model(&model.ModerationTurn{}).Select("id").Where("user_id = ? AND conversation_key = ?", userID, convID)
+		_ = model.DB.Where("turn_id IN (?)", turnIDs).Delete(&model.ModerationJob{}).Error
+		_ = model.DB.Where("user_id = ? AND conversation_key = ?", userID, convID).Delete(&model.ModerationTurn{}).Error
+		_ = model.DB.Where("user_id = ? AND conversation_id = ?", userID, convID).Delete(&model.ModerationConversation{}).Error
+	})
+
+	// 1. Channel 1 is NOT in [2, 3] -> should NOT be recorded
+	rec1 := httptest.NewRecorder()
+	c1, _ := gin.CreateTestContext(rec1)
+	c1.Request = httptest.NewRequest("POST", "/v1/chat/completions", nil)
+	c1.Writer.Header().Set("Content-Type", "application/json")
+	capture1 := NewModerationCapture(c1.Writer)
+	_, _ = capture1.WriteString(`{"choices":[{"message":{"content":"response from channel 1"}}]}`)
+	c1.Writer = capture1
+	common.SetContextKey(c1, constant.ContextKeyModerationCapture, capture1)
+	common.SetContextKey(c1, constant.ContextKeyModerationConversationID, convID)
+	common.SetContextKey(c1, constant.ContextKeyModerationRequestContent, ModerationRequestContent{
+		UserPrompt: "prompt 1",
+	})
+	info1 := &relaycommon.RelayInfo{
+		UserId:          userID,
+		RequestId:       "req-ch-1",
+		OriginModelName: "gpt-4o",
+		RelayFormat:     types.RelayFormatOpenAI,
+		ChannelMeta: &relaycommon.ChannelMeta{
+			ChannelId: 1,
+		},
+	}
+	FinalizeModeration(c1, info1, nil)
+
+	var count1 int64
+	require.NoError(t, model.DB.Model(&model.ModerationTurn{}).Where("user_id = ? AND request_id = ?", userID, "req-ch-1").Count(&count1).Error)
+	assert.Equal(t, int64(0), count1, "turn for unmoderated channel 1 should not be recorded")
+
+	// 2. Channel 2 IS in [2, 3] -> should be recorded with ChannelID = 2
+	rec2 := httptest.NewRecorder()
+	c2, _ := gin.CreateTestContext(rec2)
+	c2.Request = httptest.NewRequest("POST", "/v1/chat/completions", nil)
+	c2.Writer.Header().Set("Content-Type", "application/json")
+	capture2 := NewModerationCapture(c2.Writer)
+	_, _ = capture2.WriteString(`{"choices":[{"message":{"content":"response from channel 2"}}]}`)
+	c2.Writer = capture2
+	common.SetContextKey(c2, constant.ContextKeyModerationCapture, capture2)
+	common.SetContextKey(c2, constant.ContextKeyModerationConversationID, convID)
+	common.SetContextKey(c2, constant.ContextKeyModerationRequestContent, ModerationRequestContent{
+		UserPrompt: "prompt 2",
+	})
+	info2 := &relaycommon.RelayInfo{
+		UserId:          userID,
+		RequestId:       "req-ch-2",
+		OriginModelName: "gpt-4o",
+		RelayFormat:     types.RelayFormatOpenAI,
+		ChannelMeta: &relaycommon.ChannelMeta{
+			ChannelId: 2,
+		},
+	}
+	FinalizeModeration(c2, info2, nil)
+
+	var turn2 model.ModerationTurn
+	err := model.DB.Where("user_id = ? AND request_id = ?", userID, "req-ch-2").First(&turn2).Error
+	require.NoError(t, err, "turn for moderated channel 2 should be recorded")
+	assert.Equal(t, 2, turn2.ChannelID)
+	assert.Equal(t, "req-ch-2", turn2.RequestID)
+
+	// 3. Scheme A: Channels setting is empty -> should NOT record for channel 2
+	common.OptionMapRWMutex.Lock()
+	common.OptionMap[setting.ContentModerationChannelsOption] = ""
+	common.OptionMapRWMutex.Unlock()
+
+	rec3 := httptest.NewRecorder()
+	c3, _ := gin.CreateTestContext(rec3)
+	c3.Request = httptest.NewRequest("POST", "/v1/chat/completions", nil)
+	c3.Writer.Header().Set("Content-Type", "application/json")
+	capture3 := NewModerationCapture(c3.Writer)
+	_, _ = capture3.WriteString(`{"choices":[{"message":{"content":"response from channel 2 with empty channels"}}]}`)
+	c3.Writer = capture3
+	common.SetContextKey(c3, constant.ContextKeyModerationCapture, capture3)
+	common.SetContextKey(c3, constant.ContextKeyModerationConversationID, convID)
+	common.SetContextKey(c3, constant.ContextKeyModerationRequestContent, ModerationRequestContent{
+		UserPrompt: "prompt 3",
+	})
+	info3 := &relaycommon.RelayInfo{
+		UserId:          userID,
+		RequestId:       "req-ch-3",
+		OriginModelName: "gpt-4o",
+		RelayFormat:     types.RelayFormatOpenAI,
+		ChannelMeta: &relaycommon.ChannelMeta{
+			ChannelId: 2,
+		},
+	}
+	FinalizeModeration(c3, info3, nil)
+
+	var count3 int64
+	require.NoError(t, model.DB.Model(&model.ModerationTurn{}).Where("user_id = ? AND request_id = ?", userID, "req-ch-3").Count(&count3).Error)
+	assert.Equal(t, int64(0), count3, "when channels is empty, no channel should be recorded (Scheme A)")
+}
+
+func TestFinalizeModerationUserWhitelist(t *testing.T) {
+	require.NoError(t, model.DB.AutoMigrate(
+		&model.ModerationConversation{},
+		&model.ModerationTurn{},
+		&model.ModerationJob{},
+	))
+
+	common.OptionMapRWMutex.Lock()
+	if common.OptionMap == nil {
+		common.OptionMap = make(map[string]string)
+	}
+	prevEnabled := common.OptionMap[setting.ContentModerationEnabledOption]
+	prevChannels := common.OptionMap[setting.ContentModerationChannelsOption]
+	prevWhitelist := common.OptionMap[setting.ContentModerationUserWhitelistOption]
+	common.OptionMap[setting.ContentModerationEnabledOption] = "true"
+	common.OptionMap[setting.ContentModerationChannelsOption] = "1"
+	common.OptionMap[setting.ContentModerationUserWhitelistOption] = "1, 930002"
+	common.OptionMapRWMutex.Unlock()
+
+	t.Cleanup(func() {
+		common.OptionMapRWMutex.Lock()
+		common.OptionMap[setting.ContentModerationEnabledOption] = prevEnabled
+		common.OptionMap[setting.ContentModerationChannelsOption] = prevChannels
+		common.OptionMap[setting.ContentModerationUserWhitelistOption] = prevWhitelist
+		common.OptionMapRWMutex.Unlock()
+	})
+
+	convID := fmt.Sprintf("conv-whitelist-%d", time.Now().UnixNano())
+	t.Cleanup(func() {
+		turnIDs := model.DB.Model(&model.ModerationTurn{}).Select("id").Where("conversation_key = ?", convID)
+		_ = model.DB.Where("turn_id IN (?)", turnIDs).Delete(&model.ModerationJob{}).Error
+		_ = model.DB.Where("conversation_key = ?", convID).Delete(&model.ModerationTurn{}).Error
+		_ = model.DB.Where("conversation_id = ?", convID).Delete(&model.ModerationConversation{}).Error
+	})
+
+	// 1. Root admin (ID: 1) is whitelisted -> should NOT be recorded even on moderated channel 1
+	rec1 := httptest.NewRecorder()
+	c1, _ := gin.CreateTestContext(rec1)
+	c1.Request = httptest.NewRequest("POST", "/v1/chat/completions", nil)
+	c1.Writer.Header().Set("Content-Type", "application/json")
+	capture1 := NewModerationCapture(c1.Writer)
+	_, _ = capture1.WriteString(`{"choices":[{"message":{"content":"admin response"}}]}`)
+	c1.Writer = capture1
+	common.SetContextKey(c1, constant.ContextKeyModerationCapture, capture1)
+	common.SetContextKey(c1, constant.ContextKeyModerationConversationID, convID)
+	common.SetContextKey(c1, constant.ContextKeyModerationRequestContent, ModerationRequestContent{UserPrompt: "admin prompt"})
+	info1 := &relaycommon.RelayInfo{
+		UserId:          1,
+		RequestId:       "req-whitelist-admin",
+		OriginModelName: "gpt-4o",
+		RelayFormat:     types.RelayFormatOpenAI,
+		ChannelMeta:     &relaycommon.ChannelMeta{ChannelId: 1},
+	}
+	FinalizeModeration(c1, info1, nil)
+
+	var count1 int64
+	require.NoError(t, model.DB.Model(&model.ModerationTurn{}).Where("request_id = ?", "req-whitelist-admin").Count(&count1).Error)
+	assert.Equal(t, int64(0), count1, "whitelisted root admin should not be recorded")
+
+	// 2. User 930002 explicitly in whitelist -> should NOT be recorded
+	rec2 := httptest.NewRecorder()
+	c2, _ := gin.CreateTestContext(rec2)
+	c2.Request = httptest.NewRequest("POST", "/v1/chat/completions", nil)
+	c2.Writer.Header().Set("Content-Type", "application/json")
+	capture2 := NewModerationCapture(c2.Writer)
+	_, _ = capture2.WriteString(`{"choices":[{"message":{"content":"user 2 response"}}]}`)
+	c2.Writer = capture2
+	common.SetContextKey(c2, constant.ContextKeyModerationCapture, capture2)
+	common.SetContextKey(c2, constant.ContextKeyModerationConversationID, convID)
+	common.SetContextKey(c2, constant.ContextKeyModerationRequestContent, ModerationRequestContent{UserPrompt: "user 2 prompt"})
+	info2 := &relaycommon.RelayInfo{
+		UserId:          930002,
+		RequestId:       "req-whitelist-user-2",
+		OriginModelName: "gpt-4o",
+		RelayFormat:     types.RelayFormatOpenAI,
+		ChannelMeta:     &relaycommon.ChannelMeta{ChannelId: 1},
+	}
+	FinalizeModeration(c2, info2, nil)
+
+	var count2 int64
+	require.NoError(t, model.DB.Model(&model.ModerationTurn{}).Where("request_id = ?", "req-whitelist-user-2").Count(&count2).Error)
+	assert.Equal(t, int64(0), count2, "whitelisted user 930002 should not be recorded")
+
+	// 3. User 930003 NOT in whitelist -> SHOULD be recorded
+	rec3 := httptest.NewRecorder()
+	c3, _ := gin.CreateTestContext(rec3)
+	c3.Request = httptest.NewRequest("POST", "/v1/chat/completions", nil)
+	c3.Writer.Header().Set("Content-Type", "application/json")
+	capture3 := NewModerationCapture(c3.Writer)
+	_, _ = capture3.WriteString(`{"choices":[{"message":{"content":"user 3 response"}}]}`)
+	c3.Writer = capture3
+	common.SetContextKey(c3, constant.ContextKeyModerationCapture, capture3)
+	common.SetContextKey(c3, constant.ContextKeyModerationConversationID, convID)
+	common.SetContextKey(c3, constant.ContextKeyModerationRequestContent, ModerationRequestContent{UserPrompt: "user 3 prompt"})
+	info3 := &relaycommon.RelayInfo{
+		UserId:          930003,
+		RequestId:       "req-non-whitelist-user-3",
+		OriginModelName: "gpt-4o",
+		RelayFormat:     types.RelayFormatOpenAI,
+		ChannelMeta:     &relaycommon.ChannelMeta{ChannelId: 1},
+	}
+	FinalizeModeration(c3, info3, nil)
+
+	var count3 int64
+	require.NoError(t, model.DB.Model(&model.ModerationTurn{}).Where("request_id = ?", "req-non-whitelist-user-3").Count(&count3).Error)
+	assert.Equal(t, int64(1), count3, "non-whitelisted user 930003 should be recorded")
+}
+
+func TestModerationViolationRetentionWindow(t *testing.T) {
+	require.NoError(t, model.DB.AutoMigrate(
+		&model.ModerationViolation{},
+		&model.ModerationNotification{},
+		&model.ModerationTokenState{},
+		&model.ModerationAccountState{},
+		&model.ModerationAction{},
+	))
+
+	userID := 940001
+	now := time.Now().Unix()
+
+	// Create a violation within 7 days (created 3 days ago)
+	recentViolation := model.ModerationViolation{
+		UserID:         userID,
+		ConversationID: "conv-recent",
+		Actor:          "user",
+		UserViolation:  true,
+		Decision:       "block",
+		Severity:       "high",
+		Status:         model.ModerationViolationActive,
+		CreatedAt:      now - 3*24*3600,
+		ExpiresAt:      now + 4*24*3600,
+	}
+	// Create a violation older than 7 days (created 10 days ago)
+	oldViolation := model.ModerationViolation{
+		UserID:         userID,
+		ConversationID: "conv-old",
+		Actor:          "user",
+		UserViolation:  true,
+		Decision:       "block",
+		Severity:       "high",
+		Status:         model.ModerationViolationActive,
+		CreatedAt:      now - 10*24*3600,
+		ExpiresAt:      now - 3*24*3600,
+	}
+
+	require.NoError(t, model.DB.Create(&recentViolation).Error)
+	require.NoError(t, model.DB.Create(&oldViolation).Error)
+	t.Cleanup(func() {
+		_ = model.DB.Where("user_id = ?", userID).Delete(&model.ModerationViolation{}).Error
+	})
+
+	// Default cutoff (7 days ago) should only count the recent one
+	count, err := model.CountRecentUserModerationViolationsWithTx(model.DB, userID, 0)
+	require.NoError(t, err)
+	assert.Equal(t, int64(1), count, "7-day window should count only violations within the last 7 days")
+
+	// DeleteExpiredModerationMetadata with 7 days retention
+	// Create an old notification (created 8 days ago) and a recent one (created 2 days ago)
+	oldNotification := model.ModerationNotification{
+		ViolationID: oldViolation.ID,
+		AlertType:   "violation",
+		Recipient:   "admin@test.com",
+		DedupeKey:   fmt.Sprintf("dedupe-old-%d", now),
+		Status:      model.ModerationNotificationSent,
+		CreatedAt:   now - 8*24*3600,
+	}
+	recentNotification := model.ModerationNotification{
+		ViolationID: recentViolation.ID,
+		AlertType:   "violation",
+		Recipient:   "admin@test.com",
+		DedupeKey:   fmt.Sprintf("dedupe-recent-%d", now),
+		Status:      model.ModerationNotificationSent,
+		CreatedAt:   now - 2*24*3600,
+	}
+	require.NoError(t, model.DB.Create(&oldNotification).Error)
+	require.NoError(t, model.DB.Create(&recentNotification).Error)
+	t.Cleanup(func() {
+		_ = model.DB.Where("id IN (?)", []int64{oldNotification.ID, recentNotification.ID}).Delete(&model.ModerationNotification{}).Error
+	})
+
+	require.NoError(t, model.DeleteExpiredModerationMetadata(now, 7*24*3600))
+
+	var notifCount int64
+	require.NoError(t, model.DB.Model(&model.ModerationNotification{}).Where("id = ?", oldNotification.ID).Count(&notifCount).Error)
+	assert.Equal(t, int64(0), notifCount, "notification older than 7 days should be deleted")
+
+	require.NoError(t, model.DB.Model(&model.ModerationNotification{}).Where("id = ?", recentNotification.ID).Count(&notifCount).Error)
+	assert.Equal(t, int64(1), notifCount, "recent notification should be kept")
+}
