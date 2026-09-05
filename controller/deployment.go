@@ -2,7 +2,6 @@ package controller
 
 import (
 	"bytes"
-	"encoding/json"
 	"fmt"
 	"strconv"
 	"strings"
@@ -66,7 +65,7 @@ func TestIoNetConnection(c *gin.Context) {
 		return
 	}
 	if len(bytes.TrimSpace(rawBody)) > 0 {
-		if err := json.Unmarshal(rawBody, &req); err != nil {
+		if err := common.Unmarshal(rawBody, &req); err != nil {
 			common.ApiErrorMsg(c, "invalid request payload")
 			return
 		}
