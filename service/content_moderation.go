@@ -23,7 +23,6 @@ import (
 	"github.com/QuantumNous/new-api/model"
 	relaycommon "github.com/QuantumNous/new-api/relay/common"
 	"github.com/QuantumNous/new-api/relaykit/dto"
-	"github.com/QuantumNous/new-api/relaykit/relayconvert/reasoning"
 	"github.com/QuantumNous/new-api/relaykit/types"
 	"github.com/QuantumNous/new-api/setting"
 	"github.com/gin-gonic/gin"
@@ -1824,9 +1823,6 @@ func extractModerationRequestContent(request dto.Request) ModerationRequestConte
 		content.UserPrompt = joinModerationText(content.UserPrompt, r.Prompt)
 	case *dto.GeminiChatRequest:
 		request := r
-		if len(request.Contents) == 0 && request.GenerateContentRequest != nil {
-			request = request.GenerateContentRequest
-		}
 		if request.SystemInstructions != nil {
 			content.SystemPrompt = geminiContentText(request.SystemInstructions)
 		}
@@ -2246,7 +2242,7 @@ func reviewModerationTurn(ctx context.Context, turn *model.ModerationTurn, confi
 		Instructions: prompt,
 		Input:        input,
 		Store:        false,
-		Reasoning:    map[string]string{"effort": reasoning.LevelLow},
+		Reasoning:    map[string]string{"effort": "low"},
 	}
 	var response map[string]any
 	var raw []byte
@@ -2454,13 +2450,8 @@ func moderationGeminiGenerationConfig(modelName string) map[string]any {
 			"required": []string{"decision", "actor", "severity", "categories", "confidence", "reason_code"},
 		},
 	}
-	// Gemini 2.5 and older thinking models use thinkingBudget rather than
-	// thinkingLevel. Content moderation deliberately does not derive or send a
-	// budget for those models; newer Gemini models use the low native level.
-	if reasoning.GeminiThinkingControlForModel(modelName) == reasoning.GeminiControlLevel {
-		generationConfig["thinkingConfig"] = map[string]string{
-			"thinkingLevel": reasoning.GeminiThinkingLevel(reasoning.LevelLow),
-		}
+	if strings.HasPrefix(strings.ToLower(strings.TrimSpace(modelName)), "gemini-3") {
+		generationConfig["thinkingConfig"] = map[string]string{"thinkingLevel": "LOW"}
 	}
 	return generationConfig
 }

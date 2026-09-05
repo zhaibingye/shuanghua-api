@@ -185,6 +185,13 @@ func Relay(c *gin.Context, relayFormat types.RelayFormat) {
 			// upstream processing fails before a relay handler can enrich it with
 			// the effective system prompt.
 			service.SetModerationRequestContent(c, request)
+			if moderationConfig.PreflightEnabled {
+				content, _ := service.GetModerationRequestContent(c)
+				if moderationErr := service.PreflightModerationRequest(c, content, moderationConfig); moderationErr != nil {
+					newAPIError = types.NewErrorWithStatusCode(moderationErr, types.ErrorCodeContentModerationBlocked, http.StatusForbidden, types.ErrOptionWithSkipRetry())
+					return
+				}
+			}
 			defer func() {
 				service.FinalizeModeration(c, relayInfo, newAPIError)
 			}()

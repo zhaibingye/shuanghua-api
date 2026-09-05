@@ -36,9 +36,11 @@ export type ContentModerationSettings = {
   user_whitelist?: string
   user_whitelist_ids?: number[]
   violation_retention_days?: number
-  provider: 'responses' | 'gemini'
+  provider: 'moderations' | 'responses' | 'gemini'
   base_url: string
   model: string
+  preflight_enabled?: boolean
+  failure_mode?: 'open' | 'closed'
   timeout_seconds: number
   max_retries: number
   normal_sample_rate: number
