@@ -236,12 +236,21 @@ func ChatCompletionsRequestToResponsesRequest(req *dto.GeneralOpenAIRequest) (*d
 		for _, tool := range req.Tools {
 			switch tool.Type {
 			case "function":
-				tools = append(tools, map[string]any{
+				converted := map[string]any{
 					"type":        "function",
 					"name":        tool.Function.Name,
 					"description": tool.Function.Description,
 					"parameters":  tool.Function.Parameters,
-				})
+				}
+				// Keep extension fields on function tools. CLIProxyAPI uses these
+				// for Codex-compatible tool metadata and namespaces.
+				for key, value := range tool.Extra {
+					var decoded any
+					if err := kitutil.Unmarshal(value, &decoded); err == nil {
+						converted[key] = decoded
+					}
+				}
+				tools = append(tools, converted)
 			default:
 				// Best-effort: keep original tool shape for unknown types.
 				var m map[string]any

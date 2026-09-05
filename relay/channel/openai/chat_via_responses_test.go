@@ -14,6 +14,7 @@ import (
 	"github.com/gin-gonic/gin"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+	"github.com/tidwall/gjson"
 )
 
 func newResponsesChatTestContext(t *testing.T, body string, isStream bool) (*gin.Context, *httptest.ResponseRecorder, *http.Response, *relaycommon.RelayInfo) {
@@ -37,6 +38,38 @@ func newResponsesChatTestContext(t *testing.T, body string, isStream bool) (*gin
 		DisablePing:        true,
 	}
 	return c, recorder, resp, info
+}
+
+func TestOaiResponsesBufferedStreamHandlerReturnsResponsesJSON(t *testing.T) {
+	body := strings.Join([]string{
+		`data: {"type":"response.created","response":{"id":"resp_1","model":"gpt-test","created_at":1710000000}}`,
+		`data: {"type":"response.output_text.delta","delta":"hello"}`,
+		`data: {"type":"response.completed","response":{"status":"completed","usage":{"input_tokens":2,"output_tokens":1,"total_tokens":3}}}`,
+		`data: [DONE]`,
+		``,
+	}, "\n")
+
+	recorder := httptest.NewRecorder()
+	c, _ := gin.CreateTestContext(recorder)
+	c.Request = httptest.NewRequest(http.MethodPost, "/v1/responses", nil)
+	c.Set(common.RequestIdKey, "responses-buffered-test")
+	resp := &http.Response{
+		StatusCode: http.StatusOK,
+		Body:       io.NopCloser(strings.NewReader(body)),
+		Header:     http.Header{"Content-Type": []string{"text/event-stream"}},
+	}
+	info := &relaycommon.RelayInfo{
+		ChannelMeta: &relaycommon.ChannelMeta{UpstreamModelName: "gpt-test"},
+		RelayFormat: types.RelayFormatOpenAIResponses,
+	}
+
+	usage, apiErr := OaiResponsesBufferedStreamHandler(c, info, resp)
+	require.Nil(t, apiErr)
+	require.NotNil(t, usage)
+	assert.Equal(t, 2, usage.PromptTokens)
+	assert.Equal(t, 1, usage.CompletionTokens)
+	assert.Equal(t, "resp_1", gjson.Get(recorder.Body.String(), "id").String())
+	assert.Equal(t, "hello", gjson.Get(recorder.Body.String(), "output.0.content.0.text").String())
 }
 
 func TestOaiResponsesToChatStreamHandlerConvertsSSEOrderAndUsage(t *testing.T) {

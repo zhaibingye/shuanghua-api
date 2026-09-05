@@ -55,6 +55,21 @@ func TestChatCompletionsRequestToResponsesRequestInstructionsAndTools(t *testing
 	assert.Equal(t, "function_call_output", gjson.GetBytes(got.Input, "3.type").String())
 }
 
+func TestChatCompletionsRequestToResponsesRequestPreservesCodexToolExtensions(t *testing.T) {
+	var req dto.GeneralOpenAIRequest
+	require.NoError(t, kitutil.Unmarshal([]byte(`{
+		"model":"gpt-6-astra",
+		"messages":[{"role":"user","content":"delegate"}],
+		"tools":[{"type":"namespace","name":"collaboration","tools":[{"type":"function","name":"spawn_agent"}]}]
+	}`), &req))
+
+	got, err := ChatCompletionsRequestToResponsesRequest(&req)
+	require.NoError(t, err)
+	assert.Equal(t, "namespace", gjson.GetBytes(got.Tools, "0.type").String())
+	assert.Equal(t, "collaboration", gjson.GetBytes(got.Tools, "0.name").String())
+	assert.Equal(t, "spawn_agent", gjson.GetBytes(got.Tools, "0.tools.0.name").String())
+}
+
 func TestChatCompletionsRequestToResponsesRequestPreservesPromptCacheKey(t *testing.T) {
 	t.Run("present", func(t *testing.T) {
 		key := "session-\"quoted\"\\path\n世界"
