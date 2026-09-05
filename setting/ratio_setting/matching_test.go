@@ -5,6 +5,7 @@ import (
 
 	"github.com/QuantumNous/new-api/setting/model_setting"
 	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 )
 
 func TestFormatMatchingModelNameDoesNotStripBase(t *testing.T) {
@@ -35,4 +36,11 @@ func TestRoutingMatchModelNamePreservesExemptAtName(t *testing.T) {
 
 	assert.Equal(t, "opaque@sha256:deadbeef", RoutingMatchModelName("opaque@sha256:deadbeef"))
 	assert.Equal(t, "kimi-k2-thinking", RoutingMatchModelName("kimi-k2-thinking"))
+}
+
+func TestDefaultPerplexitySonarLargeRatiosAreNotFree(t *testing.T) {
+	require.Contains(t, defaultModelRatio, "llama-3-sonar-large-32k-chat")
+	require.Contains(t, defaultModelRatio, "llama-3-sonar-large-32k-online")
+	assert.Equal(t, 0.5, defaultModelRatio["llama-3-sonar-large-32k-chat"])
+	assert.Equal(t, 0.5, defaultModelRatio["llama-3-sonar-large-32k-online"])
 }
