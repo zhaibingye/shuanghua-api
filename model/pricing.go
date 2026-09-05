@@ -424,6 +424,27 @@ func updatePricing() {
 				plugin, ok = pluginGeneration.Get(target.PluginKey)
 			}
 		}
+		if !ok && pluginGeneration != nil {
+			lowerModel := strings.ToLower(model)
+			for _, p := range pluginGeneration.Plugins() {
+				if len(p.Meta.UsageSchema) == 0 {
+					continue
+				}
+				matched := false
+				for _, m := range p.Meta.Models {
+					lowerM := strings.ToLower(m)
+					if strings.HasPrefix(lowerModel, lowerM+"-") || strings.HasPrefix(lowerModel, lowerM+"_") || strings.HasPrefix(lowerModel, lowerM+".") {
+						matched = true
+						break
+					}
+				}
+				if matched {
+					plugin = p
+					ok = true
+					break
+				}
+			}
+		}
 		if ok && plugin != nil && len(plugin.Meta.UsageSchema) > 0 {
 			pricing.BillingUsageSchema = make(map[string]jsplugin.UsageFieldSchema, len(plugin.Meta.UsageSchema))
 			for key, field := range plugin.Meta.UsageSchema {

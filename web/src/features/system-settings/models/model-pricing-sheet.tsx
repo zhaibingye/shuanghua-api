@@ -17,6 +17,7 @@ along with this program. If not, see <https://www.gnu.org/licenses/>.
 For commercial licensing, please contact support@quantumnous.com
 */
 import { zodResolver } from '@hookform/resolvers/zod'
+import { useQuery } from '@tanstack/react-query'
 import { AlertTriangle, Save } from 'lucide-react'
 import {
   forwardRef,
@@ -55,6 +56,13 @@ import {
   InputGroupInput,
 } from '@/components/ui/input-group'
 import {
+  Select,
+  SelectContent,
+  SelectItem,
+  SelectTrigger,
+  SelectValue,
+} from '@/components/ui/select'
+import {
   Sheet,
   SheetContent,
   SheetDescription,
@@ -67,6 +75,11 @@ import {
   createDefaultTaskVisualConfig,
   generateTaskExprFromConfig,
 } from '@/features/pricing/lib/task-expr'
+import type {
+  BillingUsageExample,
+  BillingUsageSchema,
+} from '@/features/pricing/types'
+import { listTaskPlugins } from '@/features/task-plugins/api'
 import { cn } from '@/lib/utils'
 
 import {
@@ -112,6 +125,100 @@ export type ModelPricingEditorPanelHandle = {
 }
 
 const DEFAULT_TOKEN_BILLING_EXPR = 'tier("base", p * 0 + c * 0)'
+
+type TaskPluginTemplate = {
+  key: string
+  name: string
+  usageSchema: BillingUsageSchema
+  usageExamples?: BillingUsageExample[]
+  models?: string[]
+}
+
+const BUILTIN_TASK_PLUGINS: TaskPluginTemplate[] = [
+  {
+    key: 'doubao',
+    name: 'Doubao Video (Seedance / MediaKit)',
+    models: [
+      'doubao-seedance-1-0-pro-250528',
+      'doubao-seedance-1-0-lite-t2v',
+      'doubao-seedance-1-0-lite-i2v',
+      'doubao-seedance-1-5-pro-251215',
+      'doubao-seedance-2-0-260128',
+      'doubao-seedance-2-0-fast-260128',
+      'doubao-seedance-2-0-mini-260615',
+      'doubao-seedance-2-5-260628',
+    ],
+    usageSchema: {
+      tokens: { type: 'number', unit: 'token' },
+      resolution: { enum: ['480p', '720p', '1080p', '4k'] },
+      enhancement_seconds: { type: 'number', unit: 'second' },
+      enhancement_resolution: { enum: ['none', '720p', '1080p'] },
+      video_input: { enum: ['none', 'video'] },
+    },
+    usageExamples: [
+      {
+        label: '480p · 5s',
+        facts: {
+          tokens: 48038,
+          resolution: '480p',
+          video_input: 'none',
+          enhancement_seconds: 0,
+          enhancement_resolution: 'none',
+        },
+      },
+      {
+        label: '720p · 5s',
+        facts: {
+          tokens: 108000,
+          resolution: '720p',
+          video_input: 'none',
+          enhancement_seconds: 0,
+          enhancement_resolution: 'none',
+        },
+      },
+      {
+        label: '1080p · 5s',
+        facts: {
+          tokens: 243000,
+          resolution: '1080p',
+          video_input: 'none',
+          enhancement_seconds: 0,
+          enhancement_resolution: 'none',
+        },
+      },
+      {
+        label: 'MediaKit · 480p → 720p · 5s',
+        facts: {
+          tokens: 48038,
+          resolution: '480p',
+          video_input: 'none',
+          enhancement_seconds: 5,
+          enhancement_resolution: '720p',
+        },
+      },
+      {
+        label: 'MediaKit · 480p → 1080p · 5s',
+        facts: {
+          tokens: 48038,
+          resolution: '480p',
+          video_input: 'none',
+          enhancement_seconds: 5,
+          enhancement_resolution: '1080p',
+        },
+      },
+      {
+        label: 'MediaKit · 720p → 1080p · 5s',
+        facts: {
+          tokens: 108000,
+          resolution: '720p',
+          video_input: 'none',
+          enhancement_seconds: 5,
+          enhancement_resolution: '1080p',
+        },
+      },
+    ],
+  },
+]
 
 export const ModelPricingSheet = forwardRef<
   ModelPricingEditorPanelHandle,
@@ -165,9 +272,38 @@ export const ModelPricingEditorPanel = forwardRef<
   const [billingExpr, setBillingExpr] = useState('')
   const [requestRuleExpr, setRequestRuleExpr] = useState('')
   const [editorReloadToken, setEditorReloadToken] = useState(0)
+  const [selectedTaskPluginKey, setSelectedTaskPluginKey] =
+    useState<string>('auto')
   const autoSwitchedForRef = useRef<string | null>(null)
   const isEditMode = !!editData
   const { models: pricingModels } = usePricingData()
+
+  const taskPluginsQuery = useQuery({
+    queryKey: ['task-plugins'],
+    queryFn: listTaskPlugins,
+    staleTime: 60_000,
+  })
+
+  const availableTaskPlugins = useMemo<TaskPluginTemplate[]>(() => {
+    const pluginMap = new Map<string, TaskPluginTemplate>()
+    for (const bp of BUILTIN_TASK_PLUGINS) {
+      pluginMap.set(bp.key, bp)
+    }
+    if (taskPluginsQuery.data) {
+      for (const p of taskPluginsQuery.data) {
+        if (p.meta?.usageSchema && Object.keys(p.meta.usageSchema).length > 0) {
+          pluginMap.set(p.meta.key, {
+            key: p.meta.key,
+            name: p.meta.name || p.meta.key,
+            models: p.meta.models || [],
+            usageSchema: p.meta.usageSchema,
+            usageExamples: p.meta.usageExamples,
+          })
+        }
+      }
+    }
+    return Array.from(pluginMap.values())
+  }, [taskPluginsQuery.data])
 
   const form = useForm<ModelPricingFormValues>({
     resolver: zodResolver(createModelPricingSchema(t)),
@@ -206,18 +342,69 @@ export const ModelPricingEditorPanel = forwardRef<
   )
   const taskUsageSchema = usageSchemaByModel.get(watchedValues.name.trim())
   const taskUsageExamples = usageExamplesByModel.get(watchedValues.name.trim())
+
+  const detectedTaskPlugin = useMemo(() => {
+    const modelName = watchedValues.name.trim().toLowerCase()
+    if (!modelName) return null
+    for (const p of availableTaskPlugins) {
+      for (const m of p.models || []) {
+        const lowerM = m.toLowerCase()
+        if (
+          modelName === lowerM ||
+          modelName.startsWith(lowerM) ||
+          lowerM.startsWith(modelName)
+        ) {
+          return p
+        }
+      }
+      if (modelName.includes(p.key.toLowerCase())) {
+        return p
+      }
+    }
+    return null
+  }, [availableTaskPlugins, watchedValues.name])
+
+  const effectiveTaskPlugin = useMemo(() => {
+    if (selectedTaskPluginKey === 'none') return null
+    if (selectedTaskPluginKey !== 'auto') {
+      return (
+        availableTaskPlugins.find((p) => p.key === selectedTaskPluginKey) ??
+        null
+      )
+    }
+    if (taskUsageSchema && Object.keys(taskUsageSchema).length > 0) {
+      return {
+        key: 'matched',
+        name: t('Matched model schema'),
+        usageSchema: taskUsageSchema,
+        usageExamples: taskUsageExamples,
+      }
+    }
+    return detectedTaskPlugin
+  }, [
+    selectedTaskPluginKey,
+    availableTaskPlugins,
+    taskUsageSchema,
+    taskUsageExamples,
+    detectedTaskPlugin,
+    t,
+  ])
+
+  const effectiveTaskUsageSchema = effectiveTaskPlugin?.usageSchema
+  const effectiveTaskUsageExamples = effectiveTaskPlugin?.usageExamples
+
   const defaultTaskBillingExpr = useMemo(
     () =>
-      taskUsageSchema
+      effectiveTaskUsageSchema
         ? generateTaskExprFromConfig(
-            createDefaultTaskVisualConfig(taskUsageSchema),
-            taskUsageSchema
+            createDefaultTaskVisualConfig(effectiveTaskUsageSchema),
+            effectiveTaskUsageSchema
           )
         : '',
-    [taskUsageSchema]
+    [effectiveTaskUsageSchema]
   )
   const resolvedBillingExpr =
-    taskUsageSchema &&
+    effectiveTaskUsageSchema &&
     (!billingExpr || billingExpr === DEFAULT_TOKEN_BILLING_EXPR)
       ? defaultTaskBillingExpr
       : billingExpr
@@ -267,6 +454,7 @@ export const ModelPricingEditorPanel = forwardRef<
     setLanePrices(nextLaneState.prices)
     setLaneEnabled(nextLaneState.enabled)
     setEditorReloadToken((token) => token + 1)
+    setSelectedTaskPluginKey('auto')
     autoSwitchedForRef.current = null
   }, [editData, form])
 
@@ -275,13 +463,16 @@ export const ModelPricingEditorPanel = forwardRef<
     if (editData.billingMode === 'tiered_expr') return
     if (editData.price || editData.ratio) return
 
-    const usageSchema = usageSchemaByModel.get(editData.name)
-    if (!usageSchema || Object.keys(usageSchema).length === 0) return
+    if (
+      !effectiveTaskUsageSchema ||
+      Object.keys(effectiveTaskUsageSchema).length === 0
+    )
+      return
     if (autoSwitchedForRef.current === editData.name) return
 
     setPricingMode('tiered_expr')
     autoSwitchedForRef.current = editData.name
-  }, [editData, usageSchemaByModel])
+  }, [editData, effectiveTaskUsageSchema])
 
   const setFormValue = (field: keyof ModelPricingFormValues, value: string) => {
     form.setValue(field, value, {
@@ -619,14 +810,17 @@ export const ModelPricingEditorPanel = forwardRef<
                   </TabsList>
 
                   <TabsContent value='per-token' className='pt-0'>
-                    {taskUsageSchema &&
-                      Object.keys(taskUsageSchema).length > 0 && (
+                    {effectiveTaskUsageSchema &&
+                      Object.keys(effectiveTaskUsageSchema).length > 0 && (
                         <Alert className='mb-4'>
                           <AlertDescription className='flex flex-col gap-3 text-xs'>
                             <p>
                               {t(
                                 'This is a task model billed by usage (e.g. seconds, resolution). Prices entered here act as a per-call base rate, not per-token prices.'
                               )}
+                              {effectiveTaskPlugin?.name
+                                ? ` (${effectiveTaskPlugin.name})`
+                                : ''}
                             </p>
                             <p>
                               {t(
@@ -729,13 +923,82 @@ export const ModelPricingEditorPanel = forwardRef<
 
                   <TabsContent value='tiered_expr' className='pt-0'>
                     <FieldGroup className='gap-5'>
-                      {taskUsageSchema ? (
+                      <div className='bg-muted/20 flex flex-wrap items-center justify-between gap-3 rounded-lg border p-3'>
+                        <div className='min-w-0 flex-1'>
+                          <div className='text-sm font-medium'>
+                            {t('Task pricing template')}
+                          </div>
+                          <div className='text-muted-foreground text-xs'>
+                            {effectiveTaskPlugin
+                              ? t(
+                                  'Using {{name}} schema for visual matrix pricing.',
+                                  { name: effectiveTaskPlugin.name }
+                                )
+                              : t(
+                                  'Select a task plugin schema to use visual matrix pricing, or keep standard text tokens.'
+                                )}
+                          </div>
+                        </div>
+                        <div className='flex items-center gap-2'>
+                          <Select
+                            value={selectedTaskPluginKey}
+                            onValueChange={(val) => {
+                              setSelectedTaskPluginKey(val)
+                              if (val !== 'none') {
+                                const targetPlugin =
+                                  val === 'auto'
+                                    ? taskUsageSchema
+                                      ? { usageSchema: taskUsageSchema }
+                                      : detectedTaskPlugin
+                                    : availableTaskPlugins.find(
+                                        (p) => p.key === val
+                                      )
+                                if (
+                                  targetPlugin?.usageSchema &&
+                                  (!billingExpr ||
+                                    billingExpr === DEFAULT_TOKEN_BILLING_EXPR)
+                                ) {
+                                  setBillingExpr(
+                                    generateTaskExprFromConfig(
+                                      createDefaultTaskVisualConfig(
+                                        targetPlugin.usageSchema
+                                      ),
+                                      targetPlugin.usageSchema
+                                    )
+                                  )
+                                }
+                              }
+                            }}
+                          >
+                            <SelectTrigger className='w-[220px]'>
+                              <SelectValue placeholder={t('Auto-detect')} />
+                            </SelectTrigger>
+                            <SelectContent>
+                              <SelectItem value='auto'>
+                                {detectedTaskPlugin
+                                  ? `${t('Auto-detect')} (${detectedTaskPlugin.name})`
+                                  : t('Auto-detect')}
+                              </SelectItem>
+                              <SelectItem value='none'>
+                                {t('Standard text tokens')}
+                              </SelectItem>
+                              {availableTaskPlugins.map((plugin) => (
+                                <SelectItem key={plugin.key} value={plugin.key}>
+                                  {plugin.name}
+                                </SelectItem>
+                              ))}
+                            </SelectContent>
+                          </Select>
+                        </div>
+                      </div>
+
+                      {effectiveTaskUsageSchema ? (
                         <TaskUsagePricingEditor
-                          key={`${editorReloadToken}:${watchedValues.name}`}
+                          key={`${editorReloadToken}:${watchedValues.name}:${effectiveTaskPlugin?.key || 'custom'}`}
                           billingExpr={resolvedBillingExpr}
                           requestRuleExpr={requestRuleExpr}
-                          usageSchema={taskUsageSchema}
-                          usageExamples={taskUsageExamples}
+                          usageSchema={effectiveTaskUsageSchema}
+                          usageExamples={effectiveTaskUsageExamples}
                           onBillingExprChange={setBillingExpr}
                           onRequestRuleExprChange={setRequestRuleExpr}
                         />

@@ -11,6 +11,7 @@ import (
 	"github.com/QuantumNous/new-api/common"
 	"github.com/QuantumNous/new-api/i18n"
 	"github.com/QuantumNous/new-api/model"
+	"github.com/QuantumNous/new-api/pkg/billingexpr"
 	"github.com/QuantumNous/new-api/pkg/jsplugin"
 	"github.com/QuantumNous/new-api/service"
 	"github.com/QuantumNous/new-api/setting"
@@ -376,6 +377,8 @@ func UpdateOption(c *gin.Context) {
 				} else {
 					err = billing_setting.SmokeTestExpr(expression)
 				}
+			} else if plugin, ok := findTaskPluginForModelVariant(generation, modelName, expression); ok {
+				err = billing_setting.SmokeTestTaskExpr(expression, plugin.Meta.UsageSchema)
 			} else {
 				err = billing_setting.SmokeTestExpr(expression)
 			}
@@ -434,4 +437,42 @@ func UpdateOption(c *gin.Context) {
 		"success": true,
 		"message": "",
 	})
+}
+
+func findTaskPluginForModelVariant(g *jsplugin.RoutingGeneration, modelName, expression string) (*jsplugin.LoadedPlugin, bool) {
+	if g == nil {
+		return nil, false
+	}
+	usageKeys := billingexpr.UsedUsageKeys(expression)
+	if len(usageKeys) == 0 {
+		return nil, false
+	}
+
+	lowerModel := strings.ToLower(strings.TrimSpace(modelName))
+
+	// 仅当模型名是某个已知插件声明模型的前缀衍生/变体时才匹配 (如 doubao-seedance-2-5-260628-enhanced)
+	for _, p := range g.Plugins() {
+		if len(p.Meta.UsageSchema) == 0 {
+			continue
+		}
+		hasUndeclared := false
+		for k := range usageKeys {
+			if _, declared := p.Meta.UsageSchema[k]; !declared {
+				hasUndeclared = true
+				break
+			}
+		}
+		if hasUndeclared {
+			continue
+		}
+
+		for _, m := range p.Meta.Models {
+			lowerM := strings.ToLower(m)
+			if strings.HasPrefix(lowerModel, lowerM+"-") || strings.HasPrefix(lowerModel, lowerM+"_") || strings.HasPrefix(lowerModel, lowerM+".") {
+				return p, true
+			}
+		}
+	}
+
+	return nil, false
 }

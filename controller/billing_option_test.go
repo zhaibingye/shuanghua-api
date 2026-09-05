@@ -200,4 +200,8 @@ export function parseTaskResult() { return {}; }
 	assert.Equal(t, http.StatusOK, unresolvable.Code)
 	assert.Contains(t, unresolvable.Body.String(), `"success":false`)
 	assert.Contains(t, unresolvable.Body.String(), "no task plugin usage schema")
+
+	variantAccepted := putExpr("declared-model-enhanced", `u("seconds")`)
+	assert.Equal(t, http.StatusOK, variantAccepted.Code)
+	assert.Contains(t, variantAccepted.Body.String(), `"success":true`)
 }
