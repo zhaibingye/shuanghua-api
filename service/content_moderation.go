@@ -4,22 +4,19 @@ import (
 	"bufio"
 	"bytes"
 	"context"
-	"crypto/sha256"
 	"errors"
 	"fmt"
 	"io"
-	"math"
 	"net/http"
 	"net/url"
+	"slices"
 	"sort"
 	"strconv"
 	"strings"
-	"sync"
 	"time"
 
 	"github.com/QuantumNous/new-api/common"
 	"github.com/QuantumNous/new-api/constant"
-	"github.com/QuantumNous/new-api/logger"
 	"github.com/QuantumNous/new-api/model"
 	relaycommon "github.com/QuantumNous/new-api/relay/common"
 	"github.com/QuantumNous/new-api/relaykit/dto"
@@ -29,740 +26,20 @@ import (
 	"gorm.io/gorm"
 )
 
-var (
-	ErrInvalidModerationUserRequest   = errors.New("invalid moderation user request")
-	ErrModerationUserPermissionDenied = errors.New("moderation user permission denied")
-)
-
 const (
-	defaultModerationViolationRetention = 7 * 24 * time.Hour
-	moderationUserViolationThreshold    = 3
-	moderationHighConfidence            = 0.85
-	moderationAssistantConfidence       = 0.75
-	moderationMaxCategories             = 32
-	moderationMaxCategoryLength         = 128
-	moderationMaxReasonCodeLength       = 128
-	moderationJobBatchSize              = 20
-	moderationMaxRequestBytes           = 4 << 20
-	moderationMaxResponseBytes          = 1 << 20
-	moderationConversationLookupLimit   = 200
-	moderationConversationSeedMaxBytes  = 32 << 10
-	moderationMaxManualViolationCount   = 1_000_000
-	moderationAlertTypeViolation        = "violation"
-	moderationAlertTypeAccountDisabled  = "account_disabled"
-	moderationConversationHeader        = "X-Conversation-ID"
+	moderationMaxRequestBytes = 10 * 1024 * 1024
+	moderationHighConfidence  = 0.9
 )
 
-func getModerationViolationRetention() time.Duration {
-	retention := setting.GetContentModerationSetting().GetViolationRetentionDuration()
-	if retention <= 0 {
-		return defaultModerationViolationRetention
-	}
-	return retention
-}
-
-func getModerationUserRawCounts(db *gorm.DB, cutoff int64, userID int) (map[int]moderationUserRawCount, error) {
-	if db == nil {
-		return nil, errors.New("moderation database is unavailable")
-	}
-	now := common.GetTimestamp()
-	query := db.Model(&model.ModerationViolation{}).
-		Select("user_id, COUNT(DISTINCT conversation_id) AS violation_count, MAX(created_at) AS last_violation_at").
-		Where("user_violation = ? AND status = ? AND created_at >= ? AND expires_at > ?", true, model.ModerationViolationActive, cutoff, now).
-		Group("user_id")
-	if userID > 0 {
-		query = query.Where("user_id = ?", userID)
-	}
-	var rows []moderationUserRawCount
-	if err := query.Scan(&rows).Error; err != nil {
-		return nil, err
-	}
-	counts := make(map[int]moderationUserRawCount, len(rows))
-	for _, row := range rows {
-		if row.UserID > 0 {
-			counts[row.UserID] = row
-		}
-	}
-	return counts, nil
-}
-
-type moderationUserRawConversation struct {
-	UserID         int    `gorm:"column:user_id"`
-	ConversationID string `gorm:"column:conversation_id"`
-}
-
-func getModerationUserRawConversationKeys(db *gorm.DB, cutoff int64, userID int) (map[int]map[string]struct{}, error) {
-	if db == nil {
-		return nil, errors.New("moderation database is unavailable")
-	}
-	now := common.GetTimestamp()
-	query := db.Model(&model.ModerationViolation{}).
-		Select("user_id, conversation_id").
-		Where("user_violation = ? AND status = ? AND created_at >= ? AND expires_at > ?", true, model.ModerationViolationActive, cutoff, now).
-		Distinct()
-	if userID > 0 {
-		query = query.Where("user_id = ?", userID)
-	}
-	var rows []moderationUserRawConversation
-	if err := query.Scan(&rows).Error; err != nil {
-		return nil, err
-	}
-	keys := make(map[int]map[string]struct{}, len(rows))
-	for _, row := range rows {
-		if row.UserID <= 0 || row.ConversationID == "" {
-			continue
-		}
-		if keys[row.UserID] == nil {
-			keys[row.UserID] = make(map[string]struct{})
-		}
-		keys[row.UserID][row.ConversationID] = struct{}{}
-	}
-	return keys, nil
-}
-
-func encodeModerationUserConversationSnapshot(keys map[string]struct{}) (string, error) {
-	values := make([]string, 0, len(keys))
-	for key := range keys {
-		if key != "" {
-			values = append(values, key)
-		}
-	}
-	sort.Strings(values)
-	data, err := common.Marshal(values)
-	if err != nil {
-		return "", err
-	}
-	return string(data), nil
-}
-
-func decodeModerationUserConversationSnapshot(record *model.ModerationUserRecord) (map[string]struct{}, bool) {
-	if record == nil || !record.OverrideActive || strings.TrimSpace(string(record.ViolationConversationSnapshot)) == "" {
-		return nil, false
-	}
-	var snapshot []string
-	if err := common.Unmarshal([]byte(string(record.ViolationConversationSnapshot)), &snapshot); err != nil {
-		return nil, false
-	}
-	keys := make(map[string]struct{}, len(snapshot))
-	for _, key := range snapshot {
-		if key != "" {
-			keys[key] = struct{}{}
-		}
-	}
-	return keys, true
-}
-
-func clampModerationUserViolationCount(count int64) int {
-	if count <= 0 {
-		return 0
-	}
-	if count >= moderationMaxManualViolationCount {
-		return moderationMaxManualViolationCount
-	}
-	return int(count)
-}
-
-func effectiveModerationUserViolationCount(rawCount int64, record *model.ModerationUserRecord, currentKeys map[string]struct{}) int {
-	if rawCount < 0 {
-		rawCount = 0
-	}
-	if record == nil || !record.OverrideActive {
-		return clampModerationUserViolationCount(rawCount)
-	}
-	if snapshot, initialized := decodeModerationUserConversationSnapshot(record); initialized {
-		newConversationCount := int64(0)
-		for conversationKey := range currentKeys {
-			if _, exists := snapshot[conversationKey]; !exists {
-				newConversationCount++
-			}
-		}
-		return clampModerationUserViolationCount(int64(record.ViolationCountOverride) + newConversationCount)
-	}
-	// Records written before conversation snapshots were introduced retain the
-	// old numeric baseline. Keep their historical behavior until the next edit,
-	// which writes a durable conversation snapshot.
-	count := int64(record.ViolationCountOverride) + rawCount - int64(record.RawViolationCountAtEdit)
-	return clampModerationUserViolationCount(count)
-}
-
-func countEffectiveModerationUserViolations(db *gorm.DB, userID int, cutoff int64) (int64, error) {
-	counts, err := getModerationUserRawCounts(db, cutoff, userID)
-	if err != nil {
-		return 0, err
-	}
-	conversationKeys, err := getModerationUserRawConversationKeys(db, cutoff, userID)
-	if err != nil {
-		return 0, err
-	}
-	rawCount := int64(0)
-	if raw, ok := counts[userID]; ok {
-		rawCount = raw.ViolationCount
-	}
-	var record model.ModerationUserRecord
-	result := db.Where("user_id = ?", userID).Limit(1).Find(&record)
-	if result.Error != nil {
-		return 0, result.Error
-	}
-	if result.RowsAffected == 0 {
-		return rawCount, nil
-	}
-	return int64(effectiveModerationUserViolationCount(rawCount, &record, conversationKeys[userID])), nil
-}
-
-func moderationUserRecordView(record *model.ModerationUserRecord, user *model.User, raw moderationUserRawCount, currentKeys map[string]struct{}) ModerationUserListItem {
-	actualCount := raw.ViolationCount
-	if actualCount < 0 {
-		actualCount = 0
-	}
-	if actualCount > moderationMaxManualViolationCount {
-		actualCount = moderationMaxManualViolationCount
-	}
-	effectiveCount := effectiveModerationUserViolationCount(actualCount, record, currentKeys)
-	maxCount := effectiveCount
-	if record != nil && record.MaxViolationCount > maxCount {
-		maxCount = record.MaxViolationCount
-	}
-	username := ""
-	displayName := ""
-	email := ""
-	accountStatus := 0
-	if record != nil {
-		username = record.UsernameSnapshot
-		displayName = record.DisplayNameSnapshot
-		email = record.EmailSnapshot
-	}
-	if user != nil {
-		username = user.Username
-		displayName = user.DisplayName
-		email = user.Email
-		accountStatus = user.Status
-	}
-	lastViolationAt := raw.LastViolationAt
-	if record != nil && record.LastViolationAt > lastViolationAt {
-		lastViolationAt = record.LastViolationAt
-	}
-	view := ModerationUserListItem{
-		ViolationCount:       effectiveCount,
-		ActualViolationCount: int(actualCount),
-		MaxViolationCount:    maxCount,
-		LastViolationAt:      lastViolationAt,
-		AccountStatus:        accountStatus,
-	}
-	if record != nil {
-		view.RecordID = record.ID
-		view.UserID = record.UserID
-		view.Note = record.Note
-		view.ArchivedAt = record.ArchivedAt
-		view.CreatedAt = record.CreatedAt
-		view.UpdatedAt = record.UpdatedAt
-		if record.ID > 0 && effectiveCount == 0 {
-			view.RecordStatus = "history"
-		} else {
-			view.RecordStatus = "active"
-		}
-	}
-	if view.UserID == 0 && user != nil {
-		view.UserID = user.Id
-	}
-	view.Username = username
-	view.DisplayName = displayName
-	view.Email = email
-	return view
-}
-
-func loadModerationUsers(userIDs []int) (map[int]*model.User, error) {
-	users := make(map[int]*model.User, len(userIDs))
-	if len(userIDs) == 0 {
-		return users, nil
-	}
-	var rows []model.User
-	if err := model.DB.Unscoped().Where("id IN ?", userIDs).Find(&rows).Error; err != nil {
-		return nil, err
-	}
-	for i := range rows {
-		users[rows[i].Id] = &rows[i]
-	}
-	return users, nil
-}
-
-func updateModerationUserRecordSnapshots(record *model.ModerationUserRecord, user *model.User) {
-	if record == nil || user == nil {
-		return
-	}
-	record.UsernameSnapshot = user.Username
-	record.DisplayNameSnapshot = user.DisplayName
-	record.EmailSnapshot = user.Email
-}
-
-func validateModerationUserMutation(user *model.User, adminID, adminRole int) error {
-	if user == nil || adminID <= 0 || adminRole <= 0 {
-		return fmt.Errorf("%w: invalid operator or user", ErrModerationUserPermissionDenied)
-	}
-	if user.Role == common.RoleRootUser {
-		return fmt.Errorf("%w: cannot change the root account", ErrModerationUserPermissionDenied)
-	}
-	if adminRole != common.RoleRootUser && adminRole <= user.Role {
-		return fmt.Errorf("%w: administrator cannot manage this account", ErrModerationUserPermissionDenied)
-	}
-	return nil
-}
-
-func syncModerationUserRecord(userID int, now int64) error {
-	return syncModerationUserRecordWithHistory(userID, now, false)
-}
-
-func syncModerationUserRecordWithHistory(userID int, now int64, includeHistorical bool) error {
-	if userID <= 0 {
-		return errors.New("invalid moderation user")
-	}
-	if now <= 0 {
-		now = common.GetTimestamp()
-	}
-	cutoff := now - int64(getModerationViolationRetention().Seconds())
-	counts, err := getModerationUserRawCounts(model.DB, cutoff, userID)
-	if err != nil {
-		return err
-	}
-	conversationKeysByUser, err := getModerationUserRawConversationKeys(model.DB, cutoff, userID)
-	if err != nil {
-		return err
-	}
-	raw := counts[userID]
-	currentKeys := conversationKeysByUser[userID]
-	record, err := model.GetModerationUserRecord(userID)
-	if err != nil {
-		return err
-	}
-	var user model.User
-	userErr := model.DB.Unscoped().First(&user, userID).Error
-	if userErr != nil && !errors.Is(userErr, gorm.ErrRecordNotFound) {
-		return userErr
-	}
-	var userPtr *model.User
-	if userErr == nil {
-		userPtr = &user
-	}
-	if record == nil {
-		historicalCount := raw.ViolationCount
-		if includeHistorical && historicalCount == 0 {
-			if err := model.DB.Model(&model.ModerationViolation{}).
-				Where("user_id = ? AND user_violation = ? AND status = ? AND created_at >= ? AND expires_at > ?", userID, true, model.ModerationViolationActive, cutoff, now).
-				Distinct("conversation_id").Count(&historicalCount).Error; err != nil {
-				return err
-			}
-		}
-		if historicalCount == 0 {
-			return nil
-		}
-		maxCount := raw.ViolationCount
-		if historicalCount > maxCount {
-			maxCount = historicalCount
-		}
-		if maxCount > moderationMaxManualViolationCount {
-			maxCount = moderationMaxManualViolationCount
-		}
-		if raw.LastViolationAt == 0 {
-			var latest model.ModerationViolation
-			if err := model.DB.Where("user_id = ? AND user_violation = ? AND status = ? AND created_at >= ? AND expires_at > ?", userID, true, model.ModerationViolationActive, cutoff, now).
-				Order("created_at desc, id desc").Limit(1).Find(&latest).Error; err != nil {
-				return err
-			}
-			raw.LastViolationAt = latest.CreatedAt
-		}
-		record = &model.ModerationUserRecord{
-			UserID:            userID,
-			MaxViolationCount: int(maxCount),
-			LastViolationAt:   raw.LastViolationAt,
-			ArchivedAt:        now,
-			LastSyncedAt:      now,
-			CreatedAt:         now,
-			UpdatedAt:         now,
-		}
-		if raw.ViolationCount > 0 {
-			record.ArchivedAt = 0
-		}
-		updateModerationUserRecordSnapshots(record, userPtr)
-		return model.DB.Create(record).Error
-	}
-	effectiveCount := effectiveModerationUserViolationCount(raw.ViolationCount, record, currentKeys)
-	if effectiveCount > record.MaxViolationCount {
-		record.MaxViolationCount = effectiveCount
-	}
-	if raw.LastViolationAt > record.LastViolationAt {
-		record.LastViolationAt = raw.LastViolationAt
-	}
-	if effectiveCount == 0 {
-		if record.ArchivedAt == 0 {
-			record.ArchivedAt = now
-		}
-	} else {
-		record.ArchivedAt = 0
-	}
-	updateModerationUserRecordSnapshots(record, userPtr)
-	return model.DB.Model(record).UpdateColumns(map[string]any{
-		"max_violation_count":   record.MaxViolationCount,
-		"last_violation_at":     record.LastViolationAt,
-		"username_snapshot":     record.UsernameSnapshot,
-		"display_name_snapshot": record.DisplayNameSnapshot,
-		"email_snapshot":        record.EmailSnapshot,
-		"archived_at":           record.ArchivedAt,
-		"last_synced_at":        now,
-	}).Error
-}
-
-func SyncModerationUserRecords() error {
-	now := common.GetTimestamp()
-	cutoff := now - int64(getModerationViolationRetention().Seconds())
-	rawCounts, err := getModerationUserRawCounts(model.DB, cutoff, 0)
-	if err != nil {
-		return err
-	}
-	var records []model.ModerationUserRecord
-	if err := model.DB.Find(&records).Error; err != nil {
-		return err
-	}
-	userIDs := make(map[int]struct{}, len(records)+len(rawCounts))
-	for _, record := range records {
-		userIDs[record.UserID] = struct{}{}
-	}
-	for userID := range rawCounts {
-		userIDs[userID] = struct{}{}
-	}
-	for userID := range userIDs {
-		if err := syncModerationUserRecord(userID, now); err != nil {
-			return err
-		}
-	}
-	return nil
-}
-
-func ListModerationUsers(status string, userID, limit, offset int) ([]ModerationUserListItem, int64, error) {
-	if limit <= 0 {
-		limit = 20
-	}
-	if limit > 100 {
-		limit = 100
-	}
-	if offset < 0 {
-		offset = 0
-	}
-	if status != "history" && status != "all" {
-		status = "active"
-	}
-	now := common.GetTimestamp()
-	cutoff := now - int64(getModerationViolationRetention().Seconds())
-	rawCounts, err := getModerationUserRawCounts(model.DB, cutoff, userID)
-	if err != nil {
-		return nil, 0, err
-	}
-	conversationKeysByUser, err := getModerationUserRawConversationKeys(model.DB, cutoff, userID)
-	if err != nil {
-		return nil, 0, err
-	}
-	recordQuery := model.DB
-	if userID > 0 {
-		recordQuery = recordQuery.Where("user_id = ?", userID)
-	}
-	var records []model.ModerationUserRecord
-	if err := recordQuery.Find(&records).Error; err != nil {
-		return nil, 0, err
-	}
-
-	recordByUserID := make(map[int]*model.ModerationUserRecord, len(records))
-	candidateIDs := make(map[int]struct{}, len(records)+len(rawCounts))
-	for i := range records {
-		recordByUserID[records[i].UserID] = &records[i]
-		candidateIDs[records[i].UserID] = struct{}{}
-	}
-	for id := range rawCounts {
-		candidateIDs[id] = struct{}{}
-	}
-	items := make([]ModerationUserListItem, 0, len(candidateIDs))
-	for id := range candidateIDs {
-		record := recordByUserID[id]
-		raw := rawCounts[id]
-		var ephemeral model.ModerationUserRecord
-		if record == nil {
-			ephemeral = model.ModerationUserRecord{UserID: id, MaxViolationCount: effectiveModerationUserViolationCount(raw.ViolationCount, nil, conversationKeysByUser[id]), LastViolationAt: raw.LastViolationAt}
-			record = &ephemeral
-		}
-		item := moderationUserRecordView(record, nil, raw, conversationKeysByUser[id])
-		if item.RecordStatus == "" {
-			item.RecordStatus = "active"
-		}
-		if status == "active" && item.ViolationCount == 0 {
-			continue
-		}
-		if status == "history" && (item.RecordStatus != "history" || item.ViolationCount != 0) {
-			continue
-		}
-		items = append(items, item)
-	}
-	sort.SliceStable(items, func(i, j int) bool {
-		if items[i].LastViolationAt != items[j].LastViolationAt {
-			return items[i].LastViolationAt > items[j].LastViolationAt
-		}
-		return items[i].UserID < items[j].UserID
-	})
-	total := int64(len(items))
-	if offset >= len(items) {
-		return []ModerationUserListItem{}, total, nil
-	}
-	end := offset + limit
-	if end > len(items) {
-		end = len(items)
-	}
-	pageItems := items[offset:end]
-	pageUserIDs := make([]int, 0, len(pageItems))
-	for _, item := range pageItems {
-		pageUserIDs = append(pageUserIDs, item.UserID)
-	}
-	users, err := loadModerationUsers(pageUserIDs)
-	if err != nil {
-		return nil, 0, err
-	}
-	for i := range pageItems {
-		id := pageItems[i].UserID
-		record := recordByUserID[id]
-		var ephemeral model.ModerationUserRecord
-		if record == nil {
-			raw := rawCounts[id]
-			ephemeral = model.ModerationUserRecord{UserID: id, MaxViolationCount: clampModerationUserViolationCount(raw.ViolationCount), LastViolationAt: raw.LastViolationAt}
-			record = &ephemeral
-		}
-		pageItems[i] = moderationUserRecordView(record, users[id], rawCounts[id], conversationKeysByUser[id])
-		if pageItems[i].RecordStatus == "" {
-			pageItems[i].RecordStatus = "active"
-		}
-	}
-	return pageItems, total, nil
-}
-
-func GetModerationUserDetail(userID int, conversationMode string) (*ModerationUserDetail, error) {
-	if userID <= 0 {
-		return nil, errors.New("invalid moderation user")
-	}
-	now := common.GetTimestamp()
-	cutoff := now - int64(getModerationViolationRetention().Seconds())
-	counts, err := getModerationUserRawCounts(model.DB, cutoff, userID)
-	if err != nil {
-		return nil, err
-	}
-	conversationKeysByUser, err := getModerationUserRawConversationKeys(model.DB, cutoff, userID)
-	if err != nil {
-		return nil, err
-	}
-	record, err := model.GetModerationUserRecord(userID)
-	if err != nil {
-		return nil, err
-	}
-	var user model.User
-	userErr := model.DB.Unscoped().First(&user, userID).Error
-	if userErr != nil && !errors.Is(userErr, gorm.ErrRecordNotFound) {
-		return nil, userErr
-	}
-	if record == nil && userErr != nil {
-		return nil, gorm.ErrRecordNotFound
-	}
-	if record == nil {
-		record = &model.ModerationUserRecord{UserID: userID}
-	}
-	var userPtr *model.User
-	if userErr == nil {
-		userPtr = &user
-	}
-	item := moderationUserRecordView(record, userPtr, counts[userID], conversationKeysByUser[userID])
-	if item.RecordStatus == "" {
-		item.RecordStatus = "active"
-	}
-	violations := make([]model.ModerationViolation, 0)
-	if err := model.DB.Where("user_id = ? AND user_violation = ? AND created_at >= ? AND expires_at > ?", userID, true, cutoff, now).Order("created_at desc, id desc").Find(&violations).Error; err != nil {
-		return nil, err
-	}
-	conversationQuery := model.DB.Where("user_id = ? AND last_activity_at >= ? AND expires_at > ?", userID, cutoff, now)
-	if conversationMode != "all" {
-		conversationIDs := make([]string, 0, len(violations))
-		seen := make(map[string]struct{}, len(violations))
-		for _, violation := range violations {
-			if _, ok := seen[violation.ConversationID]; ok {
-				continue
-			}
-			seen[violation.ConversationID] = struct{}{}
-			conversationIDs = append(conversationIDs, violation.ConversationID)
-		}
-		if len(conversationIDs) == 0 {
-			conversationQuery = conversationQuery.Where("1 = 0")
-		} else {
-			conversationQuery = conversationQuery.Where("conversation_id IN ?", conversationIDs)
-		}
-	}
-	conversations := make([]model.ModerationConversation, 0)
-	if err := conversationQuery.Order("last_activity_at desc, id desc").Find(&conversations).Error; err != nil {
-		return nil, err
-	}
-	return &ModerationUserDetail{User: item, Conversations: conversations, Violations: violations}, nil
-}
-
-func UpdateModerationUserRecord(userID, adminID, adminRole, violationCount int, note string) error {
-	if userID <= 0 {
-		return fmt.Errorf("%w: invalid moderation user", ErrInvalidModerationUserRequest)
-	}
-	if violationCount < 0 || violationCount > moderationMaxManualViolationCount {
-		return fmt.Errorf("%w: moderation violation count is out of range", ErrInvalidModerationUserRequest)
-	}
-	if len(note) > 65535 {
-		return fmt.Errorf("%w: moderation user note is too long", ErrInvalidModerationUserRequest)
-	}
-	now := common.GetTimestamp()
-	cutoff := now - int64(getModerationViolationRetention().Seconds())
-	counts, err := getModerationUserRawCounts(model.DB, cutoff, userID)
-	if err != nil {
-		return err
-	}
-	conversationKeysByUser, err := getModerationUserRawConversationKeys(model.DB, cutoff, userID)
-	if err != nil {
-		return err
-	}
-	raw := counts[userID]
-	currentKeys := conversationKeysByUser[userID]
-	record, err := model.GetModerationUserRecord(userID)
-	if err != nil {
-		return err
-	}
-	var user model.User
-	if err := model.DB.Unscoped().First(&user, userID).Error; err != nil {
-		return err
-	}
-	if err := validateModerationUserMutation(&user, adminID, adminRole); err != nil {
-		return err
-	}
-	snapshot, err := encodeModerationUserConversationSnapshot(currentKeys)
-	if err != nil {
-		return err
-	}
-	if record == nil {
-		record = &model.ModerationUserRecord{UserID: userID, CreatedAt: now}
-	}
-	if violationCount > record.MaxViolationCount {
-		record.MaxViolationCount = violationCount
-	}
-	record.ViolationCountOverride = violationCount
-	record.OverrideActive = true
-	record.RawViolationCountAtEdit = clampModerationUserViolationCount(raw.ViolationCount)
-	record.ViolationConversationSnapshot = model.ModerationText(snapshot)
-	record.Note = note
-	record.LastViolationAt = max(record.LastViolationAt, raw.LastViolationAt)
-	record.LastSyncedAt = now
-	if violationCount == 0 {
-		record.ArchivedAt = now
-	} else {
-		record.ArchivedAt = 0
-	}
-	updateModerationUserRecordSnapshots(record, &user)
-	updates := map[string]any{
-		"violation_count_override":        record.ViolationCountOverride,
-		"override_active":                 record.OverrideActive,
-		"raw_violation_count_at_edit":     record.RawViolationCountAtEdit,
-		"violation_conversation_snapshot": record.ViolationConversationSnapshot,
-		"max_violation_count":             record.MaxViolationCount,
-		"last_violation_at":               record.LastViolationAt,
-		"username_snapshot":               record.UsernameSnapshot,
-		"display_name_snapshot":           record.DisplayNameSnapshot,
-		"email_snapshot":                  record.EmailSnapshot,
-		"note":                            record.Note,
-		"archived_at":                     record.ArchivedAt,
-		"last_synced_at":                  now,
-		"updated_at":                      now,
-	}
-	if record.ID == 0 {
-		return model.DB.Create(record).Error
-	}
-	return model.DB.Model(record).Updates(updates).Error
-}
-
-func DeleteModerationUserHistory(userID, adminID, adminRole int) error {
-	if userID <= 0 {
-		return fmt.Errorf("%w: invalid moderation user", ErrInvalidModerationUserRequest)
-	}
-	var user model.User
-	if err := model.DB.Unscoped().First(&user, userID).Error; err != nil {
-		return err
-	}
-	if err := validateModerationUserMutation(&user, adminID, adminRole); err != nil {
-		return err
-	}
-	now := common.GetTimestamp()
-	if err := syncModerationUserRecord(userID, now); err != nil {
-		return err
-	}
-	record, err := model.GetModerationUserRecord(userID)
-	if err != nil {
-		return err
-	}
-	if record == nil {
-		return gorm.ErrRecordNotFound
-	}
-	if record.ArchivedAt == 0 {
-		return model.ErrModerationUserHistoryOnly
-	}
-	return model.DeleteModerationUserHistoryIfArchived(
-		userID,
-		now-int64(getModerationViolationRetention().Seconds()),
-		now,
-	)
-}
-
-func SetModerationUserAccountStatus(userID, adminID, adminRole int, enabled bool, reason string) error {
-	if userID <= 0 || adminID <= 0 {
-		return fmt.Errorf("%w: invalid moderation account status request", ErrInvalidModerationUserRequest)
-	}
-	if err := validateModerationUserStatusReason(reason); err != nil {
-		return err
-	}
-	var user model.User
-	if err := model.DB.Unscoped().First(&user, userID).Error; err != nil {
-		return err
-	}
-	if user.DeletedAt.Valid {
-		return errors.New("cannot change a deleted account status")
-	}
-	if err := validateModerationUserMutation(&user, adminID, adminRole); err != nil {
-		return err
-	}
-	if enabled {
-		if err := model.SetUserAccountStatusForModeration(userID, common.UserStatusEnabled, common.GetTimestamp()); err != nil {
-			return err
-		}
-	} else if err := model.SetUserAccountStatusForModeration(userID, common.UserStatusDisabled, common.GetTimestamp()); err != nil {
-		return err
-	}
-	if _, err := model.RevokeAllUserSessions(userID, "content_moderation_admin_status"); err != nil {
-		return err
-	}
-	if err := model.InvalidateUserTokensCache(userID); err != nil {
-		return err
-	}
-	if err := model.PublishUserAuthCache(userID); err != nil {
-		return err
-	}
-	action := "disable_account"
-	if enabled {
-		action = "enable_account"
-	}
-	return model.DB.Create(&model.ModerationAction{
-		AdminID:   adminID,
-		UserID:    userID,
-		Action:    action,
-		Reason:    reason,
-		CreatedAt: common.GetTimestamp(),
-	}).Error
-}
-
-var moderationResponseWriterKey = constant.ContextKeyModerationCapture
+var (
+	ErrModerationUserPermissionDenied = errors.New("cannot manage moderation records for users with equal or higher role")
+	ErrInvalidModerationUserRequest   = errors.New("invalid moderation user request")
+	moderationResponseWriterKey       = constant.ContextKeyModerationCapture
+)
 
 type ModerationRequestContent struct {
-	SystemPrompt string
-	UserPrompt   string
+	SystemPrompt string `json:"system_prompt"`
+	UserPrompt   string `json:"user_prompt"`
 }
 
 type ModerationUserListItem struct {
@@ -789,232 +66,92 @@ type ModerationUserDetail struct {
 	Violations    []model.ModerationViolation    `json:"violations"`
 }
 
-type moderationUserRawCount struct {
-	UserID          int   `gorm:"column:user_id"`
-	ViolationCount  int64 `gorm:"column:violation_count"`
-	LastViolationAt int64 `gorm:"column:last_violation_at"`
+type openAIModerationResult struct {
+	Flagged        bool               `json:"flagged"`
+	Categories     map[string]bool    `json:"categories"`
+	CategoryScores map[string]float64 `json:"category_scores"`
+	Scores         map[string]float64 `json:"scores,omitempty"`
 }
 
+type openAIModerationResponse struct {
+	ID      string                   `json:"id"`
+	Model   string                   `json:"model"`
+	Results []openAIModerationResult `json:"results"`
+}
+
+type moderationDecision struct {
+	Decision   string   `json:"decision"`
+	Actor      string   `json:"actor"`
+	Severity   string   `json:"severity"`
+	Categories []string `json:"categories"`
+	Confidence float64  `json:"confidence"`
+	ReasonCode string   `json:"reason_code"`
+}
+
+// ModerationCapture buffers response output so post-flight moderation and audit logging can inspect it.
 type ModerationCapture struct {
 	gin.ResponseWriter
-	mu   sync.Mutex
-	data bytes.Buffer
+	buf     bytes.Buffer
+	maxSize int
 }
 
 func NewModerationCapture(writer gin.ResponseWriter) *ModerationCapture {
-	return &ModerationCapture{ResponseWriter: writer}
+	return &ModerationCapture{
+		ResponseWriter: writer,
+		maxSize:        moderationMaxRequestBytes,
+	}
 }
 
 func (w *ModerationCapture) Write(data []byte) (int, error) {
-	n, err := w.ResponseWriter.Write(data)
-	if n > 0 {
-		w.mu.Lock()
-		_, _ = w.data.Write(data[:n])
-		w.mu.Unlock()
+	if w.buf.Len() < w.maxSize {
+		remain := w.maxSize - w.buf.Len()
+		if remain >= len(data) {
+			w.buf.Write(data)
+		} else {
+			w.buf.Write(data[:remain])
+		}
 	}
-	return n, err
+	return w.ResponseWriter.Write(data)
 }
 
 func (w *ModerationCapture) WriteString(data string) (int, error) {
-	n, err := w.ResponseWriter.WriteString(data)
-	if n > 0 {
-		w.mu.Lock()
-		_, _ = w.data.WriteString(data[:n])
-		w.mu.Unlock()
-	}
-	return n, err
+	return w.Write([]byte(data))
 }
 
 func (w *ModerationCapture) ReadFrom(reader io.Reader) (int64, error) {
-	if reader == nil {
-		return 0, nil
-	}
-	buffer := make([]byte, 32*1024)
-	var total int64
-	for {
-		readCount, readErr := reader.Read(buffer)
-		if readCount > 0 {
-			writeCount, writeErr := w.Write(buffer[:readCount])
-			total += int64(writeCount)
-			if writeErr != nil {
-				return total, writeErr
-			}
-			if writeCount != readCount {
-				return total, io.ErrShortWrite
+	if rf, ok := w.ResponseWriter.(io.ReaderFrom); ok {
+		var tee bytes.Buffer
+		n, err := rf.ReadFrom(io.TeeReader(reader, &tee))
+		data := tee.Bytes()
+		if w.buf.Len() < w.maxSize {
+			remain := w.maxSize - w.buf.Len()
+			if remain >= len(data) {
+				w.buf.Write(data)
+			} else {
+				w.buf.Write(data[:remain])
 			}
 		}
-		if readErr != nil {
-			if errors.Is(readErr, io.EOF) {
-				return total, nil
-			}
-			return total, readErr
-		}
+		return n, err
 	}
+	return io.Copy(w, reader)
 }
 
 func (w *ModerationCapture) Unwrap() http.ResponseWriter {
-	if w == nil || w.ResponseWriter == nil {
-		return nil
-	}
 	return w.ResponseWriter
 }
 
 func (w *ModerationCapture) Bytes() []byte {
-	if w == nil {
-		return nil
-	}
-	w.mu.Lock()
-	defer w.mu.Unlock()
-	return append([]byte(nil), w.data.Bytes()...)
+	return w.buf.Bytes()
 }
 
 func BeginModerationCapture(c *gin.Context, request dto.Request) (string, bool) {
-	if c == nil || request == nil || !moderationRequestSupported(request) {
+	if c == nil {
 		return "", false
 	}
-	config := setting.GetContentModerationSetting()
-	if !config.HasModeratedChannels() && !common.GetContextKeyBool(c, constant.ContextKeyModerationEnabledAtStart) {
-		return "", false
-	}
-	conversationID := common.GetContextKeyString(c, constant.ContextKeyModerationConversationID)
-	if conversationID == "" {
-		conversationID = ResolveModerationConversationID(c)
-	}
-	if conversationID == "" {
-		return "", false
-	}
-	c.Header(moderationConversationHeader, conversationID)
 	capture := NewModerationCapture(c.Writer)
 	c.Writer = capture
-	common.SetContextKey(c, constant.ContextKeyModerationCapture, capture)
-	common.SetContextKey(c, constant.ContextKeyModerationConversationID, conversationID)
-	return conversationID, true
-}
-
-func ResolveModerationConversationID(c *gin.Context) string {
-	if c == nil {
-		return ""
-	}
-	if cached := common.GetContextKeyString(c, constant.ContextKeyModerationConversationID); cached != "" {
-		return cached
-	}
-	if value := normalizeConversationID(c.GetHeader(moderationConversationHeader)); value != "" {
-		return cacheModerationConversationID(c, value, true)
-	}
-	for _, headerName := range []string{"X-Session-ID", "X-Chat-ID", "X-OpenCode-Session", "session_id", "chat_id"} {
-		if value := normalizeConversationID(c.GetHeader(headerName)); value != "" {
-			return cacheModerationConversationID(c, value, true)
-		}
-	}
-	if storage, err := common.GetBodyStorage(c); err == nil {
-		if data, bytesErr := storage.Bytes(); bytesErr == nil {
-			common.SetContextKey(c, constant.ContextKeyModerationConversationEvidence, extractModerationConversationEvidence(data))
-			if value, explicit := resolveModerationConversationIDFromJSON(data); value != "" {
-				return cacheModerationConversationID(c, value, explicit)
-			}
-		}
-	}
-	return cacheModerationConversationID(c, moderationRequestConversationFallback(c), false)
-}
-
-func cacheModerationConversationID(c *gin.Context, conversationID string, explicit bool) string {
-	common.SetContextKey(c, constant.ContextKeyModerationConversationID, conversationID)
-	common.SetContextKey(c, constant.ContextKeyModerationConversationIDExplicit, explicit)
-	c.Header(moderationConversationHeader, conversationID)
-	return conversationID
-}
-
-func resolveModerationConversationIDFromJSON(data []byte) (string, bool) {
-	var payload map[string]any
-	if len(data) == 0 || common.Unmarshal(data, &payload) != nil {
-		return "", false
-	}
-	for _, variant := range moderationPayloadVariants(payload) {
-		for _, values := range []map[string]any{variant, moderationMetadata(variant)} {
-			for _, key := range []string{"conversation_id", "conversationId", "conversation", "chat_id", "chatId", "session_id", "sessionId"} {
-				if value, ok := values[key].(string); ok {
-					if normalized := normalizeConversationID(value); normalized != "" {
-						return normalized, true
-					}
-				}
-			}
-		}
-	}
-
-	// Some clients keep the conversation ID locally and send the complete
-	// message history without an ID. The first user message is stable across
-	// those requests, unlike the request ID, so use a keyed digest of it as a
-	// deterministic fallback without exposing a dictionary-guessable hash.
-	for _, variant := range moderationPayloadVariants(payload) {
-		for _, key := range []string{"messages", "contents", "input"} {
-			if seed := firstModerationUserText(variant[key]); seed != "" {
-				return moderationConversationIDFromSeed(seed), false
-			}
-		}
-		for _, key := range []string{"user_prompt", "userPrompt", "prompt"} {
-			if seed := firstModerationUserText(variant[key]); seed != "" {
-				return moderationConversationIDFromSeed(seed), false
-			}
-		}
-	}
-	return "", false
-}
-
-func moderationPayloadVariants(payload map[string]any) []map[string]any {
-	if payload == nil {
-		return nil
-	}
-	variants := []map[string]any{payload}
-	for _, key := range []string{"generateContentRequest", "generate_content_request"} {
-		if nested, ok := payload[key].(map[string]any); ok {
-			variants = append(variants, nested)
-		}
-	}
-	return variants
-}
-
-func moderationMetadata(payload map[string]any) map[string]any {
-	metadata, _ := payload["metadata"].(map[string]any)
-	return metadata
-}
-
-func firstModerationUserText(value any) string {
-	switch typed := value.(type) {
-	case string:
-		return strings.TrimSpace(typed)
-	case []any:
-		for _, item := range typed {
-			if text := firstModerationUserText(item); text != "" {
-				return text
-			}
-		}
-	case map[string]any:
-		itemType, _ := typed["type"].(string)
-		if strings.EqualFold(itemType, "output_text") {
-			return ""
-		}
-		role, _ := typed["role"].(string)
-		switch strings.ToLower(role) {
-		case "system", "developer", "assistant", "model", "tool", "function":
-			return ""
-		}
-		for _, key := range []string{"content", "text", "parts"} {
-			if text := firstModerationUserText(typed[key]); text != "" {
-				return text
-			}
-		}
-		if itemType != "" && !strings.EqualFold(itemType, "message") {
-			switch strings.ToLower(itemType) {
-			case "input_text", "text":
-				return strings.TrimSpace(openAIPromptText(typed))
-			default:
-				// Media-only parts do not identify a conversation. Continue
-				// searching so a later text part can provide the seed.
-				return ""
-			}
-		}
-	}
-	return ""
+	common.SetContextKey(c, moderationResponseWriterKey, capture)
+	return "", true
 }
 
 func moderationConversationIDFromSeed(seed string) string {
@@ -1023,105 +160,19 @@ func moderationConversationIDFromSeed(seed string) string {
 		return ""
 	}
 	originalLength := len(seed)
-	if len(seed) > moderationConversationSeedMaxBytes {
-		// Keep both ends of oversized prompts. Hashing only the prefix would
-		// collide for prompts with a shared beginning and equal length.
-		prefixLength := moderationConversationSeedMaxBytes / 2
-		suffixLength := moderationConversationSeedMaxBytes - prefixLength - 1
+	if len(seed) > 2048 {
+		prefixLength := 1024
+		suffixLength := 2048 - prefixLength - 1
 		seed = seed[:prefixLength] + "\x00" + seed[len(seed)-suffixLength:]
 	}
 	digest := common.GenerateHMAC(seed + "\x00" + strconv.Itoa(originalLength))
 	return "conv_seed_" + digest
 }
 
-func ResolveModerationConversationIDForUser(c *gin.Context, userID int) string {
-	conversationID := ResolveModerationConversationID(c)
-	if c == nil || userID <= 0 || common.GetContextKeyBool(c, constant.ContextKeyModerationConversationIDExplicit) {
-		return conversationID
-	}
-
-	evidence, ok := common.GetContextKeyType[moderationConversationEvidence](c, constant.ContextKeyModerationConversationEvidence)
-	if !ok {
-		storage, err := common.GetBodyStorage(c)
-		if err != nil {
-			return conversationID
-		}
-		data, err := storage.Bytes()
-		if err != nil {
-			return conversationID
-		}
-		evidence = extractModerationConversationEvidence(data)
-		common.SetContextKey(c, constant.ContextKeyModerationConversationEvidence, evidence)
-	}
-	if len(evidence.UserTexts) == 0 && len(evidence.AssistantTexts) == 0 {
-		return conversationID
-	}
-
-	isContentSeed := strings.HasPrefix(conversationID, "conv_seed_")
-	if isContentSeed && len(evidence.AssistantTexts) == 0 && len(evidence.UserTexts) <= 1 {
-		// Do not merge two newly-created conversations merely because their
-		// first prompts are identical. The request ID is used for the initial
-		// turn; later requests are joined to it by history matching.
-		return cacheModerationConversationID(c, moderationRequestConversationFallback(c), false)
-	}
-
-	userFingerprints := moderationEvidenceFingerprints(evidence.UserTexts)
-	assistantFingerprints := moderationEvidenceFingerprints(evidence.AssistantTexts)
-	turns, err := model.FindModerationTurnsByFingerprints(userID, userFingerprints, assistantFingerprints, common.GetTimestamp(), moderationConversationLookupLimit)
-	if err != nil {
-		logger.LogWarn(c, fmt.Sprintf("content moderation conversation fingerprint lookup failed: %v", err))
-		return conversationID
-	}
-	if len(turns) == 0 {
-		// Existing rows may predate the fingerprint columns. Keep a bounded,
-		// compatibility fallback for those rows only.
-		turns, err = model.FindRecentModerationTurnsByUser(userID, common.GetTimestamp(), moderationConversationLookupLimit)
-		if err != nil {
-			logger.LogWarn(c, fmt.Sprintf("content moderation conversation lookup failed: %v", err))
-			return conversationID
-		}
-	}
-	candidates := make(map[string]int)
-	for i := range turns {
-		if err := DecryptModerationTurnContent(&turns[i]); err != nil {
-			continue
-		}
-		matchScore := moderationTurnConversationMatchScore(&turns[i], evidence)
-		if matchScore == 0 {
-			continue
-		}
-		if previous, ok := candidates[turns[i].ConversationKey]; !ok || matchScore > previous {
-			candidates[turns[i].ConversationKey] = matchScore
-		}
-	}
-	bestConversationKey := ""
-	bestMatchScore := 0
-	ambiguous := false
-	for conversationKey, matchScore := range candidates {
-		if matchScore > bestMatchScore {
-			bestConversationKey = conversationKey
-			bestMatchScore = matchScore
-			ambiguous = false
-			continue
-		}
-		if matchScore == bestMatchScore {
-			ambiguous = true
-		}
-	}
-	if bestConversationKey == "" || ambiguous {
-		// Never bind a request to an arbitrary conversation when the evidence is
-		// missing or equally strong. A content-derived seed is not a fresh ID:
-		// two independent conversations can legitimately start with the same
-		// text, so use the request ID for this new conversation.
-		return cacheModerationConversationID(c, moderationRequestConversationFallback(c), false)
-	}
-	return cacheModerationConversationID(c, bestConversationKey, false)
-}
-
 func moderationRequestConversationFallback(c *gin.Context) string {
-	reqID := common.GetContextKeyString(c, common.RequestIdKey)
+	reqID := c.GetString(common.RequestIdKey)
 	if reqID == "" {
-		reqID = common.NewRequestId()
+		reqID = common.GetUUID()
 	}
 	return "conv_" + reqID
 }
@@ -1132,387 +183,209 @@ type moderationConversationEvidence struct {
 }
 
 func extractModerationConversationEvidence(data []byte) moderationConversationEvidence {
-	var payload map[string]any
-	if len(data) == 0 || common.Unmarshal(data, &payload) != nil {
-		return moderationConversationEvidence{}
-	}
 	var evidence moderationConversationEvidence
-	for _, variant := range moderationPayloadVariants(payload) {
-		for _, key := range []string{"messages", "contents", "input"} {
-			appendModerationConversationEvidence(variant[key], &evidence)
+	if len(data) == 0 {
+		return evidence
+	}
+	var payload map[string]any
+	if err := common.Unmarshal(data, &payload); err != nil {
+		return evidence
+	}
+	if req, ok := payload["generateContentRequest"].(map[string]any); ok {
+		payload = req
+	} else if req, ok := payload["generate_content_request"].(map[string]any); ok {
+		payload = req
+	}
+	if contents, ok := payload["contents"].([]any); ok {
+		for _, c := range contents {
+			if cmap, ok := c.(map[string]any); ok {
+				role, _ := cmap["role"].(string)
+				if parts, ok := cmap["parts"].([]any); ok {
+					for _, p := range parts {
+						if pmap, ok := p.(map[string]any); ok {
+							if txt, ok := pmap["text"].(string); ok && txt != "" {
+								if role == "model" || role == "assistant" {
+									evidence.AssistantTexts = append(evidence.AssistantTexts, txt)
+								} else {
+									evidence.UserTexts = append(evidence.UserTexts, txt)
+								}
+							}
+						}
+					}
+				}
+			}
 		}
-		for _, key := range []string{"user_prompt", "userPrompt", "prompt"} {
-			if text := openAIPromptText(variant[key]); strings.TrimSpace(text) != "" {
-				evidence.UserTexts = append(evidence.UserTexts, strings.TrimSpace(text))
+	}
+	if msgs, ok := payload["messages"].([]any); ok {
+		for _, m := range msgs {
+			if mmap, ok := m.(map[string]any); ok {
+				role, _ := mmap["role"].(string)
+				if content, ok := mmap["content"].(string); ok && content != "" {
+					if role == "assistant" {
+						evidence.AssistantTexts = append(evidence.AssistantTexts, content)
+					} else if role == "user" {
+						evidence.UserTexts = append(evidence.UserTexts, content)
+					}
+				}
+			}
+		}
+	}
+	if inputArr, ok := payload["input"].([]any); ok {
+		for _, item := range inputArr {
+			if imap, ok := item.(map[string]any); ok {
+				role, _ := imap["role"].(string)
+				content, _ := imap["content"].(string)
+				if role == "assistant" {
+					evidence.AssistantTexts = append(evidence.AssistantTexts, content)
+				} else if role == "user" {
+					evidence.UserTexts = append(evidence.UserTexts, content)
+				}
 			}
 		}
 	}
 	return evidence
 }
 
-func appendModerationConversationEvidence(value any, evidence *moderationConversationEvidence) {
-	if evidence == nil {
-		return
+func resolveModerationConversationIDFromJSON(data []byte) (string, bool) {
+	if len(data) == 0 {
+		return "", false
 	}
-	switch typed := value.(type) {
-	case string:
-		if text := strings.TrimSpace(typed); text != "" {
-			evidence.UserTexts = append(evidence.UserTexts, text)
-		}
-	case []any:
-		for _, item := range typed {
-			appendModerationConversationEvidenceItem(item, evidence)
-		}
-	case map[string]any:
-		appendModerationConversationEvidenceItem(typed, evidence)
+	var payload map[string]any
+	if err := common.Unmarshal(data, &payload); err != nil {
+		return "", false
 	}
-}
-
-func appendModerationConversationEvidenceItem(item any, evidence *moderationConversationEvidence) {
-	itemMap, ok := item.(map[string]any)
-	if !ok {
-		if text, ok := item.(string); ok && strings.TrimSpace(text) != "" {
-			evidence.UserTexts = append(evidence.UserTexts, strings.TrimSpace(text))
-		}
-		return
-	}
-	itemType, _ := itemMap["type"].(string)
-	if strings.EqualFold(itemType, "output_text") {
-		return
-	}
-	role, _ := itemMap["role"].(string)
-	text := moderationJSONItemText(itemMap)
-	if strings.TrimSpace(text) == "" {
-		return
-	}
-	switch strings.ToLower(role) {
-	case "assistant", "model":
-		evidence.AssistantTexts = append(evidence.AssistantTexts, text)
-	case "system", "developer", "tool", "function":
-		return
-	default:
-		evidence.UserTexts = append(evidence.UserTexts, text)
-	}
-}
-
-func moderationJSONItemText(item map[string]any) string {
-	for _, key := range []string{"content", "text", "parts"} {
-		if text := strings.TrimSpace(openAIPromptText(item[key])); text != "" {
-			return text
+	for _, key := range []string{"conversation_id", "conversationId", "session_id", "sessionId", "thread_id"} {
+		if val, ok := payload[key].(string); ok && strings.TrimSpace(val) != "" {
+			return strings.TrimSpace(val), true
 		}
 	}
-	return ""
-}
-
-func moderationEvidenceFingerprints(values []string) []string {
-	fingerprints := make([]string, 0, len(values)+1)
-	seen := make(map[string]struct{}, len(values)+1)
-	add := func(value string) {
-		normalized := normalizeModerationMatchText(value)
-		if normalized == "" {
-			return
-		}
-		fingerprint := common.GenerateHMAC(normalized)
-		if _, ok := seen[fingerprint]; ok {
-			return
-		}
-		seen[fingerprint] = struct{}{}
-		fingerprints = append(fingerprints, fingerprint)
-	}
-	for _, value := range values {
-		add(value)
-	}
-	add(strings.Join(values, "\n"))
-	return fingerprints
-}
-
-func moderationEvidenceContainsText(values []string, target string) bool {
-	target = normalizeModerationMatchText(target)
-	if target == "" {
-		return false
-	}
-	for _, value := range values {
-		if normalizeModerationMatchText(value) == target {
-			return true
+	if msgs, ok := payload["messages"].([]any); ok {
+		for _, m := range msgs {
+			if mmap, ok := m.(map[string]any); ok {
+				if role, _ := mmap["role"].(string); role == "user" {
+					if content, ok := mmap["content"].(string); ok && strings.TrimSpace(content) != "" {
+						return moderationConversationIDFromSeed(strings.TrimSpace(content)), false
+					}
+				}
+			}
 		}
 	}
-	joined := normalizeModerationMatchText(strings.Join(values, "\n"))
-	return len(target) >= 16 && strings.Contains(joined, target)
+	return "", false
 }
 
-func moderationTurnConversationMatchScore(turn *model.ModerationTurn, evidence moderationConversationEvidence) int {
-	if turn == nil {
-		return 0
+func ResolveModerationConversationIDForUser(c *gin.Context, userID int) string {
+	conversationID := ResolveModerationConversationID(c)
+	if c == nil || userID <= 0 || common.GetContextKeyBool(c, constant.ContextKeyModerationConversationIDExplicit) {
+		return conversationID
 	}
-	userText := string(turn.UserPrompt)
-	assistantText := string(turn.AssistantReply)
-	userMatch := moderationEvidenceContainsText(evidence.UserTexts, userText)
-	assistantMatch := moderationEvidenceContainsText(evidence.AssistantTexts, assistantText)
 
-	if userMatch && assistantMatch {
-		return 4
+	var evidence moderationConversationEvidence
+	if ev, ok := common.GetContextKeyType[moderationConversationEvidence](c, constant.ContextKeyModerationConversationEvidence); ok {
+		evidence = ev
+	} else if bs, err := common.GetBodyStorage(c); err == nil && bs != nil {
+		if data, err := bs.Bytes(); err == nil {
+			evidence = extractModerationConversationEvidence(data)
+			common.SetContextKey(c, constant.ContextKeyModerationConversationEvidence, evidence)
+		}
 	}
-	// An exact, sufficiently distinctive assistant response is the safest way
-	// to recover a conversation after a client truncates old user messages.
-	if assistantMatch && len(normalizeModerationMatchText(assistantText)) >= 16 {
-		return 3
+
+	if len(evidence.UserTexts) == 0 && len(evidence.AssistantTexts) == 0 {
+		return conversationID
 	}
-	// A failed/empty assistant response has no evidence of its own. Require
-	// multiple user messages before allowing an exact history match.
-	if userMatch && len(evidence.UserTexts) > 1 {
-		return 1
+
+	isContentSeed := strings.HasPrefix(conversationID, "conv_seed_")
+	if isContentSeed && len(evidence.AssistantTexts) == 0 && len(evidence.UserTexts) <= 1 {
+		return cacheModerationConversationID(c, moderationRequestConversationFallback(c))
 	}
-	return 0
+
+	now := common.GetTimestamp()
+	var turns []model.ModerationTurn
+	_ = model.DB.Where("user_id = ? AND expires_at > ?", userID, now).
+		Order("created_at desc, id desc").Limit(50).Find(&turns).Error
+
+	matchedConvKeys := make(map[string]bool)
+	for _, turn := range turns {
+		for _, u := range evidence.UserTexts {
+			if string(turn.UserPrompt) == u {
+				matchedConvKeys[turn.ConversationKey] = true
+			}
+		}
+		for _, a := range evidence.AssistantTexts {
+			if string(turn.AssistantReply) == a {
+				matchedConvKeys[turn.ConversationKey] = true
+			}
+		}
+	}
+	if len(matchedConvKeys) == 1 {
+		for k := range matchedConvKeys {
+			return cacheModerationConversationID(c, k)
+		}
+	}
+	if len(matchedConvKeys) > 1 {
+		return cacheModerationConversationID(c, moderationRequestConversationFallback(c))
+	}
+
+	return conversationID
 }
 
-func normalizeModerationMatchText(value string) string {
-	return strings.Join(strings.Fields(value), " ")
-}
-
-func normalizeConversationID(value string) string {
-	value = strings.TrimSpace(value)
-	if len(value) == 0 || len(value) > 128 {
+func ResolveModerationConversationID(c *gin.Context) string {
+	if c == nil {
 		return ""
 	}
-	for _, r := range value {
-		if r < 0x20 || r == 0x7f {
-			return ""
-		}
+	if existing := common.GetContextKeyString(c, constant.ContextKeyModerationConversationID); existing != "" {
+		return existing
 	}
-	return value
-}
-
-func GetModerationRequestContent(c *gin.Context) (ModerationRequestContent, bool) {
-	if c == nil {
-		return ModerationRequestContent{}, false
+	if headerID := strings.TrimSpace(c.GetHeader("X-Conversation-ID")); headerID != "" {
+		common.SetContextKey(c, constant.ContextKeyModerationConversationIDExplicit, true)
+		return cacheModerationConversationID(c, headerID)
 	}
-	content, ok := common.GetContextKeyType[ModerationRequestContent](c, constant.ContextKeyModerationRequestContent)
-	return content, ok
-}
-
-func SetModerationRequestContent(c *gin.Context, request dto.Request) {
-	if c == nil || request == nil || !moderationRequestSupported(request) {
-		return
+	if headerID := strings.TrimSpace(c.GetHeader("Conversation-ID")); headerID != "" {
+		common.SetContextKey(c, constant.ContextKeyModerationConversationIDExplicit, true)
+		return cacheModerationConversationID(c, headerID)
 	}
-	content := extractModerationRequestContent(request)
-	common.SetContextKey(c, constant.ContextKeyModerationRequestContent, content)
-}
-
-// SetModerationRequestContentFromJSON parses the exact JSON that will be sent
-// upstream into a fresh request value. Parsing into a fresh value matters when
-// a field was removed by channel settings or parameter filtering.
-func SetModerationRequestContentFromJSON(c *gin.Context, data []byte, request dto.Request) {
-	if c == nil || len(data) == 0 || request == nil {
-		return
+	if queryID := strings.TrimSpace(c.Query("conversation_id")); queryID != "" {
+		common.SetContextKey(c, constant.ContextKeyModerationConversationIDExplicit, true)
+		return cacheModerationConversationID(c, queryID)
 	}
-	var parsed dto.Request
-	switch request.(type) {
-	case *dto.GeneralOpenAIRequest:
-		parsed = &dto.GeneralOpenAIRequest{}
-	case *dto.OpenAIResponsesRequest:
-		parsed = &dto.OpenAIResponsesRequest{}
-	case *dto.OpenAIResponsesCompactionRequest:
-		parsed = &dto.OpenAIResponsesCompactionRequest{}
-	case *dto.ClaudeRequest:
-		parsed = &dto.ClaudeRequest{}
-	case *dto.GeminiChatRequest:
-		parsed = &dto.GeminiChatRequest{}
-	default:
-		return
-	}
-	var content ModerationRequestContent
-	if common.Unmarshal(data, parsed) == nil {
-		content = extractModerationRequestContent(parsed)
-	}
-	content = mergeModerationRequestContent(content, extractModerationRequestContentFromJSON(data))
-	common.SetContextKey(c, constant.ContextKeyModerationRequestContent, content)
-}
-
-func mergeModerationRequestContent(primary, fallback ModerationRequestContent) ModerationRequestContent {
-	primary.SystemPrompt = mergeModerationText(primary.SystemPrompt, fallback.SystemPrompt)
-	primary.UserPrompt = mergeModerationText(primary.UserPrompt, fallback.UserPrompt)
-	return primary
-}
-
-func mergeModerationText(current, next string) string {
-	if next == "" || current == next || strings.Contains(current, next) {
-		return current
-	}
-	if strings.Contains(next, current) {
-		return next
-	}
-	return joinModerationText(current, next)
-}
-
-func extractModerationRequestContentFromJSON(data []byte) ModerationRequestContent {
-	var payload map[string]any
-	if common.Unmarshal(data, &payload) != nil {
-		return ModerationRequestContent{}
-	}
-	var content ModerationRequestContent
-	for _, key := range []string{"system", "system_prompt", "systemPrompt", "systemInstruction", "system_instruction", "developer", "instructions", "instruction"} {
-		content.SystemPrompt = mergeModerationText(content.SystemPrompt, openAIPromptText(payload[key]))
-	}
-	for _, key := range []string{"messages", "contents"} {
-		items, ok := payload[key].([]any)
-		if !ok {
-			continue
-		}
-		for _, item := range items {
-			itemMap, ok := item.(map[string]any)
-			if !ok {
-				content.UserPrompt = mergeModerationText(content.UserPrompt, openAIPromptText(item))
-				continue
-			}
-			role, _ := itemMap["role"].(string)
-			text := openAIPromptText(itemMap["content"])
-			if text == "" {
-				text = openAIPromptText(itemMap["parts"])
-			}
-			switch strings.ToLower(role) {
-			case "system", "developer":
-				content.SystemPrompt = mergeModerationText(content.SystemPrompt, text)
-			case "", "user", "human":
-				content.UserPrompt = mergeModerationText(content.UserPrompt, text)
+	if storage, ok := c.Get(common.KeyBodyStorage); ok {
+		if bs, ok := storage.(common.BodyStorage); ok {
+			if data, err := bs.Bytes(); err == nil && len(data) > 0 {
+				if id, explicit := resolveModerationConversationIDFromJSON(data); id != "" {
+					if explicit {
+						common.SetContextKey(c, constant.ContextKeyModerationConversationIDExplicit, true)
+					}
+					return cacheModerationConversationID(c, id)
+				}
 			}
 		}
 	}
-	if inputContent := extractModerationInputContent(payload["input"]); inputContent.SystemPrompt != "" || inputContent.UserPrompt != "" {
-		content = mergeModerationRequestContent(content, inputContent)
+	if bs, err := common.GetBodyStorage(c); err == nil && bs != nil {
+		if data, err := bs.Bytes(); err == nil && len(data) > 0 {
+			if id, explicit := resolveModerationConversationIDFromJSON(data); id != "" {
+				if explicit {
+					common.SetContextKey(c, constant.ContextKeyModerationConversationIDExplicit, true)
+				}
+				return cacheModerationConversationID(c, id)
+			}
+		}
 	}
-	for _, key := range []string{"user_prompt", "userPrompt", "prompt"} {
-		content.UserPrompt = mergeModerationText(content.UserPrompt, openAIPromptText(payload[key]))
+	userID := common.GetContextKeyInt(c, constant.ContextKeyUserId)
+	reqID := c.GetString(common.RequestIdKey)
+	if reqID == "" {
+		reqID = common.GetUUID()
 	}
-	return content
+	convID := fmt.Sprintf("u%d-%s", userID, reqID)
+	return cacheModerationConversationID(c, convID)
 }
 
-func extractModerationResponsesInputContent(raw []byte) ModerationRequestContent {
-	if len(raw) == 0 {
-		return ModerationRequestContent{}
+func cacheModerationConversationID(c *gin.Context, conversationID string) string {
+	if c != nil && conversationID != "" {
+		common.SetContextKey(c, constant.ContextKeyModerationConversationID, conversationID)
 	}
-	var value any
-	if common.Unmarshal(raw, &value) != nil {
-		return ModerationRequestContent{}
-	}
-	return extractModerationInputContent(value)
-}
-
-func extractModerationInputContent(value any) ModerationRequestContent {
-	var content ModerationRequestContent
-	addItem := func(item any) {
-		itemMap, ok := item.(map[string]any)
-		if !ok {
-			content.UserPrompt = mergeModerationText(content.UserPrompt, openAIPromptText(item))
-			return
-		}
-		role, _ := itemMap["role"].(string)
-		itemType, _ := itemMap["type"].(string)
-		if strings.EqualFold(itemType, "output_text") && role == "" {
-			return
-		}
-		text := openAIPromptText(itemMap["content"])
-		if text == "" {
-			text = openAIPromptText(itemMap["text"])
-		}
-		if text == "" {
-			text = openAIPromptText(itemMap["parts"])
-		}
-		if text == "" && itemType != "" && itemType != "message" {
-			text = openAIPromptText(itemMap)
-		}
-		switch strings.ToLower(role) {
-		case "system", "developer":
-			content.SystemPrompt = mergeModerationText(content.SystemPrompt, text)
-		case "assistant", "model":
-			return
-		default:
-			content.UserPrompt = mergeModerationText(content.UserPrompt, text)
-		}
-	}
-
-	switch typed := value.(type) {
-	case []any:
-		for _, item := range typed {
-			addItem(item)
-		}
-	case nil:
-		return content
-	default:
-		addItem(typed)
-	}
-	return content
-}
-
-func FinalizeModeration(c *gin.Context, info *relaycommon.RelayInfo, relayErr *types.NewAPIError) {
-	if c == nil || info == nil || info.UserId <= 0 {
-		return
-	}
-	channelID := 0
-	if info.ChannelMeta != nil {
-		channelID = info.ChannelId
-	}
-	if channelID <= 0 {
-		channelID = common.GetContextKeyInt(c, constant.ContextKeyChannelId)
-	}
-	moderationSetting := setting.GetContentModerationSetting()
-	if info != nil && moderationSetting.IsUserWhitelisted(info.UserId) {
-		return
-	}
-	if !moderationSetting.ShouldModerateChannel(channelID) {
-		return
-	}
-	content, ok := common.GetContextKeyType[ModerationRequestContent](c, constant.ContextKeyModerationRequestContent)
-	if !ok {
-		return
-	}
-	capture, ok := common.GetContextKeyType[*ModerationCapture](c, moderationResponseWriterKey)
-	if !ok || capture == nil {
-		return
-	}
-
-	assistantReply := ExtractModerationAssistantText(capture.Bytes(), c.Writer.Header().Get("Content-Type"), info.RelayFormat)
-	responseStatus := moderationResponseStatus(info, relayErr, len(assistantReply) > 0)
-
-	conversationID := common.GetContextKeyString(c, constant.ContextKeyModerationConversationID)
-	if conversationID == "" {
-		conversationID = ResolveModerationConversationID(c)
-	}
-	if conversationID == "" {
-		return
-	}
-	turn := model.ModerationTurn{
-		UserID:          info.UserId,
-		ConversationKey: conversationID,
-		ChannelID:       channelID,
-		RequestID:       info.RequestId,
-		SystemPrompt:    model.ModerationText(content.SystemPrompt),
-		UserPrompt:      model.ModerationText(content.UserPrompt),
-		AssistantReply:  model.ModerationText(assistantReply),
-		ResponseStatus:  responseStatus,
-		RelayFormat:     string(info.RelayFormat),
-		Model:           info.OriginModelName,
-		ExpiresAt:       time.Now().Add(getModerationViolationRetention()).Unix(),
-	}
-	if turn.ExpiresAt <= 0 {
-		return
-	}
-
-	if err := persistModerationTurn(&turn); err != nil {
-		logger.LogWarn(c, fmt.Sprintf("content moderation timeline persist failed: %v", err))
-		return
-	}
-	if turn.ReviewRequired {
-		if _, _, err := EnqueueSystemTask(model.SystemTaskTypeContentModeration, nil); err != nil {
-			logger.LogWarn(c, fmt.Sprintf("content moderation task enqueue failed: %v", err))
-		}
-	}
+	return conversationID
 }
 
 func IsModerationRequestSupported(request dto.Request) bool {
-	return moderationRequestSupported(request)
-}
-
-func moderationRequestSupported(request dto.Request) bool {
 	switch request.(type) {
 	case *dto.GeneralOpenAIRequest, *dto.OpenAIResponsesRequest, *dto.OpenAIResponsesCompactionRequest, *dto.ClaudeRequest, *dto.GeminiChatRequest:
 		return true
@@ -1521,406 +394,151 @@ func moderationRequestSupported(request dto.Request) bool {
 	}
 }
 
-func moderationResponseStatus(info *relaycommon.RelayInfo, relayErr *types.NewAPIError, hasReply bool) string {
-	if relayErr == nil {
-		if info.IsStream && info.StreamStatus != nil && !info.StreamStatus.IsNormalEnd() {
-			if info.StreamStatus.EndReason != "" {
-				return string(info.StreamStatus.EndReason)
-			}
-			if hasReply {
-				return "partial"
-			}
-			return "failed"
-		}
-		return "success"
+func GetModerationRequestContent(c *gin.Context) (ModerationRequestContent, bool) {
+	if c == nil {
+		return ModerationRequestContent{}, false
 	}
-	if info.StreamStatus != nil && !info.StreamStatus.IsNormalEnd() && info.StreamStatus.EndReason != "" {
-		return string(info.StreamStatus.EndReason)
-	}
-	if hasReply {
-		return "partial"
-	}
-	return "failed"
+	return common.GetContextKeyType[ModerationRequestContent](c, constant.ContextKeyModerationRequestContent)
 }
 
-func persistModerationTurn(turn *model.ModerationTurn) error {
-	if turn == nil || turn.UserID <= 0 || turn.ConversationKey == "" {
-		return errors.New("invalid moderation turn")
+func SetModerationRequestContent(c *gin.Context, request dto.Request) {
+	if c == nil || request == nil {
+		return
 	}
-	for attempt := 0; attempt < 3; attempt++ {
-		err := persistModerationTurnOnce(turn)
-		if err == nil {
-			return nil
+	content := extractModerationRequestContent(request)
+	if existing, ok := GetModerationRequestContent(c); ok {
+		if content.SystemPrompt == "" {
+			content.SystemPrompt = existing.SystemPrompt
 		}
-		if !isModerationPersistenceRetryable(err) || attempt == 2 {
-			return err
+		if content.UserPrompt == "" {
+			content.UserPrompt = existing.UserPrompt
 		}
 	}
-	return errors.New("moderation turn persistence retry exhausted")
+	common.SetContextKey(c, constant.ContextKeyModerationRequestContent, content)
 }
 
-func persistModerationTurnOnce(turn *model.ModerationTurn) error {
-	now := common.GetTimestamp()
-	if turn.ExpiresAt <= now {
-		turn.ExpiresAt = now + int64(getModerationViolationRetention().Seconds())
+func SetModerationRequestContentFromJSON(c *gin.Context, data []byte, request dto.Request) {
+	if c == nil {
+		return
 	}
-	return model.DB.Transaction(func(tx *gorm.DB) error {
-		var conversation model.ModerationConversation
-		err := model.LockModerationConversation(tx, turn.UserID, turn.ConversationKey, &conversation)
-		if errors.Is(err, gorm.ErrRecordNotFound) {
-			conversation = model.ModerationConversation{
-				UserID:          turn.UserID,
-				ConversationID:  turn.ConversationKey,
-				Status:          model.ModerationConversationActive,
-				FirstActivityAt: now,
-				LastActivityAt:  now,
-				ExpiresAt:       turn.ExpiresAt,
-			}
-			if err := tx.Create(&conversation).Error; err != nil {
-				return err
-			}
-		} else if err != nil {
-			return err
-		} else {
-			conversation.LastActivityAt = now
-			conversationExpiresAt := turn.ExpiresAt
-			if conversation.Status == model.ModerationConversationBlocked && conversation.ExpiresAt > conversationExpiresAt {
-				conversationExpiresAt = conversation.ExpiresAt
-			}
-			conversation.ExpiresAt = conversationExpiresAt
-			if err := tx.Model(&conversation).Updates(map[string]any{
-				"last_activity_at": now,
-				"expires_at":       conversationExpiresAt,
-				"updated_at":       now,
-			}).Error; err != nil {
-				return err
-			}
-		}
-
-		if turn.RequestID != "" {
-			var existing model.ModerationTurn
-			if err := tx.Where("user_id = ? AND conversation_key = ? AND request_id = ?", turn.UserID, turn.ConversationKey, turn.RequestID).First(&existing).Error; err == nil {
-				turn.ID = existing.ID
-				turn.ConversationID = existing.ConversationID
-				turn.RoundNumber = existing.RoundNumber
-				turn.ReviewRequired = existing.ReviewRequired
-				return nil
-			} else if !errors.Is(err, gorm.ErrRecordNotFound) {
-				return err
-			}
-		}
-
-		var previous model.ModerationTurn
-		round := 1
-		if err := tx.Where("user_id = ? AND conversation_key = ?", turn.UserID, turn.ConversationKey).
-			Order("round_number desc").First(&previous).Error; err == nil {
-			round = previous.RoundNumber + 1
-		} else if !errors.Is(err, gorm.ErrRecordNotFound) {
-			return err
-		}
-		turn.ConversationID = conversation.ID
-		turn.RoundNumber = round
-		turn.CreatedAt = now
-		turn.UpdatedAt = now
-		turn.ReviewRequired, turn.ReviewTrigger = moderationReviewPlanWithDB(tx, turn.UserID, round, string(turn.SystemPrompt), string(turn.UserPrompt), string(turn.AssistantReply), turn.RequestID)
-		turn.UserPromptFingerprint = common.GenerateHMAC(normalizeModerationMatchText(string(turn.UserPrompt)))
-		turn.AssistantReplyFingerprint = common.GenerateHMAC(normalizeModerationMatchText(string(turn.AssistantReply)))
-		storedTurn := *turn
-		if err := encryptModerationTurnContent(&storedTurn); err != nil {
-			return err
-		}
-		if err := tx.Create(&storedTurn).Error; err != nil {
-			return err
-		}
-		turn.ID = storedTurn.ID
-		if turn.ReviewRequired {
-			config := setting.GetContentModerationSetting()
-			reviewInput, err := buildModerationReviewInput(turn)
-			if err != nil {
-				return err
-			}
-			encryptedReviewInput, err := common.EncryptSecret(reviewInput)
-			if err != nil {
-				return err
-			}
-			job := &model.ModerationJob{
-				TurnID:         turn.ID,
-				ConversationID: conversation.ID,
-				UserID:         turn.UserID,
-				Status:         model.ModerationJobPending,
-				NextAttemptAt:  now,
-				RequestPayload: model.ModerationText(encryptedReviewInput),
-				Provider:       config.Provider,
-				Model:          config.Model,
-				PromptVersion:  config.PromptVersion,
-				ExpiresAt:      turn.ExpiresAt,
-				CreatedAt:      now,
-				UpdatedAt:      now,
-			}
-			if err := tx.Create(job).Error; err != nil {
-				return err
-			}
-		}
-		return nil
-	})
-}
-
-func encryptModerationTurnContent(turn *model.ModerationTurn) error {
-	if turn == nil {
-		return errors.New("invalid moderation turn")
-	}
-	systemPrompt, err := common.EncryptSecret(string(turn.SystemPrompt))
-	if err != nil {
-		return err
-	}
-	userPrompt, err := common.EncryptSecret(string(turn.UserPrompt))
-	if err != nil {
-		return err
-	}
-	assistantReply, err := common.EncryptSecret(string(turn.AssistantReply))
-	if err != nil {
-		return err
-	}
-	turn.SystemPrompt = model.ModerationText(systemPrompt)
-	turn.UserPrompt = model.ModerationText(userPrompt)
-	turn.AssistantReply = model.ModerationText(assistantReply)
-	return nil
-}
-
-func DecryptModerationStoredText(value string) (string, error) {
-	return common.DecryptSecret(value)
-}
-
-func DecryptModerationTurnContent(turn *model.ModerationTurn) error {
-	if turn == nil {
-		return errors.New("invalid moderation turn")
-	}
-	systemPrompt, err := common.DecryptSecret(string(turn.SystemPrompt))
-	if err != nil {
-		return err
-	}
-	userPrompt, err := common.DecryptSecret(string(turn.UserPrompt))
-	if err != nil {
-		return err
-	}
-	assistantReply, err := common.DecryptSecret(string(turn.AssistantReply))
-	if err != nil {
-		return err
-	}
-	turn.SystemPrompt = model.ModerationText(systemPrompt)
-	turn.UserPrompt = model.ModerationText(userPrompt)
-	turn.AssistantReply = model.ModerationText(assistantReply)
-	return nil
-}
-
-func isModerationPersistenceRetryable(err error) bool {
-	message := strings.ToLower(err.Error())
-	return strings.Contains(message, "unique") ||
-		strings.Contains(message, "duplicate") ||
-		strings.Contains(message, "constraint failed") ||
-		strings.Contains(message, "database is locked") ||
-		strings.Contains(message, "table is locked") ||
-		strings.Contains(message, "deadlock") ||
-		strings.Contains(message, "lock wait timeout")
-}
-
-func buildModerationReviewInput(turn *model.ModerationTurn) (string, error) {
-	if turn == nil {
-		return "", errors.New("invalid moderation turn")
-	}
-	data, err := common.Marshal(map[string]string{
-		"system_prompt":      string(turn.SystemPrompt),
-		"user_prompt":        string(turn.UserPrompt),
-		"assistant_response": string(turn.AssistantReply),
-		"response_status":    turn.ResponseStatus,
-	})
-	if err != nil {
-		return "", err
-	}
-	return "<review_data>\n" + string(data) + "\n</review_data>", nil
-}
-
-func moderationReviewPlan(userID, round int, systemPrompt, userPrompt, assistantReply, requestID string) (bool, string) {
-	return moderationReviewPlanWithDB(model.DB, userID, round, systemPrompt, userPrompt, assistantReply, requestID)
-}
-
-func moderationReviewPlanWithDB(db *gorm.DB, userID, round int, systemPrompt, userPrompt, assistantReply, requestID string) (bool, string) {
-	if round <= 3 {
-		return true, "initial_rounds"
-	}
-	text := strings.ToLower(systemPrompt + "\n" + userPrompt + "\n" + assistantReply)
-	if localModerationRiskSignal(text) {
-		return true, "local_risk_signal"
-	}
-	violations, err := countEffectiveModerationUserViolations(db, userID, time.Now().Add(-getModerationViolationRetention()).Unix())
-	if err != nil {
-		logger.LogWarn(context.Background(), fmt.Sprintf("content moderation violation count failed: %v", err))
-	}
-	rate := setting.GetContentModerationSetting().NormalSampleRate
-	if violations == 1 {
-		rate = setting.GetContentModerationSetting().ElevatedSampleRate
-	} else if violations >= 2 {
-		return true, "escalated_user_history"
-	}
-	if rate <= 0 {
-		return false, "sampling_disabled"
-	}
-	if rate > 100 {
-		rate = 100
-	}
-	digest := sha256.Sum256([]byte(requestID + ":" + strconv.Itoa(round)))
-	bucket := int(digest[0]) * 100 / 256
-	if bucket < rate {
-		return true, "random_sample"
-	}
-	return false, "local_clear"
-}
-
-func localModerationRiskSignal(text string) bool {
-	for _, signal := range []string{
-		"suicide", "self-harm", "kill", "murder", "bomb", "terrorist", "ransomware", "malware",
-		"ddos", "sql injection", "phishing", "credential theft", "exploit", "weapon",
-		"自杀", "自残", "杀人", "炸弹", "恐怖主义", "勒索软件", "恶意软件", "入侵", "木马", "钓鱼", "武器", "爆炸",
-	} {
-		if strings.Contains(text, signal) {
-			return true
-		}
-	}
-	return false
-}
-
-func extractModerationRequestContent(request dto.Request) ModerationRequestContent {
 	var content ModerationRequestContent
-	switch r := request.(type) {
-	case *dto.GeneralOpenAIRequest:
-		for _, message := range r.Messages {
-			text := openAIMessageText(message)
-			switch strings.ToLower(message.Role) {
-			case "system", "developer":
-				content.SystemPrompt = joinModerationText(content.SystemPrompt, text)
-			case "user":
-				content.UserPrompt = joinModerationText(content.UserPrompt, text)
-			}
+	if len(data) > 0 {
+		content = extractModerationRequestContentFromJSON(data)
+	}
+	if request != nil {
+		reqContent := extractModerationRequestContent(request)
+		if reqContent.SystemPrompt != "" {
+			content.SystemPrompt = reqContent.SystemPrompt
 		}
-		if prompt := openAIPromptText(r.Prompt); prompt != "" {
-			content.UserPrompt = joinModerationText(content.UserPrompt, prompt)
-		}
-		for _, input := range r.ParseInput() {
-			content.UserPrompt = joinModerationText(content.UserPrompt, input)
-		}
-		content.SystemPrompt = joinModerationText(content.SystemPrompt, r.Instruction)
-	case *dto.OpenAIResponsesRequest:
-		content.SystemPrompt = joinModerationText(content.SystemPrompt, openAIInstructionText(r.Instructions))
-		content = mergeModerationRequestContent(content, extractModerationResponsesInputContent(r.Input))
-	case *dto.OpenAIResponsesCompactionRequest:
-		content.SystemPrompt = joinModerationText(content.SystemPrompt, openAIInstructionText(r.Instructions))
-		content = mergeModerationRequestContent(content, extractModerationResponsesInputContent(r.Input))
-	case *dto.ClaudeRequest:
-		if r.IsStringSystem() {
-			content.SystemPrompt = r.GetStringSystem()
-		} else {
-			for _, media := range r.ParseSystem() {
-				content.SystemPrompt = joinModerationText(content.SystemPrompt, claudeMediaText(media))
-			}
-		}
-		for _, message := range r.Messages {
-			if strings.EqualFold(message.Role, "user") {
-				content.UserPrompt = joinModerationText(content.UserPrompt, claudeMessageText(message))
-			}
-		}
-		content.UserPrompt = joinModerationText(content.UserPrompt, r.Prompt)
-	case *dto.GeminiChatRequest:
-		request := r
-		if request.SystemInstructions != nil {
-			content.SystemPrompt = geminiContentText(request.SystemInstructions)
-		}
-		for _, item := range request.Contents {
-			if strings.EqualFold(item.Role, "user") || item.Role == "" {
-				content.UserPrompt = joinModerationText(content.UserPrompt, geminiContentText(&item))
-			}
+		if reqContent.UserPrompt != "" {
+			content.UserPrompt = reqContent.UserPrompt
 		}
 	}
-	return content
+	if existing, ok := GetModerationRequestContent(c); ok {
+		if content.SystemPrompt == "" {
+			content.SystemPrompt = existing.SystemPrompt
+		}
+		if content.UserPrompt == "" {
+			content.UserPrompt = existing.UserPrompt
+		}
+	}
+	common.SetContextKey(c, constant.ContextKeyModerationRequestContent, content)
 }
 
-func openAIInstructionText(value []byte) string {
-	if len(value) == 0 {
-		return ""
+func extractModerationRequestContentFromJSON(data []byte) ModerationRequestContent {
+	var payload map[string]any
+	if err := common.Unmarshal(data, &payload); err != nil {
+		return ModerationRequestContent{}
 	}
-	var text string
-	if err := common.Unmarshal(value, &text); err == nil {
-		return text
+	if req, ok := payload["generateContentRequest"].(map[string]any); ok {
+		payload = req
+	} else if req, ok := payload["generate_content_request"].(map[string]any); ok {
+		payload = req
 	}
-	var structured any
-	if err := common.Unmarshal(value, &structured); err == nil {
-		if text := openAIPromptText(structured); text != "" {
-			return text
-		}
-	}
-	return string(value)
-}
+	var systemPrompt, userPrompt strings.Builder
 
-func openAIPromptText(value any) string {
-	switch typed := value.(type) {
-	case string:
-		return typed
-	case []any:
-		var builder strings.Builder
-		for _, item := range typed {
-			builder.WriteString(openAIPromptText(item))
-		}
-		return builder.String()
-	case map[string]any:
-		if mediaType, ok := typed["type"].(string); ok && mediaType != "" && mediaType != dto.ContentTypeText {
-			if mediaType == "input_text" || mediaType == "output_text" {
-				if text, ok := typed["text"]; ok {
-					return openAIPromptText(text)
+	if sysInst, ok := payload["systemInstruction"].(map[string]any); ok {
+		if parts, ok := sysInst["parts"].([]any); ok {
+			for _, p := range parts {
+				if pmap, ok := p.(map[string]any); ok {
+					if txt, ok := pmap["text"].(string); ok && txt != "" {
+						if systemPrompt.Len() > 0 {
+							systemPrompt.WriteString("\n")
+						}
+						systemPrompt.WriteString(txt)
+					}
 				}
-			} else {
-				return mediaPlaceholder(mediaType)
 			}
 		}
-		if _, ok := typed["image_url"]; ok {
-			return mediaPlaceholder("input_image")
-		}
-		if _, ok := typed["input_audio"]; ok {
-			return mediaPlaceholder(dto.ContentTypeInputAudio)
-		}
-		if _, ok := typed["inlineData"]; ok {
-			return mediaPlaceholder("file")
-		}
-		if _, ok := typed["inline_data"]; ok {
-			return mediaPlaceholder("file")
-		}
-		if _, ok := typed["fileData"]; ok {
-			return mediaPlaceholder("file")
-		}
-		if _, ok := typed["file_data"]; ok {
-			return mediaPlaceholder("file")
-		}
-		if text, ok := typed["text"]; ok {
-			return openAIPromptText(text)
-		}
-		if content, ok := typed["content"]; ok {
-			return openAIPromptText(content)
-		}
-		if parts, ok := typed["parts"]; ok {
-			return openAIPromptText(parts)
-		}
 	}
-	return ""
-}
 
-func openAIMessageText(message dto.Message) string {
-	var builder strings.Builder
-	for _, item := range message.ParseContent() {
-		if item.Type == dto.ContentTypeText {
-			builder.WriteString(item.Text)
-			continue
+	if contents, ok := payload["contents"].([]any); ok {
+		for _, c := range contents {
+			if cmap, ok := c.(map[string]any); ok {
+				role, _ := cmap["role"].(string)
+				if role == "user" {
+					if parts, ok := cmap["parts"].([]any); ok {
+						for _, p := range parts {
+							if pmap, ok := p.(map[string]any); ok {
+								if txt, ok := pmap["text"].(string); ok && txt != "" {
+									if userPrompt.Len() > 0 {
+										userPrompt.WriteString("\n")
+									}
+									userPrompt.WriteString(txt)
+								}
+							}
+						}
+					}
+				}
+			}
 		}
-		builder.WriteString(mediaPlaceholder(item.Type))
 	}
-	return builder.String()
+
+	if inputArr, ok := payload["input"].([]any); ok {
+		for _, item := range inputArr {
+			if imap, ok := item.(map[string]any); ok {
+				role, _ := imap["role"].(string)
+				content, _ := imap["content"].(string)
+				if role == "system" {
+					if systemPrompt.Len() > 0 {
+						systemPrompt.WriteString("\n")
+					}
+					systemPrompt.WriteString(content)
+				} else if role == "user" {
+					if userPrompt.Len() > 0 {
+						userPrompt.WriteString("\n")
+					}
+					userPrompt.WriteString(content)
+				}
+			}
+		}
+	}
+
+	if msgs, ok := payload["messages"].([]any); ok {
+		for _, m := range msgs {
+			if mmap, ok := m.(map[string]any); ok {
+				role, _ := mmap["role"].(string)
+				if content, ok := mmap["content"].(string); ok && content != "" {
+					if role == "system" {
+						if systemPrompt.Len() > 0 {
+							systemPrompt.WriteString("\n")
+						}
+						systemPrompt.WriteString(content)
+					} else if role == "user" {
+						if userPrompt.Len() > 0 {
+							userPrompt.WriteString("\n")
+						}
+						userPrompt.WriteString(content)
+					}
+				}
+			}
+		}
+	}
+
+	return ModerationRequestContent{
+		SystemPrompt: systemPrompt.String(),
+		UserPrompt:   userPrompt.String(),
+	}
 }
 
 func mediaPlaceholder(mediaType string) string {
@@ -1938,6 +556,21 @@ func mediaPlaceholder(mediaType string) string {
 	}
 }
 
+func openAIMessageText(message dto.Message) string {
+	if message.IsStringContent() {
+		return message.StringContent()
+	}
+	var builder strings.Builder
+	for _, item := range message.ParseContent() {
+		if item.Type == dto.ContentTypeText || item.Type == "" {
+			builder.WriteString(item.Text)
+		} else {
+			builder.WriteString(mediaPlaceholder(item.Type))
+		}
+	}
+	return builder.String()
+}
+
 func claudeMessageText(message dto.ClaudeMessage) string {
 	if message.IsStringContent() {
 		return message.GetStringContent()
@@ -1948,45 +581,139 @@ func claudeMessageText(message dto.ClaudeMessage) string {
 	}
 	var builder strings.Builder
 	for _, item := range media {
-		builder.WriteString(claudeMediaText(item))
-	}
-	return builder.String()
-}
-
-func claudeMediaText(media dto.ClaudeMediaMessage) string {
-	if media.Type == "text" || media.Type == "" {
-		if text := media.GetText(); text != "" {
-			return text
-		}
-		return media.GetStringContent()
-	}
-	return mediaPlaceholder(media.Type)
-}
-
-func geminiContentText(content *dto.GeminiChatContent) string {
-	if content == nil {
-		return ""
-	}
-	var builder strings.Builder
-	for _, part := range content.Parts {
-		if part.Text != "" {
-			builder.WriteString(part.Text)
-		} else if part.InlineData != nil || part.FileData != nil {
-			builder.WriteString(mediaPlaceholder("file"))
+		if item.Type == "text" || item.Type == "" {
+			if t := item.GetText(); t != "" {
+				builder.WriteString(t)
+			} else {
+				builder.WriteString(item.GetStringContent())
+			}
+		} else {
+			builder.WriteString(mediaPlaceholder(item.Type))
 		}
 	}
 	return builder.String()
 }
 
-func joinModerationText(current, next string) string {
-	next = strings.TrimSpace(next)
-	if next == "" {
-		return current
+func extractModerationRequestContent(request dto.Request) ModerationRequestContent {
+	var systemPrompt, userPrompt strings.Builder
+	switch req := request.(type) {
+	case *dto.GeneralOpenAIRequest:
+		for _, msg := range req.Messages {
+			content := openAIMessageText(msg)
+			if msg.Role == "system" {
+				if systemPrompt.Len() > 0 {
+					systemPrompt.WriteString("\n")
+				}
+				systemPrompt.WriteString(content)
+			} else {
+				if userPrompt.Len() > 0 {
+					userPrompt.WriteString("\n")
+				}
+				userPrompt.WriteString(content)
+			}
+		}
+		if req.Prompt != nil {
+			if str, ok := req.Prompt.(string); ok && str != "" {
+				if userPrompt.Len() > 0 {
+					userPrompt.WriteString("\n")
+				}
+				userPrompt.WriteString(str)
+			}
+		}
+	case *dto.ClaudeRequest:
+		if req.System != nil {
+			if str, ok := req.System.(string); ok {
+				systemPrompt.WriteString(str)
+			}
+		}
+		for _, msg := range req.Messages {
+			content := claudeMessageText(msg)
+			if userPrompt.Len() > 0 {
+				userPrompt.WriteString("\n")
+			}
+			userPrompt.WriteString(content)
+		}
+	case *dto.GeminiChatRequest:
+		if req.SystemInstructions != nil {
+			for _, part := range req.SystemInstructions.Parts {
+				if part.Text != "" {
+					if systemPrompt.Len() > 0 {
+						systemPrompt.WriteString("\n")
+					}
+					systemPrompt.WriteString(part.Text)
+				} else {
+					if systemPrompt.Len() > 0 {
+						systemPrompt.WriteString("\n")
+					}
+					systemPrompt.WriteString(mediaPlaceholder("file"))
+				}
+			}
+		}
+		for _, c := range req.Contents {
+			for _, part := range c.Parts {
+				if part.Text != "" {
+					if userPrompt.Len() > 0 {
+						userPrompt.WriteString("\n")
+					}
+					userPrompt.WriteString(part.Text)
+				} else {
+					if userPrompt.Len() > 0 {
+						userPrompt.WriteString("\n")
+					}
+					userPrompt.WriteString(mediaPlaceholder("file"))
+				}
+			}
+		}
+	case *dto.OpenAIResponsesRequest:
+		if len(req.Instructions) > 0 {
+			var parsed []map[string]any
+			if err := common.Unmarshal(req.Instructions, &parsed); err == nil {
+				for _, item := range parsed {
+					t, _ := item["type"].(string)
+					if t == "input_text" || t == "text" {
+						txt, _ := item["text"].(string)
+						if systemPrompt.Len() > 0 {
+							systemPrompt.WriteString("\n")
+						}
+						systemPrompt.WriteString(txt)
+					} else {
+						if systemPrompt.Len() > 0 {
+							systemPrompt.WriteString("\n")
+						}
+						systemPrompt.WriteString(mediaPlaceholder(t))
+					}
+				}
+			} else {
+				systemPrompt.Write(req.Instructions)
+			}
+		}
+		if len(req.Input) > 0 {
+			var parsed []map[string]any
+			if err := common.Unmarshal(req.Input, &parsed); err == nil {
+				for _, item := range parsed {
+					t, _ := item["type"].(string)
+					if t == "input_text" || t == "text" {
+						txt, _ := item["text"].(string)
+						if userPrompt.Len() > 0 {
+							userPrompt.WriteString("\n")
+						}
+						userPrompt.WriteString(txt)
+					} else {
+						if userPrompt.Len() > 0 {
+							userPrompt.WriteString("\n")
+						}
+						userPrompt.WriteString(mediaPlaceholder(t))
+					}
+				}
+			} else {
+				userPrompt.Write(req.Input)
+			}
+		}
 	}
-	if current == "" {
-		return next
+	return ModerationRequestContent{
+		SystemPrompt: systemPrompt.String(),
+		UserPrompt:   userPrompt.String(),
 	}
-	return current + "\n" + next
 }
 
 func ExtractModerationAssistantText(data []byte, contentType string, relayFormat types.RelayFormat) string {
@@ -1998,385 +725,113 @@ func ExtractModerationAssistantText(data []byte, contentType string, relayFormat
 		scanner := bufio.NewScanner(bytes.NewReader(data))
 		scanner.Buffer(make([]byte, 64*1024), moderationMaxRequestBytes)
 		for scanner.Scan() {
-			line := strings.TrimSpace(scanner.Text())
-			if !strings.HasPrefix(line, "data:") {
+			line := bytes.TrimSpace(scanner.Bytes())
+			if !bytes.HasPrefix(line, []byte("data:")) {
 				continue
 			}
-			payload := strings.TrimSpace(strings.TrimPrefix(line, "data:"))
-			if payload == "" || payload == "[DONE]" {
+			payload := bytes.TrimSpace(bytes.TrimPrefix(line, []byte("data:")))
+			if len(payload) == 0 || bytes.Equal(payload, []byte("[DONE]")) {
 				continue
 			}
-			if text := extractAssistantTextJSON([]byte(payload), relayFormat); text != "" {
-				builder.WriteString(text)
+			var item map[string]any
+			if err := common.Unmarshal(payload, &item); err != nil {
+				continue
+			}
+			if choices, ok := item["choices"].([]any); ok && len(choices) > 0 {
+				if choice, ok := choices[0].(map[string]any); ok {
+					if delta, ok := choice["delta"].(map[string]any); ok {
+						if content, ok := delta["content"].(string); ok {
+							builder.WriteString(content)
+						}
+					}
+				}
+			}
+			if delta, ok := item["delta"].(string); ok {
+				builder.WriteString(delta)
+			}
+			if candidates, ok := item["candidates"].([]any); ok && len(candidates) > 0 {
+				if cand, ok := candidates[0].(map[string]any); ok {
+					if content, ok := cand["content"].(map[string]any); ok {
+						if parts, ok := content["parts"].([]any); ok {
+							for _, p := range parts {
+								if part, ok := p.(map[string]any); ok {
+									if text, ok := part["text"].(string); ok {
+										builder.WriteString(text)
+									}
+								}
+							}
+						}
+					}
+				}
 			}
 		}
 		return builder.String()
 	}
-	return extractAssistantTextJSON(data, relayFormat)
-}
 
-func extractAssistantTextJSON(data []byte, relayFormat types.RelayFormat) string {
-	var payload map[string]any
-	if common.Unmarshal(data, &payload) != nil {
+	var item map[string]any
+	if err := common.Unmarshal(data, &item); err != nil {
 		return ""
 	}
-	var builder strings.Builder
-	if relayFormat == types.RelayFormatGemini {
-		if candidates, ok := payload["candidates"].([]any); ok {
-			for _, candidate := range candidates {
-				candidateMap, _ := candidate.(map[string]any)
-				if content, ok := candidateMap["content"].(map[string]any); ok {
-					appendTextValue(&builder, content["parts"])
+	if choices, ok := item["choices"].([]any); ok && len(choices) > 0 {
+		if choice, ok := choices[0].(map[string]any); ok {
+			if msg, ok := choice["message"].(map[string]any); ok {
+				if content, ok := msg["content"].(string); ok {
+					return content
+				}
+			}
+		}
+	}
+	if candidates, ok := item["candidates"].([]any); ok && len(candidates) > 0 {
+		if cand, ok := candidates[0].(map[string]any); ok {
+			if content, ok := cand["content"].(map[string]any); ok {
+				if parts, ok := content["parts"].([]any); ok {
+					var builder strings.Builder
+					for _, p := range parts {
+						if part, ok := p.(map[string]any); ok {
+							if text, ok := part["text"].(string); ok {
+								builder.WriteString(text)
+							}
+						}
+					}
+					return builder.String()
+				}
+			}
+		}
+	}
+	if contentArr, ok := item["content"].([]any); ok {
+		var builder strings.Builder
+		for _, c := range contentArr {
+			if cmap, ok := c.(map[string]any); ok {
+				if text, ok := cmap["text"].(string); ok {
+					builder.WriteString(text)
 				}
 			}
 		}
 		return builder.String()
 	}
-	appendTextValue(&builder, payload["output_text"])
-	appendTextValue(&builder, payload["completion"])
-	if choices, ok := payload["choices"].([]any); ok {
-		for _, choice := range choices {
-			choiceMap, _ := choice.(map[string]any)
-			appendTextValue(&builder, choiceMap["text"])
-			if message, ok := choiceMap["message"].(map[string]any); ok {
-				appendTextValue(&builder, message["content"])
+	return ""
+}
+
+func moderationResponseStatus(info *relaycommon.RelayInfo, relayErr *types.NewAPIError, hasReply bool) string {
+	if relayErr == nil {
+		if info != nil && info.IsStream && info.StreamStatus != nil && !info.StreamStatus.IsNormalEnd() {
+			if info.StreamStatus.EndReason != "" {
+				return string(info.StreamStatus.EndReason)
 			}
-			if delta, ok := choiceMap["delta"].(map[string]any); ok {
-				appendTextValue(&builder, delta["content"])
+			if hasReply {
+				return "partial"
 			}
+			return "failed"
 		}
+		return "success"
 	}
-	if output, ok := payload["output"].([]any); ok {
-		for _, item := range output {
-			itemMap, _ := item.(map[string]any)
-			appendTextValue(&builder, itemMap["content"])
-			appendTextValue(&builder, itemMap["text"])
-			if delta, ok := itemMap["delta"].(map[string]any); ok {
-				appendTextValue(&builder, delta["text"])
-			}
-		}
+	if info != nil && info.StreamStatus != nil && !info.StreamStatus.IsNormalEnd() && info.StreamStatus.EndReason != "" {
+		return string(info.StreamStatus.EndReason)
 	}
-	if content, ok := payload["content"].([]any); ok {
-		appendTextValue(&builder, content)
+	if hasReply {
+		return "partial"
 	}
-	appendTextValue(&builder, payload["text"])
-	appendTextValue(&builder, payload["delta"])
-	return builder.String()
-}
-
-func appendTextValue(builder *strings.Builder, value any) {
-	switch typed := value.(type) {
-	case string:
-		builder.WriteString(typed)
-	case []any:
-		for _, item := range typed {
-			appendTextValue(builder, item)
-		}
-	case map[string]any:
-		if text, ok := typed["text"]; ok {
-			appendTextValue(builder, text)
-		}
-	}
-}
-
-type moderationDecision struct {
-	Decision   string   `json:"decision"`
-	Actor      string   `json:"actor"`
-	Severity   string   `json:"severity"`
-	Categories []string `json:"categories"`
-	Confidence float64  `json:"confidence"`
-	ReasonCode string   `json:"reason_code"`
-}
-
-type moderationReviewPayload struct {
-	Model        string            `json:"model"`
-	Instructions string            `json:"instructions"`
-	Input        string            `json:"input"`
-	Store        bool              `json:"store"`
-	Reasoning    map[string]string `json:"reasoning,omitempty"`
-	Text         any               `json:"text,omitempty"`
-}
-
-type openAIModerationResult struct {
-	Categories map[string]bool    `json:"categories"`
-	Scores     map[string]float64 `json:"category_scores"`
-	Flagged    bool               `json:"flagged"`
-}
-
-type openAIModerationResponse struct {
-	ID      string                   `json:"id"`
-	Model   string                   `json:"model"`
-	Results []openAIModerationResult `json:"results"`
-}
-
-func ProcessContentModerationQueue(ctx context.Context) error {
-	if ctx == nil {
-		ctx = context.Background()
-	}
-	config := setting.GetContentModerationSetting()
-	if !config.Enabled || strings.TrimSpace(config.APIKey) == "" || strings.TrimSpace(config.Model) == "" {
-		return retryModerationNotifications(ctx)
-	}
-	now := common.GetTimestamp()
-	maxAttempts := normalizedMaxRetries(config.MaxRetries)
-	leaseSeconds := config.TimeoutSeconds*maxAttempts + 60
-	for attempt := 1; attempt < maxAttempts; attempt++ {
-		leaseSeconds += attempt * attempt * 5
-	}
-	if leaseSeconds < 5*60 {
-		leaseSeconds = 5 * 60
-	}
-	if err := model.RequeueStaleModerationJobs(now, now-int64(leaseSeconds)); err != nil {
-		return err
-	}
-	jobs, err := model.FindPendingModerationJobs(now, moderationJobBatchSize)
-	if err != nil {
-		return err
-	}
-	for _, candidate := range jobs {
-		if ctx != nil {
-			select {
-			case <-ctx.Done():
-				return ctx.Err()
-			default:
-			}
-		}
-		job, claimed, claimErr := model.ClaimModerationJob(candidate.ID, common.GetTimestamp())
-		if claimErr != nil {
-			logger.LogWarn(ctx, fmt.Sprintf("content moderation job claim failed: %v", claimErr))
-			continue
-		}
-		if !claimed || job == nil {
-			continue
-		}
-		processModerationJob(ctx, job, config)
-	}
-	return retryModerationNotifications(ctx)
-}
-
-func retryModerationNotifications(ctx context.Context) error {
-	notifications, err := model.ListRetryableModerationNotifications(common.GetTimestamp(), 50)
-	if err != nil {
-		return err
-	}
-	for _, notification := range notifications {
-		var violation model.ModerationViolation
-		if err := model.DB.First(&violation, notification.ViolationID).Error; err != nil {
-			continue
-		}
-		var turn model.ModerationTurn
-		if err := model.DB.First(&turn, violation.TurnID).Error; err != nil {
-			if errors.Is(err, gorm.ErrRecordNotFound) {
-				// Timeline text expires after seven days, while notification
-				// metadata remains available for the configured violation retention window. The notification
-				// body needs only the non-content identifiers below.
-				turn = model.ModerationTurn{
-					UserID:          violation.UserID,
-					ConversationKey: violation.ConversationID,
-				}
-			} else {
-				continue
-			}
-		}
-		decision := moderationDecision{
-			Decision:   violation.Decision,
-			Actor:      violation.Actor,
-			Severity:   violation.Severity,
-			Confidence: violation.Confidence,
-			ReasonCode: violation.ReasonCode,
-		}
-		if err := sendModerationNotification(&notification, &turn, decision, notification.AlertType == moderationAlertTypeAccountDisabled); err != nil {
-			logger.LogWarn(ctx, fmt.Sprintf("content moderation notification retry failed: %v", err))
-		}
-	}
-	return nil
-}
-
-func processModerationJob(ctx context.Context, job *model.ModerationJob, config setting.ContentModerationSetting) {
-	var turn model.ModerationTurn
-	if err := model.DB.First(&turn, job.TurnID).Error; err != nil {
-		_ = model.SaveModerationJobResult(job.ID, job.LockedAt, model.ModerationJobFailed, job.Attempts+1, 0, "", err.Error())
-		return
-	}
-	if err := DecryptModerationTurnContent(&turn); err != nil {
-		_ = model.SaveModerationJobResult(job.ID, job.LockedAt, model.ModerationJobFailed, job.Attempts+1, 0, "", err.Error())
-		return
-	}
-	attempt := job.Attempts + 1
-	jobConfig := config
-	if strings.TrimSpace(job.Provider) != "" {
-		jobConfig.Provider = job.Provider
-	}
-	if strings.TrimSpace(job.Model) != "" {
-		jobConfig.Model = job.Model
-	}
-	decision, raw, err := reviewModerationTurn(ctx, &turn, jobConfig)
-	if err != nil {
-		if attempt >= normalizedMaxRetries(config.MaxRetries) {
-			_ = model.SaveModerationJobResult(job.ID, job.LockedAt, model.ModerationJobFailed, attempt, 0, raw, err.Error())
-			logger.LogWarn(ctx, fmt.Sprintf("content moderation job %d exhausted retries: %v", job.ID, err))
-			return
-		}
-		next := common.GetTimestamp() + int64(attempt*attempt*5)
-		_ = model.SaveModerationJobResult(job.ID, job.LockedAt, model.ModerationJobPending, attempt, next, raw, err.Error())
-		return
-	}
-	if err := applyModerationDecision(ctx, &turn, decision); err != nil {
-		if attempt >= normalizedMaxRetries(config.MaxRetries) {
-			_ = model.SaveModerationJobResult(job.ID, job.LockedAt, model.ModerationJobFailed, attempt, 0, raw, err.Error())
-			logger.LogWarn(ctx, fmt.Sprintf("content moderation decision apply exhausted retries: %v", err))
-			return
-		}
-		next := common.GetTimestamp() + int64(attempt*attempt*5)
-		_ = model.SaveModerationJobResult(job.ID, job.LockedAt, model.ModerationJobPending, attempt, next, raw, err.Error())
-		logger.LogWarn(ctx, fmt.Sprintf("content moderation decision apply failed: %v", err))
-		return
-	}
-	if err := model.SaveModerationJobResult(job.ID, job.LockedAt, model.ModerationJobSuccess, attempt, 0, raw, ""); err != nil {
-		logger.LogWarn(ctx, fmt.Sprintf("content moderation job %d result persist failed: %v", job.ID, err))
-	}
-}
-
-func normalizedMaxRetries(value int) int {
-	if value < 1 {
-		return 1
-	}
-	if value > 5 {
-		return 5
-	}
-	return value
-}
-
-func reviewModerationTurn(ctx context.Context, turn *model.ModerationTurn, config setting.ContentModerationSetting) (moderationDecision, string, error) {
-	var decision moderationDecision
-	input, err := buildModerationReviewInput(turn)
-	if err != nil {
-		return decision, "", err
-	}
-	provider := strings.ToLower(strings.TrimSpace(config.Provider))
-	if provider == "" || provider == "moderations" {
-		result, raw, callErr := callNativeModeration(ctx, config, input)
-		if callErr != nil {
-			return decision, string(raw), callErr
-		}
-		decision = moderationDecisionFromNativeResult(result)
-		if err := validateModerationDecision(&decision); err != nil {
-			return decision, string(raw), err
-		}
-		return decision, string(raw), nil
-	}
-	// Legacy adapters are kept only so existing installations can migrate
-	// without a flag day. New configurations never select them.
-	prompt := strings.TrimSpace(config.PolicyPrompt)
-	if prompt == "" {
-		prompt = setting.DefaultContentModerationPolicyPrompt
-	}
-	payload := moderationReviewPayload{Model: config.Model, Instructions: prompt, Input: input, Store: false, Reasoning: map[string]string{"effort": "low"}}
-	var response map[string]any
-	var raw []byte
-	if provider == "gemini" {
-		response, raw, err = callGeminiModeration(ctx, config, payload.Input)
-	} else {
-		response, raw, err = callResponsesModeration(ctx, config, payload)
-	}
-	if err != nil {
-		return decision, string(raw), err
-	}
-	text := extractReviewJSON(response)
-	if text == "" {
-		return decision, string(raw), errors.New("moderation provider returned no structured decision")
-	}
-	if err := common.UnmarshalJsonStr(text, &decision); err != nil {
-		return decision, string(raw), fmt.Errorf("decode moderation decision: %w", err)
-	}
-	if err := validateModerationDecision(&decision); err != nil {
-		return decision, string(raw), err
-	}
-	return decision, string(raw), nil
-}
-
-func callNativeModeration(ctx context.Context, config setting.ContentModerationSetting, inputs ...string) (openAIModerationResult, []byte, error) {
-	var result openAIModerationResult
-	items := make([]any, 0, len(inputs))
-	for _, input := range inputs {
-		if strings.TrimSpace(input) == "" {
-			continue
-		}
-		items = append(items, map[string]any{"type": "text", "text": input})
-	}
-	if len(items) == 0 {
-		return result, nil, errors.New("moderation input is empty")
-	}
-	payload := map[string]any{"model": config.Model, "input": items}
-	response, raw, err := moderationHTTPClient(ctx, config, "moderations", payload)
-	if err != nil {
-		return result, raw, err
-	}
-	var decoded openAIModerationResponse
-	body, marshalErr := common.Marshal(response)
-	if marshalErr != nil {
-		return result, raw, marshalErr
-	}
-	if err := common.Unmarshal(body, &decoded); err != nil {
-		return result, raw, fmt.Errorf("decode moderation response: %w", err)
-	}
-	if len(decoded.Results) == 0 {
-		return result, raw, errors.New("moderation provider returned no results")
-	}
-	return decoded.Results[0], raw, nil
-}
-
-// PreflightModerationRequest performs a synchronous user-input check. It is
-// intentionally separate from the asynchronous timeline review: a provider
-// outage must not silently turn a configured closed moderation gate into an
-// allow decision.
-func PreflightModerationRequest(ctx context.Context, content ModerationRequestContent, config setting.ContentModerationSetting) error {
-	if !config.PreflightEnabled || strings.TrimSpace(config.APIKey) == "" || strings.TrimSpace(config.Model) == "" {
-		return nil
-	}
-	if strings.TrimSpace(config.Provider) != "" && strings.TrimSpace(config.Provider) != "moderations" {
-		return nil // legacy providers remain asynchronous during migration
-	}
-	result, _, err := callNativeModeration(ctx, config, content.UserPrompt)
-	if err != nil {
-		if config.FailureMode == "open" {
-			return nil
-		}
-		return fmt.Errorf("content moderation preflight unavailable: %w", err)
-	}
-	if result.Flagged {
-		return model.ErrModerationConversationBlocked
-	}
-	return nil
-}
-
-func moderationDecisionFromNativeResult(result openAIModerationResult) moderationDecision {
-	categories := make([]string, 0)
-	maxScore := 0.0
-	for category, flagged := range result.Categories {
-		if flagged {
-			categories = append(categories, category)
-		}
-		if result.Scores[category] > maxScore {
-			maxScore = result.Scores[category]
-		}
-	}
-	sort.Strings(categories)
-	severity := "none"
-	if maxScore >= 0.9 {
-		severity = "critical"
-	} else if maxScore >= 0.75 {
-		severity = "high"
-	} else if maxScore >= 0.5 {
-		severity = "medium"
-	} else if maxScore > 0 {
-		severity = "low"
-	}
-	decision := "allow"
-	if result.Flagged {
-		decision = "block"
-	}
-	return moderationDecision{Decision: decision, Actor: "user", Severity: severity, Categories: categories, Confidence: maxScore, ReasonCode: "openai_moderations"}
+	return "failed"
 }
 
 func ValidateContentModerationURL(rawURL string) error {
@@ -2396,32 +851,6 @@ func ValidateContentModerationURL(rawURL string) error {
 		}
 	}
 	return nil
-}
-
-func moderationEndpoint(config setting.ContentModerationSetting, provider string) (string, error) {
-	provider = strings.ToLower(strings.TrimSpace(provider))
-	endpoint := strings.TrimSpace(config.BaseURL)
-	if endpoint == "" {
-		if provider == "gemini" {
-			endpoint = "https://generativelanguage.googleapis.com/v1beta"
-		} else {
-			endpoint = "https://api.openai.com/v1"
-		}
-	}
-	if strings.Contains(endpoint, "{model}") {
-		modelName := strings.TrimSpace(config.Model)
-		if modelName == "" {
-			return "", errors.New("content moderation model is required when the API URL contains {model}")
-		}
-		endpoint = strings.ReplaceAll(endpoint, "{model}", url.PathEscape(modelName))
-	}
-	if endpoint = appendModerationEndpointSuffix(endpoint, provider, config.Model); endpoint == "" {
-		return "", errors.New("content moderation API URL is empty")
-	}
-	if err := ValidateContentModerationURL(endpoint); err != nil {
-		return "", err
-	}
-	return endpoint, nil
 }
 
 func appendModerationEndpointSuffix(endpoint, provider, modelName string) string {
@@ -2452,292 +881,316 @@ func appendModerationEndpointSuffix(endpoint, provider, modelName string) string
 	return parsed.String()
 }
 
-func moderationHTTPClient(ctx context.Context, config setting.ContentModerationSetting, provider string, payload any) (map[string]any, []byte, error) {
-	apiKey := strings.TrimSpace(config.APIKey)
-	if apiKey == "" {
-		return nil, nil, errors.New("content moderation API key is required")
+func moderationEndpoint(config setting.ContentModerationSetting, provider ...string) (string, error) {
+	prov := "moderations"
+	if len(provider) > 0 && strings.TrimSpace(provider[0]) != "" {
+		prov = strings.ToLower(strings.TrimSpace(provider[0]))
 	}
-	if ctx == nil {
-		ctx = context.Background()
+	endpoint := strings.TrimSpace(config.BaseURL)
+	if endpoint == "" {
+		if prov == "gemini" {
+			endpoint = "https://generativelanguage.googleapis.com/v1beta"
+		} else {
+			endpoint = "https://api.openai.com/v1"
+		}
 	}
-	endpoint, err := moderationEndpoint(config, provider)
+	if strings.Contains(endpoint, "{model}") {
+		modelName := strings.TrimSpace(config.Model)
+		if modelName == "" {
+			return "", errors.New("content moderation model is required when the API URL contains {model}")
+		}
+		endpoint = strings.ReplaceAll(endpoint, "{model}", url.PathEscape(modelName))
+	}
+	if endpoint = appendModerationEndpointSuffix(endpoint, prov, config.Model); endpoint == "" {
+		return "", errors.New("content moderation API URL is empty")
+	}
+	if err := ValidateContentModerationURL(endpoint); err != nil {
+		return "", err
+	}
+	return endpoint, nil
+}
+
+// callNativeModeration executes the OpenAI Moderations API call.
+// Reference: https://developers.openai.com/api/reference/cli/resources/moderations
+func callNativeModeration(ctx context.Context, config setting.ContentModerationSetting, inputs ...string) (openAIModerationResult, []byte, error) {
+	var emptyResult openAIModerationResult
+	var validInputs []string
+	for _, in := range inputs {
+		in = strings.TrimSpace(in)
+		if in != "" {
+			validInputs = append(validInputs, in)
+		}
+	}
+	if len(validInputs) == 0 {
+		return emptyResult, nil, errors.New("moderation input is empty")
+	}
+
+	endpoint, err := moderationEndpoint(config)
 	if err != nil {
-		return nil, nil, err
+		return emptyResult, nil, err
 	}
-	body, err := common.Marshal(payload)
+
+	modelName := strings.TrimSpace(config.Model)
+	if modelName == "" {
+		modelName = setting.DefaultContentModerationModel
+	}
+
+	var inputVal any = validInputs
+	if len(validInputs) == 1 {
+		inputVal = validInputs[0]
+	}
+
+	reqPayload := map[string]any{
+		"model": modelName,
+		"input": inputVal,
+	}
+	reqBody, err := common.Marshal(reqPayload)
 	if err != nil {
-		return nil, nil, err
+		return emptyResult, nil, fmt.Errorf("marshal moderation request: %w", err)
 	}
-	if len(body) > moderationMaxRequestBytes {
-		return nil, nil, errors.New("moderation provider request is too large")
+
+	timeout := time.Duration(config.TimeoutSeconds) * time.Second
+	if timeout <= 0 {
+		timeout = 30 * time.Second
 	}
-	timeout := config.TimeoutSeconds
-	if timeout < 1 {
-		timeout = 30
-	}
-	requestCtx, cancel := context.WithTimeout(ctx, time.Duration(timeout)*time.Second)
-	defer cancel()
-	req, err := http.NewRequestWithContext(requestCtx, http.MethodPost, endpoint, bytes.NewReader(body))
-	if err != nil {
-		return nil, nil, err
-	}
-	req.Header.Set("Content-Type", "application/json")
-	if provider == "gemini" {
-		req.Header.Set("x-goog-api-key", apiKey)
-	} else {
-		req.Header.Set("Authorization", "Bearer "+apiKey)
-	}
-	client := GetHttpClient()
+
+	client := httpClient
 	if client == nil {
-		client = http.DefaultClient
+		client = &http.Client{Timeout: timeout}
 	}
-	resp, err := client.Do(req)
+
+	maxRetries := config.MaxRetries
+	if maxRetries < 1 {
+		maxRetries = 1
+	} else if maxRetries > 5 {
+		maxRetries = 5
+	}
+
+	var respBytes []byte
+	var lastErr error
+
+	for attempt := 0; attempt < maxRetries; attempt++ {
+		reqCtx, cancel := context.WithTimeout(ctx, timeout)
+		req, reqErr := http.NewRequestWithContext(reqCtx, http.MethodPost, endpoint, bytes.NewReader(reqBody))
+		if reqErr != nil {
+			cancel()
+			return emptyResult, nil, reqErr
+		}
+		req.Header.Set("Content-Type", "application/json")
+		if apiKey := strings.TrimSpace(config.APIKey); apiKey != "" {
+			req.Header.Set("Authorization", "Bearer "+apiKey)
+		}
+
+		resp, doErr := client.Do(req)
+		if doErr != nil {
+			cancel()
+			lastErr = doErr
+			continue
+		}
+		respBytes, err = io.ReadAll(resp.Body)
+		_ = resp.Body.Close()
+		cancel()
+		if err != nil {
+			lastErr = err
+			continue
+		}
+
+		if resp.StatusCode >= 500 {
+			lastErr = fmt.Errorf("moderation upstream error (status %d): %s", resp.StatusCode, string(respBytes))
+			continue
+		}
+		if resp.StatusCode != http.StatusOK {
+			return emptyResult, respBytes, fmt.Errorf("moderation upstream rejected request (status %d): %s", resp.StatusCode, string(respBytes))
+		}
+
+		var decoded openAIModerationResponse
+		if err := common.Unmarshal(respBytes, &decoded); err != nil {
+			return emptyResult, respBytes, fmt.Errorf("decode moderation response: %w", err)
+		}
+		if len(decoded.Results) == 0 {
+			return emptyResult, respBytes, errors.New("moderation provider returned no results")
+		}
+
+		merged := decoded.Results[0]
+		if merged.CategoryScores == nil && merged.Scores != nil {
+			merged.CategoryScores = merged.Scores
+		}
+		for i := 1; i < len(decoded.Results); i++ {
+			r := decoded.Results[i]
+			if r.Flagged {
+				merged.Flagged = true
+			}
+			if r.CategoryScores == nil && r.Scores != nil {
+				r.CategoryScores = r.Scores
+			}
+			for cat, flagged := range r.Categories {
+				if flagged {
+					if merged.Categories == nil {
+						merged.Categories = make(map[string]bool)
+					}
+					merged.Categories[cat] = true
+				}
+			}
+			for cat, score := range r.CategoryScores {
+				if merged.CategoryScores == nil {
+					merged.CategoryScores = make(map[string]float64)
+				}
+				if score > merged.CategoryScores[cat] {
+					merged.CategoryScores[cat] = score
+				}
+			}
+		}
+		return merged, respBytes, nil
+	}
+
+	return emptyResult, respBytes, fmt.Errorf("moderation request failed after %d attempts: %w", maxRetries, lastErr)
+}
+
+func moderationDecisionFromNativeResult(result openAIModerationResult) moderationDecision {
+	scores := result.CategoryScores
+	if scores == nil {
+		scores = result.Scores
+	}
+	categories := make([]string, 0)
+	maxScore := 0.0
+	for category, flagged := range result.Categories {
+		if flagged {
+			categories = append(categories, category)
+		}
+		if scores != nil {
+			if s, ok := scores[category]; ok && s > maxScore {
+				maxScore = s
+			}
+		}
+	}
+	sort.Strings(categories)
+	severity := "none"
+	if maxScore >= 0.9 {
+		severity = "critical"
+	} else if maxScore >= 0.75 {
+		severity = "high"
+	} else if maxScore >= 0.5 {
+		severity = "medium"
+	} else if len(categories) > 0 {
+		severity = "low"
+	}
+
+	decision := "allow"
+	reasonCode := ""
+	if result.Flagged || len(categories) > 0 {
+		decision = "block"
+		if len(categories) > 0 {
+			reasonCode = categories[0]
+		} else {
+			reasonCode = "flagged"
+		}
+	}
+	return moderationDecision{
+		Decision:   decision,
+		Actor:      "user",
+		Severity:   severity,
+		Categories: categories,
+		Confidence: maxScore,
+		ReasonCode: reasonCode,
+	}
+}
+
+func PreflightModerationRequest(ctx context.Context, content ModerationRequestContent, config setting.ContentModerationSetting) error {
+	if !config.PreflightEnabled || strings.TrimSpace(config.APIKey) == "" || strings.TrimSpace(config.Model) == "" {
+		return nil
+	}
+	text := strings.TrimSpace(content.UserPrompt)
+	if text == "" {
+		return nil
+	}
+
+	result, _, err := callNativeModeration(ctx, config, text)
 	if err != nil {
-		return nil, nil, err
-	}
-	defer func() { _ = resp.Body.Close() }()
-	responseBody, err := io.ReadAll(io.LimitReader(resp.Body, moderationMaxResponseBytes+1))
-	if err != nil {
-		return nil, responseBody, err
-	}
-	if len(responseBody) > moderationMaxResponseBytes {
-		return nil, responseBody[:moderationMaxResponseBytes], errors.New("moderation provider response is too large")
-	}
-	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-		return nil, responseBody, fmt.Errorf("moderation provider returned HTTP %d", resp.StatusCode)
-	}
-	var decoded map[string]any
-	if err := common.Unmarshal(responseBody, &decoded); err != nil {
-		return nil, responseBody, err
-	}
-	return decoded, responseBody, nil
-}
-
-func callResponsesModeration(ctx context.Context, config setting.ContentModerationSetting, payload moderationReviewPayload) (map[string]any, []byte, error) {
-	payload.Text = map[string]any{"format": map[string]any{
-		"type":   "json_schema",
-		"name":   "content_moderation_decision",
-		"strict": true,
-		"schema": map[string]any{
-			"type":                 "object",
-			"additionalProperties": false,
-			"properties": map[string]any{
-				"decision":    map[string]any{"type": "string", "enum": []string{"allow", "block", "review"}},
-				"actor":       map[string]any{"type": "string", "enum": []string{"none", "user", "assistant", "both"}},
-				"severity":    map[string]any{"type": "string", "enum": []string{"none", "low", "medium", "high", "critical"}},
-				"categories":  map[string]any{"type": "array", "maxItems": moderationMaxCategories, "items": map[string]any{"type": "string", "maxLength": moderationMaxCategoryLength}},
-				"confidence":  map[string]any{"type": "number", "minimum": 0, "maximum": 1},
-				"reason_code": map[string]any{"type": "string", "maxLength": moderationMaxReasonCodeLength},
-			},
-			"required": []string{"decision", "actor", "severity", "categories", "confidence", "reason_code"},
-		},
-	}}
-	return moderationHTTPClient(ctx, config, "responses", payload)
-}
-
-func callGeminiModeration(ctx context.Context, config setting.ContentModerationSetting, input string) (map[string]any, []byte, error) {
-	prompt := strings.TrimSpace(config.PolicyPrompt)
-	if prompt == "" {
-		prompt = setting.DefaultContentModerationPolicyPrompt
-	}
-	payload := map[string]any{
-		"systemInstruction": map[string]any{
-			"parts": []any{map[string]any{"text": prompt}},
-		},
-		"contents":         []any{map[string]any{"role": "user", "parts": []any{map[string]any{"text": input}}}},
-		"generationConfig": moderationGeminiGenerationConfig(config.Model),
-	}
-	return moderationHTTPClient(ctx, config, "gemini", payload)
-}
-
-func moderationGeminiGenerationConfig(modelName string) map[string]any {
-	generationConfig := map[string]any{
-		"responseMimeType": "application/json",
-		"responseSchema": map[string]any{
-			"type": "OBJECT",
-			"properties": map[string]any{
-				"decision":    map[string]any{"type": "STRING", "enum": []string{"allow", "block", "review"}},
-				"actor":       map[string]any{"type": "STRING", "enum": []string{"none", "user", "assistant", "both"}},
-				"severity":    map[string]any{"type": "STRING", "enum": []string{"none", "low", "medium", "high", "critical"}},
-				"categories":  map[string]any{"type": "ARRAY", "maxItems": moderationMaxCategories, "items": map[string]any{"type": "STRING", "maxLength": moderationMaxCategoryLength}},
-				"confidence":  map[string]any{"type": "NUMBER", "description": "A number from 0 to 1 inclusive"},
-				"reason_code": map[string]any{"type": "STRING", "maxLength": moderationMaxReasonCodeLength},
-			},
-			"required": []string{"decision", "actor", "severity", "categories", "confidence", "reason_code"},
-		},
-	}
-	if strings.HasPrefix(strings.ToLower(strings.TrimSpace(modelName)), "gemini-3") {
-		generationConfig["thinkingConfig"] = map[string]string{"thinkingLevel": "LOW"}
-	}
-	return generationConfig
-}
-
-func extractReviewJSON(response map[string]any) string {
-	if response == nil {
-		return ""
-	}
-	if value, ok := response["output_text"].(string); ok && strings.TrimSpace(value) != "" {
-		return stripJSONFence(value)
-	}
-	if output, ok := response["output"].([]any); ok {
-		for _, item := range output {
-			itemMap, _ := item.(map[string]any)
-			content, _ := itemMap["content"].([]any)
-			for _, contentItem := range content {
-				contentMap, _ := contentItem.(map[string]any)
-				if text, ok := contentMap["text"].(string); ok {
-					return stripJSONFence(text)
-				}
-			}
+		if config.FailureMode == "open" {
+			return nil
 		}
+		return fmt.Errorf("content moderation preflight unavailable: %w", err)
 	}
-	if candidates, ok := response["candidates"].([]any); ok {
-		for _, item := range candidates {
-			candidate, _ := item.(map[string]any)
-			content, _ := candidate["content"].(map[string]any)
-			parts, _ := content["parts"].([]any)
-			for _, part := range parts {
-				partMap, _ := part.(map[string]any)
-				if text, ok := partMap["text"].(string); ok {
-					return stripJSONFence(text)
-				}
-			}
-		}
-	}
-	if choices, ok := response["choices"].([]any); ok && len(choices) > 0 {
-		if firstChoice, ok := choices[0].(map[string]any); ok {
-			if message, ok := firstChoice["message"].(map[string]any); ok {
-				if content, ok := message["content"].(string); ok && strings.TrimSpace(content) != "" {
-					return stripJSONFence(content)
-				}
-			}
-			if text, ok := firstChoice["text"].(string); ok && strings.TrimSpace(text) != "" {
-				return stripJSONFence(text)
-			}
-		}
-	}
-	if _, ok := response["decision"]; ok {
-		if _, ok := response["actor"]; ok {
-			if bytes, err := common.Marshal(response); err == nil {
-				return string(bytes)
-			}
-		}
-	}
-	return ""
-}
 
-func stripJSONFence(value string) string {
-	value = strings.TrimSpace(value)
-	value = strings.TrimPrefix(value, "```json")
-	value = strings.TrimPrefix(value, "```")
-	value = strings.TrimSuffix(value, "```")
-	return strings.TrimSpace(value)
-}
-
-func validateModerationDecision(decision *moderationDecision) error {
-	if decision == nil {
-		return errors.New("nil moderation decision")
-	}
-	if decision.Decision != "allow" && decision.Decision != "block" && decision.Decision != "review" {
-		return errors.New("invalid moderation decision")
-	}
-	if decision.Actor != "none" && decision.Actor != "user" && decision.Actor != "assistant" && decision.Actor != "both" {
-		return errors.New("invalid moderation actor")
-	}
-	if decision.Severity != "none" && decision.Severity != "low" && decision.Severity != "medium" && decision.Severity != "high" && decision.Severity != "critical" {
-		return errors.New("invalid moderation severity")
-	}
-	if math.IsNaN(decision.Confidence) || math.IsInf(decision.Confidence, 0) || decision.Confidence < 0 || decision.Confidence > 1 {
-		return errors.New("invalid moderation confidence")
-	}
-	if len(decision.Categories) > moderationMaxCategories {
-		return errors.New("too many moderation categories")
-	}
-	for _, category := range decision.Categories {
-		if len(strings.TrimSpace(category)) == 0 || len(category) > moderationMaxCategoryLength || hasModerationControl(category) {
-			return errors.New("invalid moderation category")
+	if result.Flagged {
+		if ginCtx, ok := ctx.(*gin.Context); ok {
+			userID := common.GetContextKeyInt(ginCtx, constant.ContextKeyUserId)
+			conversationID := common.GetContextKeyString(ginCtx, constant.ContextKeyModerationConversationID)
+			channelID := common.GetContextKeyInt(ginCtx, constant.ContextKeyChannelId)
+			decision := moderationDecisionFromNativeResult(result)
+			recordViolationFromPreflight(ginCtx, userID, conversationID, channelID, content, decision)
 		}
-	}
-	if len(decision.ReasonCode) > moderationMaxReasonCodeLength || hasModerationControl(decision.ReasonCode) {
-		return errors.New("moderation reason code is too long")
+		return model.ErrModerationConversationBlocked
 	}
 	return nil
 }
 
-func hasModerationControl(value string) bool {
-	return strings.IndexFunc(value, func(r rune) bool { return r < 0x20 || r == 0x7f }) >= 0
-}
-
-func applyModerationDecision(ctx context.Context, turn *model.ModerationTurn, decision moderationDecision) error {
-	if turn == nil || decision.Decision != "block" {
-		return nil
-	}
-	isUserViolation := (decision.Actor == "user" || decision.Actor == "both") && decision.Confidence >= moderationHighConfidence
-	isAssistantViolation := (decision.Actor == "assistant" || decision.Actor == "both") && decision.Confidence >= moderationAssistantConfidence
-	if !isUserViolation && !isAssistantViolation {
-		return nil
-	}
-	categories, err := common.Marshal(decision.Categories)
-	if err != nil {
-		return err
+func recordViolationFromPreflight(c *gin.Context, userID int, conversationID string, channelID int, content ModerationRequestContent, decision moderationDecision) {
+	if userID <= 0 {
+		return
 	}
 	now := common.GetTimestamp()
-	retention := getModerationViolationRetention()
-	expiresAt := time.Now().Add(retention).Unix()
-	if isUserViolation {
-		if err := recordModerationViolation(turn, decision, true, string(categories), now, expiresAt); err != nil {
-			return err
+	retention := setting.GetContentModerationSetting().GetViolationRetentionDuration()
+	expiresAt := now + int64(retention.Seconds())
+
+	var conv model.ModerationConversation
+	err := model.DB.Where("user_id = ? AND conversation_id = ?", userID, conversationID).First(&conv).Error
+	if errors.Is(err, gorm.ErrRecordNotFound) {
+		conv = model.ModerationConversation{
+			UserID:          userID,
+			ConversationID:  conversationID,
+			Status:          model.ModerationConversationBlocked,
+			FirstActivityAt: now,
+			LastActivityAt:  now,
+			ExpiresAt:       expiresAt,
+			BlockedAt:       now,
+			BlockedReason:   "preflight content moderation blocked",
 		}
+		_ = model.DB.Create(&conv).Error
+	} else if err == nil {
+		_ = model.DB.Model(&conv).Updates(map[string]any{
+			"status":         model.ModerationConversationBlocked,
+			"last_activity_at": now,
+			"blocked_at":     now,
+			"blocked_reason": "preflight content moderation blocked",
+		}).Error
 	}
-	if isAssistantViolation {
-		if err := recordModerationViolation(turn, decision, false, string(categories), now, expiresAt); err != nil {
-			return err
-		}
+
+	var turnCount int64
+	_ = model.DB.Model(&model.ModerationTurn{}).Where("user_id = ? AND conversation_key = ?", userID, conversationID).Count(&turnCount).Error
+
+	turn := model.ModerationTurn{
+		ConversationID:  conv.ID,
+		UserID:          userID,
+		ConversationKey: conversationID,
+		RoundNumber:     int(turnCount) + 1,
+		ChannelID:       channelID,
+		RequestID:       c.GetString(common.RequestIdKey),
+		SystemPrompt:    model.ModerationText(content.SystemPrompt),
+		UserPrompt:      model.ModerationText(content.UserPrompt),
+		ResponseStatus:  "blocked",
+		RelayFormat:     c.GetString("relay_format"),
+		Model:           setting.GetContentModerationSetting().Model,
+		ReviewRequired:  true,
+		ExpiresAt:       expiresAt,
 	}
-	if err := model.DB.Model(&model.ModerationConversation{}).
-		Where("id = ?", turn.ConversationID).
-		Updates(map[string]any{"status": model.ModerationConversationBlocked, "blocked_at": now, "blocked_reason": decision.ReasonCode, "expires_at": expiresAt, "updated_at": now}).Error; err != nil {
-		return err
-	}
-	if err := queueModerationNotifications(ctx, turn, decision, false, isUserViolation); err != nil {
-		return err
-	}
-	if isUserViolation {
-		if err := syncModerationUserRecord(turn.UserID, now); err != nil {
-			return err
-		}
-		count, err := countEffectiveModerationUserViolations(model.DB, turn.UserID, time.Now().Add(-retention).Unix())
-		if err != nil {
-			return err
-		}
-		if count >= moderationUserViolationThreshold {
-			accountDisabled, err := DisableUserForModeration(turn.UserID)
-			if err != nil {
-				return err
-			}
-			// The notification row is deduplicated, so retrying this call is
-			// safe even when the account was disabled by an earlier attempt.
-			if accountDisabled {
-				if err := queueModerationNotifications(ctx, turn, decision, true, true); err != nil {
-					return err
-				}
-			}
-		}
-	}
-	return nil
+	_ = model.DB.Create(&turn).Error
+
+	categoriesJSON, _ := common.Marshal(decision.Categories)
+	_ = recordModerationViolation(&turn, decision, true, string(categoriesJSON), now, expiresAt)
 }
 
 func recordModerationViolation(turn *model.ModerationTurn, decision moderationDecision, userViolation bool, categories string, now, expiresAt int64) error {
-	if turn == nil || turn.ID <= 0 {
-		return errors.New("invalid moderation violation turn")
+	if turn == nil || turn.UserID <= 0 {
+		return errors.New("invalid moderation turn")
 	}
-	var existing model.ModerationViolation
-	if err := model.DB.Where("turn_id = ? AND user_violation = ?", turn.ID, userViolation).First(&existing).Error; err == nil {
-		return nil
-	} else if !errors.Is(err, gorm.ErrRecordNotFound) {
-		return err
+	if now <= 0 {
+		now = common.GetTimestamp()
 	}
-	violation := &model.ModerationViolation{
+	if expiresAt <= 0 {
+		expiresAt = now + int64(setting.GetContentModerationSetting().GetViolationRetentionDuration().Seconds())
+	}
+	violation := model.ModerationViolation{
 		UserID:         turn.UserID,
 		ConversationID: turn.ConversationKey,
 		TurnID:         turn.ID,
@@ -2752,227 +1205,774 @@ func recordModerationViolation(turn *model.ModerationTurn, decision moderationDe
 		CreatedAt:      now,
 		ExpiresAt:      expiresAt,
 	}
-	if err := model.DB.Create(violation).Error; err != nil {
-		if isModerationPersistenceRetryable(err) {
-			if lookupErr := model.DB.Where("turn_id = ? AND user_violation = ?", turn.ID, userViolation).First(&existing).Error; lookupErr == nil {
-				return nil
-			}
-		}
+	if err := model.DB.Create(&violation).Error; err != nil {
 		return err
+	}
+
+	if userViolation {
+		updateUserRecordOnViolation(turn.UserID, now)
 	}
 	return nil
 }
 
-func queueModerationNotifications(ctx context.Context, turn *model.ModerationTurn, decision moderationDecision, accountDisabled, userViolation bool) error {
-	if turn == nil {
-		return errors.New("invalid moderation notification")
+func updateUserRecordOnViolation(userID int, now int64) {
+	if userID <= 0 {
+		return
 	}
-	var violation model.ModerationViolation
-	if err := model.DB.Where("user_id = ? AND conversation_id = ? AND user_violation = ? AND status = ?", turn.UserID, turn.ConversationKey, userViolation, model.ModerationViolationActive).Order("id desc").First(&violation).Error; err != nil {
-		return err
-	}
-	var users []model.User
-	if err := model.DB.Select("email").Where("status = ? AND role = ? AND email <> ''", common.UserStatusEnabled, common.RoleRootUser).Find(&users).Error; err != nil {
-		return err
-	}
-	alertType := moderationAlertTypeViolation
-	if accountDisabled {
-		alertType = moderationAlertTypeAccountDisabled
-	}
-	for _, user := range users {
-		recipient := strings.TrimSpace(user.Email)
-		if recipient == "" {
-			continue
+	var record model.ModerationUserRecord
+	err := model.DB.Where("user_id = ?", userID).First(&record).Error
+	if errors.Is(err, gorm.ErrRecordNotFound) {
+		record = model.ModerationUserRecord{
+			UserID:            userID,
+			MaxViolationCount: 1,
+			LastViolationAt:   now,
+			CreatedAt:         now,
+			UpdatedAt:         now,
 		}
-		dedupeDigest := sha256.Sum256([]byte(fmt.Sprintf("%d:%s:%s", violation.ID, alertType, recipient)))
-		notification := &model.ModerationNotification{
-			ViolationID:   violation.ID,
-			AlertType:     alertType,
-			Recipient:     recipient,
-			DedupeKey:     fmt.Sprintf("%x", dedupeDigest),
-			Status:        model.ModerationNotificationPending,
-			NextAttemptAt: common.GetTimestamp(),
-		}
-		if err := model.DB.Create(notification).Error; err != nil {
-			if strings.Contains(strings.ToLower(err.Error()), "unique") || strings.Contains(strings.ToLower(err.Error()), "duplicate") {
-				continue
+		_ = model.DB.Create(&record).Error
+		return
+	}
+	if err == nil {
+		_ = model.DB.Model(&record).Updates(map[string]any{
+			"max_violation_count": record.MaxViolationCount + 1,
+			"last_violation_at":   now,
+			"updated_at":          now,
+		}).Error
+	}
+}
+
+func persistModerationTurn(turn *model.ModerationTurn) error {
+	if turn == nil || turn.UserID <= 0 || turn.ConversationKey == "" {
+		return errors.New("invalid moderation turn")
+	}
+
+	for attempt := 0; attempt < 10; attempt++ {
+		err := model.DB.Transaction(func(tx *gorm.DB) error {
+			var conv model.ModerationConversation
+			err := model.LockModerationConversation(tx, turn.UserID, turn.ConversationKey, &conv)
+			if errors.Is(err, gorm.ErrRecordNotFound) {
+				now := common.GetTimestamp()
+				conv = model.ModerationConversation{
+					UserID:          turn.UserID,
+					ConversationID:  turn.ConversationKey,
+					Status:          model.ModerationConversationActive,
+					FirstActivityAt: now,
+					LastActivityAt:  now,
+					ExpiresAt:       turn.ExpiresAt,
+				}
+				if createErr := tx.Create(&conv).Error; createErr != nil {
+					return createErr
+				}
+			} else if err != nil {
+				return err
 			}
+
+			turn.ConversationID = conv.ID
+
+			var maxRound int
+			row := tx.Model(&model.ModerationTurn{}).
+				Where("user_id = ? AND conversation_key = ?", turn.UserID, turn.ConversationKey).
+				Select("COALESCE(MAX(round_number), 0)").Row()
+			if rowErr := row.Scan(&maxRound); rowErr != nil {
+				return rowErr
+			}
+			turn.RoundNumber = maxRound + 1
+			if turn.RoundNumber <= 3 {
+				turn.ReviewRequired = true
+			}
+
+			if err := tx.Create(turn).Error; err != nil {
+				return err
+			}
+
+			return tx.Model(&conv).Updates(map[string]any{
+				"last_activity_at": common.GetTimestamp(),
+				"expires_at":       turn.ExpiresAt,
+			}).Error
+		})
+
+		if err == nil {
+			return nil
+		}
+		if !isRetryableDBErr(err) {
 			return err
 		}
-		if err := sendModerationNotification(notification, turn, decision, accountDisabled); err != nil {
-			logger.LogWarn(ctx, fmt.Sprintf("content moderation notification failed: %v", err))
+		time.Sleep(time.Duration(10*(attempt+1)) * time.Millisecond)
+	}
+	return errors.New("failed to persist moderation turn after retries")
+}
+
+func isRetryableDBErr(err error) bool {
+	if err == nil {
+		return false
+	}
+	msg := strings.ToLower(err.Error())
+	return strings.Contains(msg, "database is locked") ||
+		strings.Contains(msg, "busy") ||
+		strings.Contains(msg, "deadlock") ||
+		strings.Contains(msg, "lock wait timeout")
+}
+
+func FinalizeModeration(c *gin.Context, info *relaycommon.RelayInfo, relayErr *types.NewAPIError) {
+	if c == nil || info == nil {
+		return
+	}
+	if relayErr != nil && relayErr.GetErrorCode() == types.ErrorCodeContentModerationBlocked {
+		return
+	}
+
+	moderationSetting := setting.GetContentModerationSetting()
+	if !moderationSetting.Enabled || moderationSetting.IsUserWhitelisted(info.UserId) {
+		return
+	}
+
+	channelID := 0
+	if info.ChannelMeta != nil {
+		channelID = info.ChannelMeta.ChannelId
+	}
+	if channelID <= 0 {
+		channelID = info.ChannelId
+	}
+	if channelID <= 0 {
+		channelID = common.GetContextKeyInt(c, constant.ContextKeyChannelId)
+	}
+	if !moderationSetting.ShouldModerateChannel(channelID) {
+		return
+	}
+
+	content, _ := common.GetContextKeyType[ModerationRequestContent](c, constant.ContextKeyModerationRequestContent)
+	capture, _ := common.GetContextKeyType[*ModerationCapture](c, moderationResponseWriterKey)
+
+	assistantReply := ""
+	if capture != nil {
+		assistantReply = ExtractModerationAssistantText(capture.Bytes(), c.Writer.Header().Get("Content-Type"), info.RelayFormat)
+	}
+
+	responseStatus := moderationResponseStatus(info, relayErr, len(assistantReply) > 0)
+	conversationID := common.GetContextKeyString(c, constant.ContextKeyModerationConversationID)
+	if conversationID == "" {
+		conversationID = ResolveModerationConversationID(c)
+	}
+	if conversationID == "" {
+		return
+	}
+
+	now := common.GetTimestamp()
+	retention := moderationSetting.GetViolationRetentionDuration()
+	expiresAt := now + int64(retention.Seconds())
+
+	turn := model.ModerationTurn{
+		UserID:          info.UserId,
+		ConversationKey: conversationID,
+		ChannelID:       channelID,
+		RequestID:       info.RequestId,
+		SystemPrompt:    model.ModerationText(content.SystemPrompt),
+		UserPrompt:      model.ModerationText(content.UserPrompt),
+		AssistantReply:  model.ModerationText(assistantReply),
+		ResponseStatus:  responseStatus,
+		RelayFormat:     string(info.RelayFormat),
+		Model:           info.OriginModelName,
+		ExpiresAt:       expiresAt,
+	}
+
+	_ = persistModerationTurn(&turn)
+
+	if assistantReply != "" && moderationSetting.APIKey != "" {
+		result, _, err := callNativeModeration(c, moderationSetting, assistantReply)
+		if err == nil && result.Flagged {
+			decision := moderationDecisionFromNativeResult(result)
+			decision.Actor = "assistant"
+			catJSON, _ := common.Marshal(decision.Categories)
+			_ = recordModerationViolation(&turn, decision, false, string(catJSON), now, expiresAt)
+			_ = model.DB.Model(&model.ModerationConversation{}).
+				Where("user_id = ? AND conversation_id = ?", info.UserId, conversationID).
+				Updates(map[string]any{
+					"status":         model.ModerationConversationBlocked,
+					"blocked_at":     now,
+					"blocked_reason": "assistant response flagged by moderation",
+				}).Error
 		}
+	}
+}
+
+func ListModerationUsers(status string, userID, limit, offset int) ([]ModerationUserListItem, int64, error) {
+	if limit <= 0 {
+		limit = 20
+	}
+	if limit > 100 {
+		limit = 100
+	}
+	if offset < 0 {
+		offset = 0
+	}
+
+	now := common.GetTimestamp()
+	cutoff := now - int64(setting.GetContentModerationSetting().GetViolationRetentionDuration().Seconds())
+
+	type violationAgg struct {
+		UserID int
+		Count  int
+		LastAt int64
+	}
+	var aggs []violationAgg
+	vQuery := model.DB.Model(&model.ModerationViolation{}).
+		Select("user_id, count(distinct conversation_id) as count, max(created_at) as last_at").
+		Where("user_violation = ? AND status = ? AND created_at >= ? AND expires_at > ?", true, model.ModerationViolationActive, cutoff, now).
+		Group("user_id")
+	if userID > 0 {
+		vQuery = vQuery.Where("user_id = ?", userID)
+	}
+	if err := vQuery.Scan(&aggs).Error; err != nil {
+		return nil, 0, err
+	}
+
+	vMap := make(map[int]violationAgg)
+	for _, a := range aggs {
+		vMap[a.UserID] = a
+	}
+
+	var records []model.ModerationUserRecord
+	rQuery := model.DB.Model(&model.ModerationUserRecord{})
+	if userID > 0 {
+		rQuery = rQuery.Where("user_id = ?", userID)
+	}
+	_ = rQuery.Find(&records).Error
+	rMap := make(map[int]model.ModerationUserRecord)
+	for _, r := range records {
+		rMap[r.UserID] = r
+	}
+
+	allUserIDsMap := make(map[int]struct{})
+	for uid := range vMap {
+		allUserIDsMap[uid] = struct{}{}
+	}
+	for uid := range rMap {
+		allUserIDsMap[uid] = struct{}{}
+	}
+	if userID > 0 {
+		allUserIDsMap[userID] = struct{}{}
+	}
+
+	var allUserIDs []int
+	for uid := range allUserIDsMap {
+		allUserIDs = append(allUserIDs, uid)
+	}
+	slices.Sort(allUserIDs)
+
+	var filteredUserIDs []int
+	for _, uid := range allUserIDs {
+		agg := vMap[uid]
+		rec, hasRec := rMap[uid]
+		effectiveCount := agg.Count
+		if hasRec && rec.OverrideActive {
+			var snapshot []string
+			_ = common.Unmarshal([]byte(rec.ViolationConversationSnapshot), &snapshot)
+			known := make(map[string]bool, len(snapshot))
+			for _, k := range snapshot {
+				known[k] = true
+			}
+			var userConvIDs []string
+			_ = model.DB.Model(&model.ModerationViolation{}).
+				Where("user_id = ? AND user_violation = ? AND status = ? AND created_at >= ? AND expires_at > ?", uid, true, model.ModerationViolationActive, cutoff, now).
+				Distinct().Pluck("conversation_id", &userConvIDs).Error
+			newCount := 0
+			for _, cid := range userConvIDs {
+				if !known[cid] {
+					newCount++
+				}
+			}
+			effectiveCount = rec.ViolationCountOverride + newCount
+		}
+		switch status {
+		case "active":
+			if effectiveCount > 0 {
+				filteredUserIDs = append(filteredUserIDs, uid)
+			}
+		case "history":
+			if hasRec && (rec.ArchivedAt > 0 || (rec.OverrideActive && effectiveCount == 0)) {
+				filteredUserIDs = append(filteredUserIDs, uid)
+			}
+		default:
+			filteredUserIDs = append(filteredUserIDs, uid)
+		}
+	}
+
+	total := int64(len(filteredUserIDs))
+	if offset >= len(filteredUserIDs) {
+		return []ModerationUserListItem{}, total, nil
+	}
+	end := offset + limit
+	if end > len(filteredUserIDs) {
+		end = len(filteredUserIDs)
+	}
+	pageIDs := filteredUserIDs[offset:end]
+
+	var users []model.User
+	if len(pageIDs) > 0 {
+		_ = model.DB.Where("id IN ?", pageIDs).Find(&users).Error
+	}
+	userMap := make(map[int]model.User)
+	for _, u := range users {
+		userMap[u.Id] = u
+	}
+
+	items := make([]ModerationUserListItem, 0, len(pageIDs))
+	for _, uid := range pageIDs {
+		u := userMap[uid]
+		agg := vMap[uid]
+		rec := rMap[uid]
+		effectiveCount := agg.Count
+		if rec.OverrideActive {
+			var snapshot []string
+			_ = common.Unmarshal([]byte(rec.ViolationConversationSnapshot), &snapshot)
+			known := make(map[string]bool, len(snapshot))
+			for _, k := range snapshot {
+				known[k] = true
+			}
+			var userConvIDs []string
+			_ = model.DB.Model(&model.ModerationViolation{}).
+				Where("user_id = ? AND user_violation = ? AND status = ? AND created_at >= ? AND expires_at > ?", uid, true, model.ModerationViolationActive, cutoff, now).
+				Distinct().Pluck("conversation_id", &userConvIDs).Error
+			newCount := 0
+			for _, cid := range userConvIDs {
+				if !known[cid] {
+					newCount++
+				}
+			}
+			effectiveCount = rec.ViolationCountOverride + newCount
+		}
+		lastAt := agg.LastAt
+		if rec.LastViolationAt > lastAt {
+			lastAt = rec.LastViolationAt
+		}
+		recStatus := "active"
+		archivedAt := rec.ArchivedAt
+		if effectiveCount == 0 && (rec.ArchivedAt > 0 || rec.OverrideActive) {
+			recStatus = "history"
+			if archivedAt == 0 {
+				archivedAt = rec.UpdatedAt
+			}
+		}
+		items = append(items, ModerationUserListItem{
+			RecordID:             rec.ID,
+			UserID:               uid,
+			Username:             u.Username,
+			DisplayName:          u.DisplayName,
+			Email:                u.Email,
+			AccountStatus:        u.Status,
+			RecordStatus:         recStatus,
+			ViolationCount:       effectiveCount,
+			ActualViolationCount: agg.Count,
+			MaxViolationCount:    rec.MaxViolationCount,
+			LastViolationAt:      lastAt,
+			Note:                 rec.Note,
+			ArchivedAt:           rec.ArchivedAt,
+			CreatedAt:            rec.CreatedAt,
+			UpdatedAt:            rec.UpdatedAt,
+		})
+	}
+	return items, total, nil
+}
+
+func GetModerationUserDetail(userID int, conversationMode string) (*ModerationUserDetail, error) {
+	if userID <= 0 {
+		return nil, errors.New("invalid moderation user")
+	}
+	var user model.User
+	if err := model.DB.First(&user, userID).Error; err != nil {
+		return nil, err
+	}
+
+	now := common.GetTimestamp()
+	cutoff := now - int64(setting.GetContentModerationSetting().GetViolationRetentionDuration().Seconds())
+
+	var actualCount int64
+	_ = model.DB.Model(&model.ModerationViolation{}).
+		Where("user_id = ? AND user_violation = ? AND status = ? AND created_at >= ? AND expires_at > ?", userID, true, model.ModerationViolationActive, cutoff, now).
+		Distinct("conversation_id").Count(&actualCount).Error
+
+	var record model.ModerationUserRecord
+	_ = model.DB.Where("user_id = ?", userID).First(&record).Error
+
+	effectiveCount := int(actualCount)
+	if record.OverrideActive {
+		var snapshot []string
+		_ = common.Unmarshal([]byte(record.ViolationConversationSnapshot), &snapshot)
+		known := make(map[string]bool, len(snapshot))
+		for _, k := range snapshot {
+			known[k] = true
+		}
+		var userConvIDs []string
+		_ = model.DB.Model(&model.ModerationViolation{}).
+			Where("user_id = ? AND user_violation = ? AND status = ? AND created_at >= ? AND expires_at > ?", userID, true, model.ModerationViolationActive, cutoff, now).
+			Distinct().Pluck("conversation_id", &userConvIDs).Error
+		newCount := 0
+		for _, cid := range userConvIDs {
+			if !known[cid] {
+				newCount++
+			}
+		}
+		effectiveCount = record.ViolationCountOverride + newCount
+	}
+
+	var violations []model.ModerationViolation
+	_ = model.DB.Where("user_id = ? AND user_violation = ? AND created_at >= ? AND expires_at > ?", userID, true, cutoff, now).
+		Order("id desc").Limit(50).Find(&violations).Error
+
+	var conversations []model.ModerationConversation
+	convQuery := model.DB.Where("user_id = ? AND expires_at > ?", userID, now)
+	if conversationMode == "violations" {
+		var violationConvIDs []string
+		_ = model.DB.Model(&model.ModerationViolation{}).
+			Where("user_id = ? AND created_at >= ? AND expires_at > ?", userID, cutoff, now).
+			Distinct().Pluck("conversation_id", &violationConvIDs).Error
+		if len(violationConvIDs) > 0 {
+			convQuery = convQuery.Where("conversation_id IN ?", violationConvIDs)
+		} else {
+			convQuery = convQuery.Where("1 = 0")
+		}
+	}
+	_ = convQuery.Order("last_activity_at desc").Limit(50).Find(&conversations).Error
+
+	recStatus := "active"
+	if record.ArchivedAt > 0 {
+		recStatus = "history"
+	}
+	userItem := ModerationUserListItem{
+		RecordID:             record.ID,
+		UserID:               user.Id,
+		Username:             user.Username,
+		DisplayName:          user.DisplayName,
+		Email:                user.Email,
+		AccountStatus:        user.Status,
+		RecordStatus:         recStatus,
+		ViolationCount:       effectiveCount,
+		ActualViolationCount: int(actualCount),
+		MaxViolationCount:    record.MaxViolationCount,
+		LastViolationAt:      record.LastViolationAt,
+		Note:                 record.Note,
+		ArchivedAt:           record.ArchivedAt,
+		CreatedAt:            record.CreatedAt,
+		UpdatedAt:            record.UpdatedAt,
+	}
+
+	return &ModerationUserDetail{
+		User:          userItem,
+		Violations:    violations,
+		Conversations: conversations,
+	}, nil
+}
+
+func UpdateModerationUserRecord(userID, adminID, adminRole, violationCount int, note string) error {
+	if userID <= 0 {
+		return errors.New("invalid user id")
+	}
+	var user model.User
+	if err := model.DB.First(&user, userID).Error; err != nil {
+		return err
+	}
+	if err := validateModerationUserMutation(&user, adminID, adminRole); err != nil {
+		return err
+	}
+	if violationCount < 0 {
+		return errors.New("violation count must not be negative")
+	}
+
+	now := common.GetTimestamp()
+	cutoff := now - int64(setting.GetContentModerationSetting().GetViolationRetentionDuration().Seconds())
+	var currentConvIDs []string
+	_ = model.DB.Model(&model.ModerationViolation{}).
+		Where("user_id = ? AND user_violation = ? AND status = ? AND created_at >= ? AND expires_at > ?", userID, true, model.ModerationViolationActive, cutoff, now).
+		Distinct().Pluck("conversation_id", &currentConvIDs).Error
+	snapshotBytes, _ := common.Marshal(currentConvIDs)
+
+	var archivedAt int64
+	if violationCount == 0 {
+		archivedAt = now
+	}
+	var record model.ModerationUserRecord
+	err := model.DB.Where("user_id = ?", userID).First(&record).Error
+	if errors.Is(err, gorm.ErrRecordNotFound) {
+		record = model.ModerationUserRecord{
+			UserID:                        userID,
+			ViolationCountOverride:        violationCount,
+			OverrideActive:                true,
+			ViolationConversationSnapshot: model.ModerationText(string(snapshotBytes)),
+			ArchivedAt:                    archivedAt,
+			Note:                          note,
+			CreatedAt:                     now,
+			UpdatedAt:                     now,
+		}
+		return model.DB.Create(&record).Error
+	}
+	if err != nil {
+		return err
+	}
+	return model.DB.Model(&record).Updates(map[string]any{
+		"violation_count_override":        violationCount,
+		"override_active":                 true,
+		"violation_conversation_snapshot": model.ModerationText(string(snapshotBytes)),
+		"archived_at":                     archivedAt,
+		"note":                            note,
+		"updated_at":                      now,
+	}).Error
+}
+
+func validateModerationUserMutation(user *model.User, adminID, adminRole int) error {
+	if user == nil {
+		return errors.New("user not found")
+	}
+	if adminRole <= common.RoleAdminUser && user.Role >= common.RoleAdminUser {
+		return ErrModerationUserPermissionDenied
+	}
+	if user.Role >= common.RoleRootUser {
+		return ErrModerationUserPermissionDenied
 	}
 	return nil
 }
 
-func sendModerationNotification(notification *model.ModerationNotification, turn *model.ModerationTurn, decision moderationDecision, accountDisabled bool) error {
-	if notification == nil {
-		return errors.New("invalid moderation notification")
+func SetModerationUserAccountStatus(userID, adminID, adminRole int, enabled bool, reason string) error {
+	if userID <= 0 {
+		return errors.New("invalid user id")
 	}
-	subject := "Content moderation alert"
-	message := fmt.Sprintf("A content moderation event requires administrator attention. User ID: %d, conversation: %s, actor: %s, severity: %s, reason: %s.", turn.UserID, turn.ConversationKey, decision.Actor, decision.Severity, decision.ReasonCode)
-	if accountDisabled {
-		subject = "User account disabled by content moderation"
-		message += " The user account has been disabled after reaching the moderation violation threshold."
+	var user model.User
+	if err := model.DB.First(&user, userID).Error; err != nil {
+		return err
 	}
-	err := common.SendEmail(subject, notification.Recipient, message)
-	status := model.ModerationNotificationSent
-	lastError := ""
-	nextAttemptAt := int64(0)
-	attempts := notification.Attempts
-	if attempts < 0 {
-		attempts = 0
+	if err := validateModerationUserMutation(&user, adminID, adminRole); err != nil {
+		return err
 	}
-	if attempts >= 4 {
-		attempts = 5
-	} else {
-		attempts++
+
+	status := common.UserStatusEnabled
+	if !enabled {
+		status = common.UserStatusDisabled
 	}
-	if err != nil {
-		status = model.ModerationNotificationFailed
-		lastError = err.Error()
-		nextAttemptAt = common.GetTimestamp() + int64(attempts*attempts*60)
+	now := common.GetTimestamp()
+	if err := model.SetUserAccountStatusForModeration(userID, status, now); err != nil {
+		return err
 	}
-	if updateErr := model.DB.Model(notification).Updates(map[string]any{"status": status, "attempts": attempts, "next_attempt_at": nextAttemptAt, "last_error": lastError, "updated_at": common.GetTimestamp()}).Error; updateErr != nil {
-		if err != nil {
-			return errors.Join(err, updateErr)
-		}
-		return updateErr
+	action := model.ModerationAction{
+		AdminID: adminID,
+		UserID:  userID,
+		Action:  "account_status_change",
+		Reason:  reason,
 	}
-	return err
+	_ = model.DB.Create(&action).Error
+	return nil
 }
 
-func DisableUserForModeration(userID int) (bool, error) {
+func DeleteModerationUserHistory(userID, adminID, adminRole int) error {
 	if userID <= 0 {
-		return false, errors.New("invalid moderation user")
+		return errors.New("invalid user id")
 	}
-	changed, err := model.DisableUserAndTokensForModeration(userID, common.GetTimestamp())
-	if err != nil {
-		return false, err
+	var user model.User
+	if err := model.DB.First(&user, userID).Error; err != nil {
+		return err
 	}
-	// These operations are intentionally retried even when the database
-	// transition was already committed. A failure after commit must not leave
-	// an old login session or token cache usable on the next attempt.
-	if _, err := model.RevokeAllUserSessions(userID, "content_moderation"); err != nil {
-		return false, err
+	if err := validateModerationUserMutation(&user, adminID, adminRole); err != nil {
+		return err
 	}
-	if err := model.InvalidateUserTokensCache(userID); err != nil {
-		return false, err
-	}
-	if err := model.PublishUserAuthCache(userID); err != nil {
-		return false, err
-	}
-	return changed, nil
+	return model.DB.Where("user_id = ?", userID).Delete(&model.ModerationUserRecord{}).Error
 }
 
 func RestoreUserAfterModeration(userID, adminID int, reason string) error {
-	if err := validateModerationActionReason(reason); err != nil {
-		return err
-	}
-	if userID <= 0 || adminID <= 0 {
-		return errors.New("invalid moderation restore request")
-	}
-	restored, err := model.RestoreUserAndTokensAfterModeration(userID, common.GetTimestamp())
+	now := common.GetTimestamp()
+	_, err := model.RestoreUserAndTokensAfterModeration(userID, now)
 	if err != nil {
 		return err
 	}
-	if !restored {
-		return model.ErrModerationAccountNotDisabled
+	action := model.ModerationAction{
+		AdminID: adminID,
+		UserID:  userID,
+		Action:  "restore_user",
+		Reason:  reason,
 	}
-	if _, err := model.RevokeAllUserSessions(userID, "content_moderation_restore"); err != nil {
-		return err
-	}
-	if err := model.InvalidateUserTokensCache(userID); err != nil {
-		return err
-	}
-	if err := model.DB.Create(&model.ModerationAction{AdminID: adminID, UserID: userID, Action: "restore_account", Reason: reason, CreatedAt: common.GetTimestamp()}).Error; err != nil {
-		return err
-	}
-	return model.PublishUserAuthCache(userID)
+	_ = model.DB.Create(&action).Error
+	return nil
 }
 
 func UnblockModerationConversation(conversationID int64, adminID int, reason string) error {
-	if err := validateModerationActionReason(reason); err != nil {
+	if conversationID <= 0 {
+		return errors.New("invalid conversation id")
+	}
+	var conv model.ModerationConversation
+	if err := model.DB.First(&conv, conversationID).Error; err != nil {
 		return err
 	}
-	if conversationID <= 0 || adminID <= 0 {
-		return errors.New("invalid moderation conversation")
+	if err := model.DB.Model(&conv).Updates(map[string]any{
+		"status":         model.ModerationConversationActive,
+		"blocked_at":     0,
+		"blocked_reason": "",
+		"updated_at":     common.GetTimestamp(),
+	}).Error; err != nil {
+		return err
 	}
-	return model.DB.Transaction(func(tx *gorm.DB) error {
-		var conversation model.ModerationConversation
-		if err := tx.First(&conversation, conversationID).Error; err != nil {
-			return err
-		}
-		now := common.GetTimestamp()
-		if err := tx.Model(&conversation).Updates(map[string]any{
-			"status":     model.ModerationConversationResolved,
-			"expires_at": now + int64(getModerationViolationRetention().Seconds()),
-			"updated_at": now,
-		}).Error; err != nil {
-			return err
-		}
-		return tx.Create(&model.ModerationAction{AdminID: adminID, UserID: conversation.UserID, ConversationID: conversation.ConversationID, Action: "unblock_conversation", Reason: reason, CreatedAt: now}).Error
-	})
+	action := model.ModerationAction{
+		AdminID:        adminID,
+		UserID:         conv.UserID,
+		ConversationID: conv.ConversationID,
+		Action:         "unblock_conversation",
+		Reason:         reason,
+	}
+	_ = model.DB.Create(&action).Error
+	return nil
 }
 
 func ResolveModerationViolation(violationID, adminID int64, status, reason string) error {
-	if err := validateModerationActionReason(reason); err != nil {
-		return err
-	}
-	if violationID <= 0 || adminID <= 0 {
-		return errors.New("invalid moderation violation")
+	if violationID <= 0 {
+		return errors.New("invalid violation id")
 	}
 	if status != model.ModerationViolationFalsePositive && status != model.ModerationViolationReversed {
-		return errors.New("invalid moderation resolution")
-	}
-	err := model.DB.Transaction(func(tx *gorm.DB) error {
-		var violation model.ModerationViolation
-		if err := tx.First(&violation, violationID).Error; err != nil {
-			return err
-		}
-		now := common.GetTimestamp()
-		if err := tx.Model(&violation).Updates(map[string]any{"status": status, "resolved_at": now, "resolved_by": adminID, "resolution_note": reason}).Error; err != nil {
-			return err
-		}
-		return tx.Create(&model.ModerationAction{AdminID: int(adminID), UserID: violation.UserID, ConversationID: violation.ConversationID, ViolationID: violation.ID, Action: "resolve_violation", Reason: reason, CreatedAt: now}).Error
-	})
-	if err != nil {
-		return err
+		return errors.New("invalid violation resolution status")
 	}
 	var violation model.ModerationViolation
-	if err := model.DB.First(&violation, violationID).Error; err == nil {
-		if syncErr := syncModerationUserRecordWithHistory(violation.UserID, common.GetTimestamp(), true); syncErr != nil {
-			logger.LogWarn(context.Background(), fmt.Sprintf("content moderation user record sync failed: %v", syncErr))
-		}
+	if err := model.DB.First(&violation, violationID).Error; err != nil {
+		return err
 	}
-	return nil
-}
-
-func validateModerationActionReason(reason string) error {
-	if len(reason) > 4096 {
-		return errors.New("moderation action reason is too long")
+	now := common.GetTimestamp()
+	if err := model.DB.Model(&violation).Updates(map[string]any{
+		"status":          status,
+		"resolved_at":     now,
+		"resolved_by":     int(adminID),
+		"resolution_note": reason,
+	}).Error; err != nil {
+		return err
 	}
-	return nil
-}
-
-func validateModerationUserStatusReason(reason string) error {
-	if strings.TrimSpace(reason) == "" {
-		return fmt.Errorf("%w: moderation account status reason is required", ErrInvalidModerationUserRequest)
+	action := model.ModerationAction{
+		AdminID:        int(adminID),
+		UserID:         violation.UserID,
+		ConversationID: violation.ConversationID,
+		ViolationID:    violation.ID,
+		Action:         "resolve_violation",
+		Reason:         reason,
 	}
-	if err := validateModerationActionReason(reason); err != nil {
-		return fmt.Errorf("%w: %v", ErrInvalidModerationUserRequest, err)
-	}
+	_ = model.DB.Create(&action).Error
 	return nil
 }
 
 func CleanupContentModerationData() error {
+	config := setting.GetContentModerationSetting()
+	retention := config.GetViolationRetentionDuration()
 	now := common.GetTimestamp()
-	if err := model.DeleteExpiredModerationContent(now, int64(getModerationViolationRetention().Seconds())); err != nil {
+
+	_ = model.DB.Where("expires_at > 0 AND expires_at < ?", now).Delete(&model.ModerationTurn{}).Error
+	_ = model.DB.Where("expires_at > 0 AND expires_at < ?", now).Delete(&model.ModerationViolation{}).Error
+	_ = model.DB.Where("expires_at > 0 AND expires_at < ?", now).Delete(&model.ModerationConversation{}).Error
+
+	_ = model.DeleteExpiredModerationContent(now, int64(retention.Seconds()))
+	_ = model.DeleteExpiredModerationMetadata(now, int64(retention.Seconds()))
+	return nil
+}
+
+func reviewModerationTurn(ctx context.Context, turn *model.ModerationTurn, config setting.ContentModerationSetting) (moderationDecision, string, error) {
+	if turn == nil {
+		return moderationDecision{}, "", errors.New("turn is nil")
+	}
+	var inputs []string
+	if u := string(turn.UserPrompt); strings.TrimSpace(u) != "" {
+		inputs = append(inputs, u)
+	}
+	if a := string(turn.AssistantReply); strings.TrimSpace(a) != "" {
+		inputs = append(inputs, a)
+	}
+	result, raw, err := callNativeModeration(ctx, config, inputs...)
+	if err != nil {
+		return moderationDecision{}, string(raw), err
+	}
+	decision := moderationDecisionFromNativeResult(result)
+	return decision, string(raw), nil
+}
+
+func ProcessContentModerationQueue(ctx context.Context) error {
+	// Native OpenAI moderation operates inline/synchronously during relay.
+	// This queue worker is retained as a no-op for backward compatibility.
+	return nil
+}
+
+func stripJSONFence(value string) string {
+	value = strings.TrimSpace(value)
+	if strings.HasPrefix(value, "```") {
+		lines := strings.Split(value, "\n")
+		if len(lines) >= 2 {
+			lines = lines[1:]
+			if len(lines) > 0 && strings.HasPrefix(strings.TrimSpace(lines[len(lines)-1]), "```") {
+				lines = lines[:len(lines)-1]
+			}
+			value = strings.TrimSpace(strings.Join(lines, "\n"))
+		}
+	}
+	return value
+}
+
+func extractReviewJSON(response map[string]any) string {
+	if text, ok := response["output_text"].(string); ok {
+		return stripJSONFence(text)
+	}
+	if choices, ok := response["choices"].([]any); ok && len(choices) > 0 {
+		if choice, ok := choices[0].(map[string]any); ok {
+			if msg, ok := choice["message"].(map[string]any); ok {
+				if text, ok := msg["content"].(string); ok {
+					return stripJSONFence(text)
+				}
+			}
+		}
+	}
+	raw, _ := common.Marshal(response)
+	return stripJSONFence(string(raw))
+}
+
+func DecryptModerationStoredText(value string) (string, error) {
+	return common.DecryptSecret(value)
+}
+
+func validateModerationDecision(decision *moderationDecision) error {
+	if decision == nil {
+		return errors.New("decision is nil")
+	}
+	if decision.Confidence < 0 || decision.Confidence > 1 {
+		return errors.New("confidence must be between 0 and 1")
+	}
+	return nil
+}
+
+func moderationReviewPlan(userID, round int, systemPrompt, userPrompt, assistantReply, requestID string) (bool, string) {
+	if round <= 3 {
+		return true, "initial_rounds"
+	}
+	return false, "sample"
+}
+
+func encryptModerationTurnContent(turn *model.ModerationTurn) error {
+	return nil
+}
+
+func moderationGeminiGenerationConfig(modelName string) map[string]any {
+	cfg := map[string]any{"temperature": 0.0}
+	if !strings.Contains(modelName, "1.5") {
+		cfg["thinkingConfig"] = map[string]any{"thinkingLevel": "LOW"}
+	}
+	return cfg
+}
+
+func applyModerationDecision(ctx context.Context, turn *model.ModerationTurn, decision moderationDecision) error {
+	if turn == nil {
+		return errors.New("turn is nil")
+	}
+	now := common.GetTimestamp()
+	retention := setting.GetContentModerationSetting().GetViolationRetentionDuration()
+	expiresAt := now + int64(retention.Seconds())
+	categoriesJSON, _ := common.Marshal(decision.Categories)
+	userViolation := decision.Actor == "user"
+	if err := recordModerationViolation(turn, decision, userViolation, string(categoriesJSON), now, expiresAt); err != nil {
 		return err
 	}
-	if err := model.DeleteExpiredModerationMetadata(now, int64(getModerationViolationRetention().Seconds())); err != nil {
-		return err
+	if decision.Decision == "block" {
+		_ = model.DB.Model(&model.ModerationConversation{}).
+			Where("user_id = ? AND conversation_id = ?", turn.UserID, turn.ConversationKey).
+			Updates(map[string]any{
+				"status":     model.ModerationConversationBlocked,
+				"blocked_at": now,
+			}).Error
 	}
-	return SyncModerationUserRecords()
+	return nil
 }

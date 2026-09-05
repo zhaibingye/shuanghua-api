@@ -75,7 +75,7 @@ func TestPersistModerationTurnsAssignUniqueRoundsUnderConcurrency(t *testing.T) 
 	}
 }
 
-func TestReviewModerationTurnSupportsResponsesAndGeminiProviders(t *testing.T) {
+func TestCallNativeModerationOpenAIFormat(t *testing.T) {
 	originalHTTPClient := httpClient
 	originalProtectedHTTPClient := ssrfProtectedHTTPClient
 	fetchSetting := system_setting.GetFetchSetting()
@@ -88,137 +88,121 @@ func TestReviewModerationTurnSupportsResponsesAndGeminiProviders(t *testing.T) {
 	fetchSetting.EnableSSRFProtection = false
 
 	server := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
+		assert.Equal(t, "/v1/moderations", request.URL.Path)
+		assert.Equal(t, "Bearer mod-api-key", request.Header.Get("Authorization"))
+		assert.Equal(t, "application/json", request.Header.Get("Content-Type"))
+
 		body, err := io.ReadAll(request.Body)
 		require.NoError(t, err)
-		assert.Contains(t, string(body), "review_data")
+
+		var reqPayload map[string]any
+		require.NoError(t, common.Unmarshal(body, &reqPayload))
+		assert.Equal(t, "omni-moderation-latest", reqPayload["model"])
+
+		respJSON := `{
+			"id": "modr-test-123",
+			"model": "omni-moderation-latest",
+			"results": [
+				{
+					"flagged": true,
+					"categories": {
+						"hate": true,
+						"violence": false,
+						"harassment": false
+					},
+					"category_scores": {
+						"hate": 0.92,
+						"violence": 0.05,
+						"harassment": 0.01
+					}
+				}
+			]
+		}`
 		writer.Header().Set("Content-Type", "application/json")
-		decisionJSON := `{"decision":"allow","actor":"none","severity":"none","categories":[],"confidence":0,"reason_code":"safe"}`
-		var response any
-		if request.Header.Get("x-goog-api-key") != "" {
-			assert.Equal(t, "gemini-key", request.Header.Get("x-goog-api-key"))
-			response = map[string]any{"candidates": []any{map[string]any{"content": map[string]any{"parts": []any{map[string]any{"text": decisionJSON}}}}}}
-		} else {
-			assert.Equal(t, "Bearer responses-key", request.Header.Get("Authorization"))
-			response = map[string]any{"output_text": decisionJSON}
-		}
-		responseBody, err := common.Marshal(response)
-		require.NoError(t, err)
-		_, err = writer.Write(responseBody)
+		_, err = writer.Write([]byte(respJSON))
 		require.NoError(t, err)
 	}))
 	defer server.Close()
 	httpClient = server.Client()
 	ssrfProtectedHTTPClient = nil
 
-	turn := &model.ModerationTurn{
-		SystemPrompt:   model.ModerationText("system"),
-		UserPrompt:     model.ModerationText("user"),
-		AssistantReply: model.ModerationText("assistant"),
-		ResponseStatus: "success",
+	config := setting.ContentModerationSetting{
+		BaseURL:        server.URL + "/v1",
+		APIKey:         "mod-api-key",
+		Model:          "omni-moderation-latest",
+		TimeoutSeconds: 5,
+		MaxRetries:     1,
 	}
-	responsesDecision, _, err := reviewModerationTurn(context.Background(), turn, setting.ContentModerationSetting{
-		Provider:       "responses",
-		BaseURL:        server.URL,
-		APIKey:         "responses-key",
-		Model:          "moderation-model",
-		TimeoutSeconds: 2,
-	})
-	require.NoError(t, err)
-	assert.Equal(t, "allow", responsesDecision.Decision)
 
-	geminiDecision, _, err := reviewModerationTurn(context.Background(), turn, setting.ContentModerationSetting{
-		Provider:       "gemini",
-		BaseURL:        server.URL,
-		APIKey:         "gemini-key",
-		Model:          "moderation-model",
-		TimeoutSeconds: 2,
-	})
+	result, _, err := callNativeModeration(context.Background(), config, "hate speech prompt")
 	require.NoError(t, err)
-	assert.Equal(t, "allow", geminiDecision.Decision)
+	assert.True(t, result.Flagged)
+	assert.True(t, result.Categories["hate"])
+	assert.Equal(t, 0.92, result.CategoryScores["hate"])
+
+	decision := moderationDecisionFromNativeResult(result)
+	assert.Equal(t, "block", decision.Decision)
+	assert.Equal(t, "critical", decision.Severity)
+	assert.Contains(t, decision.Categories, "hate")
+	assert.Equal(t, 0.92, decision.Confidence)
 }
 
-func TestModerationProvidersUseLowReasoningWithoutLegacyGeminiBudget(t *testing.T) {
+func TestPreflightModerationRequestBlocksFlaggedContent(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
 		body, err := io.ReadAll(request.Body)
 		require.NoError(t, err)
-		var payload map[string]any
-		require.NoError(t, common.Unmarshal(body, &payload))
-		writer.Header().Set("Content-Type", "application/json")
-		decisionJSON := `{"decision":"allow","actor":"none","severity":"none","categories":[],"confidence":0,"reason_code":"safe"}`
-		if request.Header.Get("x-goog-api-key") != "" {
-			generationConfig, ok := payload["generationConfig"].(map[string]any)
-			require.True(t, ok)
-			thinkingConfig, ok := generationConfig["thinkingConfig"].(map[string]any)
-			if strings.HasSuffix(request.URL.Path, "/legacy") {
-				assert.False(t, ok)
-				assert.NotContains(t, generationConfig, "thinkingBudget")
-			} else {
-				require.True(t, ok)
-				assert.Equal(t, "LOW", thinkingConfig["thinkingLevel"])
-			}
-			response, marshalErr := common.Marshal(map[string]any{
-				"candidates": []any{map[string]any{"content": map[string]any{"parts": []any{map[string]any{"text": decisionJSON}}}}},
-			})
-			require.NoError(t, marshalErr)
-			_, err = writer.Write(response)
-			require.NoError(t, err)
-			return
-		}
 
-		reasoning, ok := payload["reasoning"].(map[string]any)
-		require.True(t, ok)
-		assert.Equal(t, "low", reasoning["effort"])
-		response, marshalErr := common.Marshal(map[string]string{"output_text": decisionJSON})
-		require.NoError(t, marshalErr)
-		_, err = writer.Write(response)
-		require.NoError(t, err)
+		var reqPayload map[string]any
+		require.NoError(t, common.Unmarshal(body, &reqPayload))
+
+		inputStr, _ := reqPayload["input"].(string)
+		flagged := strings.Contains(inputStr, "unsafe")
+
+		resp := map[string]any{
+			"id":    "modr-preflight",
+			"model": "omni-moderation-latest",
+			"results": []any{
+				map[string]any{
+					"flagged": flagged,
+					"categories": map[string]bool{
+						"violence": flagged,
+					},
+					"category_scores": map[string]float64{
+						"violence": 0.88,
+					},
+				},
+			},
+		}
+		respBytes, _ := common.Marshal(resp)
+		writer.Header().Set("Content-Type", "application/json")
+		_, _ = writer.Write(respBytes)
 	}))
 	defer server.Close()
 
 	originalHTTPClient := httpClient
-	originalProtectedHTTPClient := ssrfProtectedHTTPClient
 	httpClient = server.Client()
-	ssrfProtectedHTTPClient = nil
-	t.Cleanup(func() {
-		httpClient = originalHTTPClient
-		ssrfProtectedHTTPClient = originalProtectedHTTPClient
-	})
+	t.Cleanup(func() { httpClient = originalHTTPClient })
 
-	turn := &model.ModerationTurn{
-		SystemPrompt:   model.ModerationText("system"),
-		UserPrompt:     model.ModerationText("user"),
-		AssistantReply: model.ModerationText("assistant"),
-		ResponseStatus: "success",
+	config := setting.ContentModerationSetting{
+		Enabled:          true,
+		PreflightEnabled: true,
+		BaseURL:          server.URL + "/v1",
+		APIKey:           "test-key",
+		Model:            "omni-moderation-latest",
+		FailureMode:      "closed",
+		TimeoutSeconds:   2,
+		MaxRetries:       1,
 	}
-	_, _, err := reviewModerationTurn(context.Background(), turn, setting.ContentModerationSetting{
-		Provider:       "responses",
-		BaseURL:        server.URL,
-		APIKey:         "responses-key",
-		Model:          "gpt-5-mini",
-		TimeoutSeconds: 2,
-	})
-	require.NoError(t, err)
 
-	_, _, err = reviewModerationTurn(context.Background(), turn, setting.ContentModerationSetting{
-		Provider:       "gemini",
-		BaseURL:        server.URL,
-		APIKey:         "gemini-key",
-		Model:          "gemini-3-flash-preview",
-		TimeoutSeconds: 2,
-	})
-	require.NoError(t, err)
+	// Safe content passes
+	safeContent := ModerationRequestContent{UserPrompt: "hello safe world"}
+	err := PreflightModerationRequest(context.Background(), safeContent, config)
+	assert.NoError(t, err)
 
-	_, _, err = reviewModerationTurn(context.Background(), turn, setting.ContentModerationSetting{
-		Provider:       "gemini",
-		BaseURL:        server.URL + "/legacy",
-		APIKey:         "gemini-key",
-		Model:          "gemini-2.5-flash",
-		TimeoutSeconds: 2,
-	})
-	require.NoError(t, err)
-
-	legacyConfig := moderationGeminiGenerationConfig("gemini-1.5-pro")
-	assert.NotContains(t, legacyConfig, "thinkingConfig")
+	// Unsafe content is blocked
+	unsafeContent := ModerationRequestContent{UserPrompt: "this is unsafe"}
+	err = PreflightModerationRequest(context.Background(), unsafeContent, config)
+	assert.ErrorIs(t, err, model.ErrModerationConversationBlocked)
 }
 
 func TestProcessContentModerationQueueSkipsCustomEndpointWithoutAPIKey(t *testing.T) {
@@ -707,69 +691,47 @@ func TestValidateContentModerationURL(t *testing.T) {
 	}
 }
 
-func TestReviewModerationTurnUsesCustomPolicyPrompt(t *testing.T) {
-	var capturedInstructions string
-	server := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
-		body, err := io.ReadAll(request.Body)
-		require.NoError(t, err)
-		var payload map[string]any
-		require.NoError(t, common.Unmarshal(body, &payload))
-		if inst, ok := payload["instructions"].(string); ok {
-			capturedInstructions = inst
-		} else if sysInst, ok := payload["systemInstruction"].(map[string]any); ok {
-			if parts, ok := sysInst["parts"].([]any); ok && len(parts) > 0 {
-				if partMap, ok := parts[0].(map[string]any); ok {
-					capturedInstructions, _ = partMap["text"].(string)
-				}
-			}
-		}
-		writer.Header().Set("Content-Type", "application/json")
-		decisionJSON := `{"decision":"allow","actor":"none","severity":"none","categories":[],"confidence":0,"reason_code":"safe"}`
-		response := map[string]any{"output_text": decisionJSON}
-		responseBody, err := common.Marshal(response)
-		require.NoError(t, err)
-		_, err = writer.Write(responseBody)
-		require.NoError(t, err)
+func TestPreflightModerationRequestFailureModes(t *testing.T) {
+	// Server returns 500 error
+	server := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, _ *http.Request) {
+		writer.WriteHeader(http.StatusInternalServerError)
+		_, _ = writer.Write([]byte(`{"error":"upstream down"}`))
 	}))
 	defer server.Close()
 
 	originalHTTPClient := httpClient
-	t.Cleanup(func() {
-		httpClient = originalHTTPClient
-	})
 	httpClient = server.Client()
+	t.Cleanup(func() { httpClient = originalHTTPClient })
 
-	turn := &model.ModerationTurn{
-		SystemPrompt:   model.ModerationText("system"),
-		UserPrompt:     model.ModerationText("user"),
-		AssistantReply: model.ModerationText("assistant"),
-		ResponseStatus: "success",
+	content := ModerationRequestContent{UserPrompt: "test prompt"}
+
+	// 1. Closed mode fails on upstream error
+	configClosed := setting.ContentModerationSetting{
+		Enabled:          true,
+		PreflightEnabled: true,
+		BaseURL:          server.URL + "/v1",
+		APIKey:           "test-key",
+		Model:            "omni-moderation-latest",
+		FailureMode:      "closed",
+		TimeoutSeconds:   2,
+		MaxRetries:       1,
 	}
+	err := PreflightModerationRequest(context.Background(), content, configClosed)
+	assert.Error(t, err)
 
-	// 1. Custom policy prompt
-	customPrompt := "Custom moderation classifier instructions."
-	_, _, err := reviewModerationTurn(context.Background(), turn, setting.ContentModerationSetting{
-		Provider:       "responses",
-		BaseURL:        server.URL,
-		APIKey:         "responses-key",
-		Model:          "moderation-model",
-		PolicyPrompt:   customPrompt,
-		TimeoutSeconds: 2,
-	})
-	require.NoError(t, err)
-	assert.Equal(t, customPrompt, capturedInstructions)
-
-	// 2. Empty policy prompt falls back to DefaultContentModerationPolicyPrompt
-	_, _, err = reviewModerationTurn(context.Background(), turn, setting.ContentModerationSetting{
-		Provider:       "responses",
-		BaseURL:        server.URL,
-		APIKey:         "responses-key",
-		Model:          "moderation-model",
-		PolicyPrompt:   "",
-		TimeoutSeconds: 2,
-	})
-	require.NoError(t, err)
-	assert.Equal(t, setting.DefaultContentModerationPolicyPrompt, capturedInstructions)
+	// 2. Open mode allows through on upstream error
+	configOpen := setting.ContentModerationSetting{
+		Enabled:          true,
+		PreflightEnabled: true,
+		BaseURL:          server.URL + "/v1",
+		APIKey:           "test-key",
+		Model:            "omni-moderation-latest",
+		FailureMode:      "open",
+		TimeoutSeconds:   2,
+		MaxRetries:       1,
+	}
+	err = PreflightModerationRequest(context.Background(), content, configOpen)
+	assert.NoError(t, err)
 }
 
 func TestResolveModerationConversationID(t *testing.T) {
