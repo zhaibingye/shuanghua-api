@@ -731,6 +731,7 @@ export function ChannelMutateDrawer({
   const keyMode = form.watch('key_mode')
   const currentGroups = form.watch('group')
   const currentType = form.watch('type')
+  const currentTaskPluginKey = form.watch('task_plugin_key')
   const currentStatus = form.watch('status')
   const currentBaseUrl = form.watch('base_url')
   const currentKey = form.watch('key')
@@ -3097,6 +3098,16 @@ export function ChannelMutateDrawer({
                                       <FormDescription>
                                         <div className='flex flex-col gap-2'>
                                           <span>{keyDescription}</span>
+                                          {currentType ===
+                                            CHANNEL_TYPE_TASK_PLUGIN &&
+                                            currentTaskPluginKey ===
+                                              'doubao' && (
+                                              <span className='text-muted-foreground'>
+                                                {t(
+                                                  'Doubao composite credentials: use ARK_API_KEY|MEDIAKIT_API_KEY to enable MediaKit enhancement. Use a task usage expression to price enhancement_seconds; ordinary Ark tasks keep enhancement_resolution=none.'
+                                                )}
+                                              </span>
+                                            )}
                                           {isBatchMode && (
                                             <Button
                                               type='button'
