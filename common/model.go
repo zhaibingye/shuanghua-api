@@ -13,14 +13,9 @@ var (
 		"dall-e-3",
 		"dall-e-2",
 		"gpt-image-1",
-		"gpt-image-2",
 		"prefix:imagen-",
 		"flux-",
 		"flux.1-",
-		"nano-banana",
-		"flash-image",
-		"pro-image",
-		"image-generation",
 	}
 	OpenAITextModels = []string{
 		"gpt-",
@@ -32,51 +27,12 @@ var (
 )
 
 func IsOpenAIResponseOnlyModel(modelName string) bool {
-	modelName = modelBaseName(modelName)
-	for _, model := range OpenAIResponseOnlyModels {
-		if modelName == model || strings.HasPrefix(modelName, model+"-") {
+	for _, m := range OpenAIResponseOnlyModels {
+		if strings.Contains(modelName, m) {
 			return true
 		}
 	}
 	return false
-}
-
-// IsOpenAIGPTModel reports whether the mapped upstream model belongs to the
-// gpt-* family. Provider namespaces such as "openai/gpt-5" are ignored and
-// matching is case-insensitive.
-func IsOpenAIGPTModel(modelName string) bool {
-	modelName = modelBaseName(modelName)
-	return modelName == "gpt" || strings.HasPrefix(modelName, "gpt-")
-}
-
-// IsOpenAIChatAndResponsesModel identifies model families exposed through both
-// standard OpenAI entrypoints by CLIProxyAPI's Codex-backed proxy.
-func IsOpenAIChatAndResponsesModel(modelName string) bool {
-	modelName = modelBaseName(modelName)
-	return strings.HasPrefix(modelName, "gpt-5") ||
-		strings.HasPrefix(modelName, "codex-") ||
-		strings.Contains(modelName, "-codex")
-}
-
-// IsOpenAICodexImageModel identifies CLIProxyAPI's standalone image models.
-// GPT-5.6 image generation itself remains a built-in Chat/Responses tool.
-func IsOpenAICodexImageModel(modelName string) bool {
-	modelName = modelBaseName(modelName)
-	return modelName == "gpt-image-1.5" || modelName == "gpt-image-2"
-}
-
-// IsXAIVideoModel reports whether a model uses xAI's asynchronous video API.
-func IsXAIVideoModel(modelName string) bool {
-	modelName = modelBaseName(modelName)
-	return strings.HasPrefix(modelName, "grok-imagine-video")
-}
-
-func modelBaseName(modelName string) string {
-	modelName = strings.ToLower(strings.TrimSpace(modelName))
-	if separator := strings.LastIndex(modelName, "/"); separator >= 0 {
-		return modelName[separator+1:]
-	}
-	return modelName
 }
 
 func IsImageGenerationModel(modelName string) bool {

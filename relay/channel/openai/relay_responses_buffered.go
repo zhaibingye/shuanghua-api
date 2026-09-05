@@ -112,7 +112,7 @@ func OaiResponsesBufferedStreamHandler(c *gin.Context, info *relaycommon.RelayIn
 			info.CountBillableToolCall(dto.BuildInCallFunctionCall, output.Name)
 		}
 	}
-	usage := relayconvert.UsageFromResponsesUsage(finalResponse.Usage)
+	usage := relayconvert.NormalizeResponsesUsage(finalResponse.Usage)
 	responseBody, err := common.Marshal(finalResponse)
 	if err != nil {
 		return nil, types.NewOpenAIError(err, types.ErrorCodeJsonMarshalFailed, http.StatusInternalServerError)

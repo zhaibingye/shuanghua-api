@@ -20,8 +20,8 @@ import { z } from 'zod'
 
 import {
   CLAUDE_FIELD_PASSTHROUGH_TYPES,
-  CHANNEL_TYPE_DOUBAO_VIDEO_MEDIAKIT,
   CHANNEL_TYPE_NEW_API,
+  CHANNEL_TYPE_TASK_PLUGIN,
   CHANNEL_STATUS,
   ERROR_MESSAGES,
   FIELD_PASSTHROUGH_TYPES,
@@ -37,7 +37,6 @@ import {
   stringifyAdvancedCustomConfig,
   validateAdvancedCustomConfig,
 } from './advanced-custom'
-import { composeMediaKitKey, DEFAULT_MEDIAKIT_BASE_URL } from './mediakit-key'
 
 // ============================================================================
 // Form Validation Schema
@@ -203,6 +202,7 @@ export const channelFormSchema = z
     name: z.string().min(1, ERROR_MESSAGES.REQUIRED_NAME),
     type: z.number().min(0, ERROR_MESSAGES.REQUIRED_TYPE),
     base_url: z.string().optional(),
+    task_plugin_key: z.string().optional(),
     key: z.string(),
     openai_organization: z.string().optional(),
     models: z.string().min(1, ERROR_MESSAGES.REQUIRED_MODELS),
@@ -280,9 +280,6 @@ export const channelFormSchema = z
     allow_speed: z.boolean().optional(), // Anthropic: speed mode control
     claude_beta_query: z.boolean().optional(), // Anthropic: beta query passthrough
     disable_task_polling_sleep: z.boolean().optional(),
-    ark_api_key: z.string().optional(),
-    mediakit_api_key: z.string().optional(),
-    mediakit_base_url: z.string().optional(),
     // Upstream model update settings (stored in settings JSON)
     upstream_model_update_check_enabled: z.boolean().optional(),
     upstream_model_update_auto_sync_enabled: z.boolean().optional(),
@@ -290,14 +287,9 @@ export const channelFormSchema = z
   })
   .superRefine((data, ctx) => {
     if (
-      [
-        3,
-        8,
-        36,
-        45,
-        CHANNEL_TYPE_DOUBAO_VIDEO_MEDIAKIT,
-        CHANNEL_TYPE_NEW_API,
-      ].includes(data.type) &&
+      [3, 8, 36, 45, CHANNEL_TYPE_NEW_API, CHANNEL_TYPE_TASK_PLUGIN].includes(
+        data.type
+      ) &&
       !data.base_url?.trim()
     ) {
       addRequiredIssue(
@@ -305,6 +297,12 @@ export const channelFormSchema = z
         'base_url',
         'Base URL is required for this channel type'
       )
+    }
+    if (
+      data.type === CHANNEL_TYPE_TASK_PLUGIN &&
+      !data.task_plugin_key?.trim()
+    ) {
+      addRequiredIssue(ctx, 'task_plugin_key', 'Task plugin is required')
     }
 
     if (data.type === CHANNEL_TYPE_ADVANCED_CUSTOM) {
@@ -344,16 +342,6 @@ export const channelFormSchema = z
         'other',
         'This channel type requires additional configuration'
       )
-    }
-
-    if (data.type === CHANNEL_TYPE_DOUBAO_VIDEO_MEDIAKIT) {
-      if (data.multi_key_mode && data.multi_key_mode !== 'single') {
-        addRequiredIssue(
-          ctx,
-          'multi_key_mode',
-          'DoubaoVideoMediaKit channels do not support batch creation'
-        )
-      }
     }
 
     if (data.type === 57) {
@@ -427,6 +415,7 @@ export const CHANNEL_FORM_DEFAULT_VALUES: ChannelFormValues = {
   name: '',
   type: 1,
   base_url: '',
+  task_plugin_key: '',
   key: '',
   openai_organization: '',
   models: '',
@@ -472,9 +461,6 @@ export const CHANNEL_FORM_DEFAULT_VALUES: ChannelFormValues = {
   allow_speed: false,
   claude_beta_query: false,
   disable_task_polling_sleep: false,
-  ark_api_key: '',
-  mediakit_api_key: '',
-  mediakit_base_url: DEFAULT_MEDIAKIT_BASE_URL,
   upstream_model_update_check_enabled: false,
   upstream_model_update_auto_sync_enabled: false,
   upstream_model_update_ignored_models: '',
@@ -493,6 +479,7 @@ export function transformChannelToFormDefaults(
 ): ChannelFormValues {
   // Parse channel extra settings from setting field
   let extraSettings = {
+    task_plugin_key: '',
     force_format: false,
     thinking_to_content: false,
     proxy: '',
@@ -511,6 +498,7 @@ export function transformChannelToFormDefaults(
         parsed.http2_connection_shards
       )
       extraSettings = {
+        task_plugin_key: parsed.task_plugin_key || '',
         force_format: parsed.force_format || false,
         thinking_to_content: parsed.thinking_to_content || false,
         proxy: parsed.proxy || '',
@@ -539,7 +527,6 @@ export function transformChannelToFormDefaults(
   let allowSpeed = false
   let claudeBetaQuery = false
   let disableTaskPollingSleep = false
-  let mediaKitBaseUrl = DEFAULT_MEDIAKIT_BASE_URL
   let upstreamModelUpdateCheckEnabled = false
   let upstreamModelUpdateAutoSyncEnabled = false
   let upstreamModelUpdateIgnoredModels = ''
@@ -560,7 +547,6 @@ export function transformChannelToFormDefaults(
       allowSpeed = parsed.allow_speed === true
       claudeBetaQuery = parsed.claude_beta_query === true
       disableTaskPollingSleep = parsed.disable_task_polling_sleep === true
-      mediaKitBaseUrl = parsed.mediakit_base_url || DEFAULT_MEDIAKIT_BASE_URL
       upstreamModelUpdateCheckEnabled =
         parsed.upstream_model_update_check_enabled === true
       upstreamModelUpdateAutoSyncEnabled =
@@ -619,9 +605,6 @@ export function transformChannelToFormDefaults(
     allow_speed: allowSpeed,
     claude_beta_query: claudeBetaQuery,
     disable_task_polling_sleep: disableTaskPollingSleep,
-    ark_api_key: '',
-    mediakit_api_key: '',
-    mediakit_base_url: mediaKitBaseUrl,
     allow_safety_identifier: allowSafetyIdentifier,
     upstream_model_update_check_enabled: upstreamModelUpdateCheckEnabled,
     upstream_model_update_auto_sync_enabled: upstreamModelUpdateAutoSyncEnabled,
@@ -635,6 +618,10 @@ export function transformChannelToFormDefaults(
  */
 export function buildSettingJSON(formData: ChannelFormValues): string {
   const settingObj: Record<string, unknown> = {
+    task_plugin_key:
+      formData.type === CHANNEL_TYPE_TASK_PLUGIN
+        ? formData.task_plugin_key?.trim() || ''
+        : undefined,
     force_format: formData.force_format || false,
     thinking_to_content: formData.thinking_to_content || false,
     proxy: formData.proxy?.trim() || '',
@@ -756,17 +743,6 @@ function buildSettingsJSON(formData: ChannelFormValues): string {
   settingsObj.disable_task_polling_sleep =
     formData.disable_task_polling_sleep === true
 
-  if (formData.type === CHANNEL_TYPE_DOUBAO_VIDEO_MEDIAKIT) {
-    const mediaKitBaseUrl = formData.mediakit_base_url?.trim()
-    if (mediaKitBaseUrl) {
-      settingsObj.mediakit_base_url = mediaKitBaseUrl
-    } else if ('mediakit_base_url' in settingsObj) {
-      delete settingsObj.mediakit_base_url
-    }
-  } else if ('mediakit_base_url' in settingsObj) {
-    delete settingsObj.mediakit_base_url
-  }
-
   // Upstream model update settings (for model-fetchable channel types)
   if (MODEL_FETCHABLE_TYPES.has(formData.type)) {
     settingsObj.upstream_model_update_check_enabled =
@@ -848,14 +824,6 @@ export function transformFormDataToCreatePayload(formData: ChannelFormValues): {
     other: formData.other || '',
   }
 
-  if (formData.type === CHANNEL_TYPE_DOUBAO_VIDEO_MEDIAKIT) {
-    const arkAPIKey = formData.ark_api_key?.trim() || ''
-    const mediaKitAPIKey = formData.mediakit_api_key?.trim() || ''
-    if (arkAPIKey && mediaKitAPIKey) {
-      channel.key = composeMediaKitKey(arkAPIKey, mediaKitAPIKey)
-    }
-  }
-
   // Clean up empty strings to null for optional fields
   Object.keys(channel).forEach((key) => {
     if (channel[key as keyof typeof channel] === '') {
@@ -903,13 +871,8 @@ export function transformFormDataToUpdatePayload(
     other: formData.other || '',
   }
 
-  if (formData.type === CHANNEL_TYPE_DOUBAO_VIDEO_MEDIAKIT) {
-    const arkAPIKey = formData.ark_api_key?.trim() || ''
-    const mediaKitAPIKey = formData.mediakit_api_key?.trim() || ''
-    if (arkAPIKey && mediaKitAPIKey) {
-      payload.key = composeMediaKitKey(arkAPIKey, mediaKitAPIKey)
-    }
-  } else if (formData.key && formData.key.trim()) {
+  // Only include key if it was changed (not empty)
+  if (formData.key && formData.key.trim()) {
     payload.key = formData.key
   }
 

@@ -6,26 +6,6 @@ import "github.com/QuantumNous/new-api/constant"
 func GetEndpointTypesByChannelType(channelType int, modelName string) []constant.EndpointType {
 	var endpointTypes []constant.EndpointType
 	switch channelType {
-	case constant.ChannelTypeOpenAI:
-		if IsOpenAICodexImageModel(modelName) {
-			endpointTypes = []constant.EndpointType{constant.EndpointTypeImageGeneration}
-		} else if IsOpenAIResponseOnlyModel(modelName) {
-			endpointTypes = []constant.EndpointType{constant.EndpointTypeOpenAIResponse}
-		} else if IsOpenAIChatAndResponsesModel(modelName) {
-			endpointTypes = []constant.EndpointType{
-				constant.EndpointTypeOpenAI,
-				constant.EndpointTypeOpenAIResponse,
-				constant.EndpointTypeOpenAIResponseCompact,
-				constant.EndpointTypeOpenAIAlphaSearch,
-			}
-		} else if IsOpenAIGPTModel(modelName) {
-			endpointTypes = []constant.EndpointType{
-				constant.EndpointTypeOpenAI,
-				constant.EndpointTypeOpenAIResponse,
-			}
-		} else {
-			endpointTypes = []constant.EndpointType{constant.EndpointTypeOpenAI}
-		}
 	case constant.ChannelTypeJina:
 		endpointTypes = []constant.EndpointType{constant.EndpointTypeJinaRerank}
 	//case constant.ChannelTypeMidjourney, constant.ChannelTypeMidjourneyPlus:
@@ -43,17 +23,11 @@ func GetEndpointTypesByChannelType(channelType int, modelName string) []constant
 	case constant.ChannelTypeVertexAi:
 		fallthrough
 	case constant.ChannelTypeGemini:
-		// Chat hub converts Anthropic Messages → Chat → generateContent, so
-		// /v1/messages is a first-class way to call Gemini/Vertex models.
-		endpointTypes = []constant.EndpointType{constant.EndpointTypeGemini, constant.EndpointTypeOpenAI, constant.EndpointTypeAnthropic}
+		endpointTypes = []constant.EndpointType{constant.EndpointTypeGemini, constant.EndpointTypeOpenAI}
 	case constant.ChannelTypeOpenRouter: // OpenRouter 只支持 OpenAI 端点
 		endpointTypes = []constant.EndpointType{constant.EndpointTypeOpenAI}
 	case constant.ChannelTypeXai:
-		if IsXAIVideoModel(modelName) {
-			endpointTypes = []constant.EndpointType{constant.EndpointTypeOpenAIVideo}
-		} else {
-			endpointTypes = []constant.EndpointType{constant.EndpointTypeOpenAI, constant.EndpointTypeOpenAIResponse}
-		}
+		endpointTypes = []constant.EndpointType{constant.EndpointTypeOpenAI, constant.EndpointTypeOpenAIResponse}
 	case constant.ChannelTypeSora:
 		endpointTypes = []constant.EndpointType{constant.EndpointTypeOpenAIVideo}
 	case constant.ChannelTypeSub2API, constant.ChannelTypeNewAPI:
@@ -78,17 +52,9 @@ func GetEndpointTypesByChannelType(channelType int, modelName string) []constant
 			endpointTypes = []constant.EndpointType{constant.EndpointTypeOpenAI}
 		}
 	}
-	if IsImageGenerationModel(modelName) && !containsEndpointType(endpointTypes, constant.EndpointTypeImageGeneration) {
+	if IsImageGenerationModel(modelName) {
+		// add to first
 		endpointTypes = append([]constant.EndpointType{constant.EndpointTypeImageGeneration}, endpointTypes...)
 	}
 	return endpointTypes
-}
-
-func containsEndpointType(endpointTypes []constant.EndpointType, target constant.EndpointType) bool {
-	for _, endpointType := range endpointTypes {
-		if endpointType == target {
-			return true
-		}
-	}
-	return false
 }

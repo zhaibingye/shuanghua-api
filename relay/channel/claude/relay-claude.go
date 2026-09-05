@@ -20,6 +20,10 @@ import (
 	"github.com/gin-gonic/gin"
 )
 
+func stopReasonClaude2OpenAI(reason string) string {
+	return relayconvert.StopReasonClaudeToOpenAI(reason)
+}
+
 func maybeMarkClaudeRefusal(c *gin.Context, stopReason string) {
 	if c == nil {
 		return
@@ -29,7 +33,26 @@ func maybeMarkClaudeRefusal(c *gin.Context, stopReason string) {
 	}
 }
 
+func StreamResponseClaude2OpenAI(claudeResponse *dto.ClaudeResponse) *dto.ChatCompletionsStreamResponse {
+	return relayconvert.StreamResponseClaude2OpenAI(claudeResponse)
+}
+
+func ResponseClaude2OpenAI(claudeResponse *dto.ClaudeResponse) *dto.OpenAITextResponse {
+	return relayconvert.ResponseClaude2OpenAI(claudeResponse)
+}
+
 type ClaudeResponseInfo = relayconvert.ClaudeResponseInfo
+
+func cacheCreationTokensForOpenAIUsage(usage *dto.Usage) int {
+	if usage == nil {
+		return 0
+	}
+	openAIUsage := relayconvert.UsageFromClaudeUsage(usage)
+	if openAIUsage == nil {
+		return 0
+	}
+	return openAIUsage.PromptTokens - usage.PromptTokens - usage.PromptTokensDetails.CachedTokens
+}
 
 func buildOpenAIStyleUsageFromClaudeUsage(usage *dto.Usage) dto.Usage {
 	mapped := relayconvert.UsageFromClaudeUsage(usage)
@@ -61,7 +84,7 @@ func FormatClaudeResponseInfo(claudeResponse *dto.ClaudeResponse, oaiResponse *d
 	return relayconvert.FormatClaudeResponseInfo(claudeResponse, oaiResponse, claudeInfo)
 }
 
-func HandleStreamResponseData(c *gin.Context, info *relaycommon.RelayInfo, claudeInfo *ClaudeResponseInfo, data string, state *relayconvert.ResponseStreamState) *types.NewAPIError {
+func HandleStreamResponseData(c *gin.Context, info *relaycommon.RelayInfo, claudeInfo *ClaudeResponseInfo, data string) *types.NewAPIError {
 	var claudeResponse dto.ClaudeResponse
 	err := common.UnmarshalJsonStr(data, &claudeResponse)
 	if err != nil {
@@ -77,29 +100,116 @@ func HandleStreamResponseData(c *gin.Context, info *relaycommon.RelayInfo, claud
 	if claudeResponse.Delta != nil && claudeResponse.Delta.StopReason != nil {
 		maybeMarkClaudeRefusal(c, *claudeResponse.Delta.StopReason)
 	}
+	if info.RelayFormat == types.RelayFormatClaude {
+		FormatClaudeResponseInfo(&claudeResponse, nil, claudeInfo)
 
-	FormatClaudeResponseInfo(&claudeResponse, nil, claudeInfo)
-	if claudeResponse.Type == "message_start" && claudeResponse.Message != nil && claudeResponse.Message.Model != "" {
-		info.UpstreamModelName = claudeResponse.Message.Model
-	}
-	countClaudeStreamBillableTools(c, info, &claudeResponse)
-
-	if info.RelayFormat == types.RelayFormatClaude || info.RelayFormat == "" {
-		if claudeResponse.Type == "message_delta" && !shouldSkipClaudeMessageDeltaUsagePatch(info) {
-			data = patchClaudeMessageDeltaUsageData(data, buildMessageDeltaPatchUsage(&claudeResponse, claudeInfo))
+		if claudeResponse.Type == "message_start" {
+			// message_start, 获取usage
+			if claudeResponse.Message != nil {
+				info.UpstreamModelName = claudeResponse.Message.Model
+			}
+		} else if claudeResponse.Type == "message_delta" {
+			// 确保 message_delta 的 usage 包含完整的 input_tokens 和 cache 相关字段
+			// 解决 AWS Bedrock 等上游返回的 message_delta 缺少这些字段的问题
+			if !shouldSkipClaudeMessageDeltaUsagePatch(info) {
+				data = patchClaudeMessageDeltaUsageData(data, buildMessageDeltaPatchUsage(&claudeResponse, claudeInfo))
+			}
 		}
+		countClaudeStreamBillableTools(c, info, &claudeResponse)
 		helper.ClaudeChunkData(c, claudeResponse, data)
-		return nil
+	} else if info.RelayFormat == types.RelayFormatOpenAI {
+		state, err := claudeToChatStreamState(info)
+		if err != nil {
+			return types.NewError(err, types.ErrorCodeBadResponseBody)
+		}
+		response, err := state.ConvertChunk(&claudeResponse)
+		if err != nil {
+			return types.NewError(err, types.ErrorCodeBadResponseBody)
+		}
+
+		if !FormatClaudeResponseInfo(&claudeResponse, response, claudeInfo) {
+			return nil
+		}
+
+		countClaudeStreamBillableTools(c, info, &claudeResponse)
+
+		if response == nil {
+			return nil
+		}
+		err = helper.ObjectData(c, response)
+		if err != nil {
+			logger.LogError(c, "send_stream_response_failed: "+err.Error())
+		}
+	} else if info.RelayFormat == types.RelayFormatGemini {
+		state, err := claudeToGeminiStreamState(info)
+		if err != nil {
+			return types.NewError(err, types.ErrorCodeBadResponseBody)
+		}
+		results, err := service.ConvertStreamResponseChunk(c, info, state, &claudeResponse)
+		if err != nil {
+			return types.NewError(err, types.ErrorCodeBadResponseBody)
+		}
+		if !FormatClaudeResponseInfo(&claudeResponse, nil, claudeInfo) {
+			return nil
+		}
+		countClaudeStreamBillableTools(c, info, &claudeResponse)
+		if sendErr := sendGeminiStreamResults(c, results); sendErr != nil {
+			return sendErr
+		}
 	}
-	if state == nil {
-		return types.NewError(fmt.Errorf("missing stream state for %s client", info.RelayFormat), types.ErrorCodeBadResponseBody)
+	return nil
+}
+
+func claudeToChatStreamState(info *relaycommon.RelayInfo) (*relayconvert.ClaudeToChatStreamState, error) {
+	if info != nil && info.ClaudeToChatStreamState != nil {
+		state, ok := info.ClaudeToChatStreamState.(*relayconvert.ClaudeToChatStreamState)
+		if !ok || state == nil {
+			return nil, fmt.Errorf("invalid Claude-to-Chat stream state %T", info.ClaudeToChatStreamState)
+		}
+		return state, nil
 	}
-	results, convErr := relayconvert.ConvertStreamResponseChunk(c, info, state, &claudeResponse)
-	if convErr != nil {
-		return types.NewError(convErr, types.ErrorCodeBadResponseBody)
+
+	state := relayconvert.NewClaudeToChatStreamState()
+	if info != nil {
+		info.ClaudeToChatStreamState = state
 	}
-	if writeErr := helper.WriteProjectedStreamResults(c, info, results); writeErr != nil {
-		logger.LogError(c, "send_stream_response_failed: "+writeErr.Error())
+	return state, nil
+}
+
+func claudeToGeminiStreamState(info *relaycommon.RelayInfo) (*relayconvert.ResponseStreamState, error) {
+	if info != nil && info.ChatToGeminiStreamState != nil {
+		state, ok := info.ChatToGeminiStreamState.(*relayconvert.ResponseStreamState)
+		if !ok || state == nil {
+			return nil, fmt.Errorf("invalid Claude-to-Gemini stream state %T", info.ChatToGeminiStreamState)
+		}
+		return state, nil
+	}
+
+	state, err := relayconvert.NewResponseStreamState(types.RelayFormatClaude, types.RelayFormatGemini, relayconvert.ResponseStreamOptions{})
+	if err != nil {
+		return nil, err
+	}
+	if info != nil {
+		info.ChatToGeminiStreamState = state
+	}
+	return state, nil
+}
+
+func sendGeminiStreamResults(c *gin.Context, results []relayconvert.ResponseResult) *types.NewAPIError {
+	for _, result := range results {
+		geminiResponse, ok := result.Value.(*dto.GeminiChatResponse)
+		if !ok {
+			return types.NewError(fmt.Errorf("expected Gemini stream response, got %T", result.Value), types.ErrorCodeBadResponseBody)
+		}
+		if geminiResponse == nil {
+			continue
+		}
+		data, err := common.Marshal(geminiResponse)
+		if err != nil {
+			return types.NewError(err, types.ErrorCodeBadResponseBody)
+		}
+		c.Render(-1, common.CustomEvent{Data: "data: " + string(data)})
+		_ = helper.FlushWriter(c)
 	}
 	return nil
 }
@@ -143,9 +253,7 @@ func HandleStreamFinalResponse(c *gin.Context, info *relaycommon.RelayInfo, clau
 	if claudeInfo.Usage != nil {
 		claudeInfo.Usage.UsageSemantic = "anthropic"
 	}
-	if claudeInfo.Usage != nil && claudeInfo.Usage.BillingUsage == nil {
-		claudeInfo.Usage.BillingUsage = dto.NewClaudeMessagesBillingUsage(buildMessageDeltaPatchUsage(nil, claudeInfo))
-	}
+	relayconvert.FinalizeClaudeStreamBillingUsage(claudeInfo)
 
 	if info.RelayFormat == types.RelayFormatClaude {
 		//
@@ -159,38 +267,21 @@ func HandleStreamFinalResponse(c *gin.Context, info *relaycommon.RelayInfo, clau
 			}
 		}
 		helper.Done(c)
+	} else if info.RelayFormat == types.RelayFormatGemini {
+		state, err := claudeToGeminiStreamState(info)
+		if err != nil {
+			common.SysLog("error creating Gemini stream state: " + err.Error())
+			return
+		}
+		results, err := service.FinalizeStreamResponse(c, info, state)
+		if err != nil {
+			common.SysLog("error finalizing Gemini stream response: " + err.Error())
+			return
+		}
+		if sendErr := sendGeminiStreamResults(c, results); sendErr != nil {
+			common.SysLog("send final Gemini stream response failed: " + sendErr.Error())
+		}
 	}
-}
-
-func NewProjectedStreamState(info *relaycommon.RelayInfo, claudeInfo *ClaudeResponseInfo) (*relayconvert.ResponseStreamState, error) {
-	if info == nil || claudeInfo == nil {
-		return nil, nil
-	}
-	if info.RelayFormat == types.RelayFormatClaude || info.RelayFormat == "" {
-		return nil, nil
-	}
-	return relayconvert.NewResponseStreamState(types.RelayFormatClaude, info.RelayFormat, relayconvert.ResponseStreamOptions{
-		ID:      claudeInfo.ResponseId,
-		Model:   info.UpstreamModelName,
-		Created: claudeInfo.Created,
-	})
-}
-
-func FinalizeProjectedStream(c *gin.Context, info *relaycommon.RelayInfo, claudeInfo *ClaudeResponseInfo, state *relayconvert.ResponseStreamState) *types.NewAPIError {
-	if state == nil {
-		return nil
-	}
-	if claudeInfo != nil && claudeInfo.Usage != nil {
-		state.SetUsage(claudeInfo.Usage)
-	}
-	finalResults, err := relayconvert.FinalizeStreamResponse(c, info, state)
-	if err != nil {
-		return types.NewError(err, types.ErrorCodeBadResponseBody)
-	}
-	if writeErr := helper.WriteProjectedStreamResults(c, info, finalResults); writeErr != nil {
-		logger.LogError(c, "finalize projected stream failed: "+writeErr.Error())
-	}
-	return nil
 }
 
 func ClaudeStreamHandler(c *gin.Context, resp *http.Response, info *relaycommon.RelayInfo) (*dto.Usage, *types.NewAPIError) {
@@ -201,22 +292,15 @@ func ClaudeStreamHandler(c *gin.Context, resp *http.Response, info *relaycommon.
 		ResponseText: strings.Builder{},
 		Usage:        &dto.Usage{},
 	}
-	streamState, stateErr := NewProjectedStreamState(info, claudeInfo)
-	if stateErr != nil {
-		return nil, types.NewError(stateErr, types.ErrorCodeBadResponseBody)
-	}
 	var err *types.NewAPIError
 	helper.StreamScannerHandler(c, resp, info, func(data string, sr *helper.StreamResult) {
-		err = HandleStreamResponseData(c, info, claudeInfo, data, streamState)
+		err = HandleStreamResponseData(c, info, claudeInfo, data)
 		if err != nil {
 			sr.Stop(err)
 		}
 	})
 	if err != nil {
 		return nil, err
-	}
-	if finalErr := FinalizeProjectedStream(c, info, claudeInfo, streamState); finalErr != nil {
-		return nil, finalErr
 	}
 
 	HandleStreamFinalResponse(c, info, claudeInfo)
@@ -241,7 +325,10 @@ func HandleClaudeResponseData(c *gin.Context, info *relaycommon.RelayInfo, claud
 		claudeInfo.Usage.CompletionTokens = claudeResponse.Usage.OutputTokens
 		claudeInfo.Usage.TotalTokens = claudeResponse.Usage.InputTokens + claudeResponse.Usage.OutputTokens
 		claudeInfo.Usage.UsageSemantic = "anthropic"
-		claudeInfo.Usage.BillingUsage = dto.NewClaudeMessagesBillingUsage(claudeResponse.Usage)
+		claudeInfo.Usage.BillingUsage = dto.CloneBillingUsage(claudeResponse.Usage.BillingUsage)
+		if claudeInfo.Usage.BillingUsage == nil {
+			claudeInfo.Usage.BillingUsage = dto.NewClaudeMessagesBillingUsage(claudeResponse.Usage)
+		}
 		claudeInfo.Usage.PromptTokensDetails.CachedTokens = claudeResponse.Usage.CacheReadInputTokens
 		claudeInfo.Usage.PromptTokensDetails.CachedCreationTokens = claudeResponse.Usage.CacheCreationInputTokens
 		claudeInfo.Usage.ClaudeCacheCreation5mTokens = claudeResponse.Usage.GetCacheCreation5mTokens()
@@ -249,19 +336,45 @@ func HandleClaudeResponseData(c *gin.Context, info *relaycommon.RelayInfo, claud
 	}
 	var responseData []byte
 	switch info.RelayFormat {
-	case types.RelayFormatClaude, "":
-		responseData = data
-	default:
-		result, convErr := relayconvert.ConvertResponse(c, info, info.RelayFormat, &claudeResponse)
-		if convErr != nil {
-			return types.NewError(convErr, types.ErrorCodeBadResponseBody)
-		}
-		if openaiResponse, ok := result.Value.(*dto.OpenAITextResponse); ok {
-			openaiResponse.Usage = buildOpenAIStyleUsageFromClaudeUsage(claudeInfo.Usage)
-		}
-		responseData, err = common.Marshal(result.Value)
+	case types.RelayFormatOpenAI:
+		openaiResponse := ResponseClaude2OpenAI(&claudeResponse)
+		openaiResponse.Usage = buildOpenAIStyleUsageFromClaudeUsage(claudeInfo.Usage)
+		responseData, err = common.Marshal(openaiResponse)
 		if err != nil {
 			return types.NewError(err, types.ErrorCodeBadResponseBody)
+		}
+	case types.RelayFormatOpenAIResponses:
+		convertResult, err := service.ConvertResponse(c, info, types.RelayFormatOpenAIResponses, &claudeResponse)
+		if err != nil {
+			return types.NewError(err, types.ErrorCodeBadResponseBody)
+		}
+		responsesResponse, ok := convertResult.Value.(*dto.OpenAIResponsesResponse)
+		if !ok {
+			return types.NewError(fmt.Errorf("expected OpenAI Responses response, got %T", convertResult.Value), types.ErrorCodeBadResponseBody)
+		}
+		if responseID := helper.GetResponseID(c); responseID != "" {
+			responsesResponse.ID = responseID
+		}
+		responseData, err = common.Marshal(responsesResponse)
+		if err != nil {
+			return types.NewError(err, types.ErrorCodeBadResponseBody)
+		}
+	case types.RelayFormatClaude:
+		responseData = data
+	case types.RelayFormatGemini:
+		{
+			convertResult, convertErr := service.ConvertResponse(c, info, types.RelayFormatGemini, &claudeResponse)
+			if convertErr != nil {
+				return types.NewError(convertErr, types.ErrorCodeBadResponseBody)
+			}
+			geminiResponse, ok := convertResult.Value.(*dto.GeminiChatResponse)
+			if !ok {
+				return types.NewError(fmt.Errorf("expected Gemini generateContent response, got %T", convertResult.Value), types.ErrorCodeBadResponseBody)
+			}
+			responseData, err = common.Marshal(geminiResponse)
+			if err != nil {
+				return types.NewError(err, types.ErrorCodeBadResponseBody)
+			}
 		}
 	}
 

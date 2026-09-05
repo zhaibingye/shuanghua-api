@@ -41,11 +41,9 @@ import {
 import type { User } from '../types'
 import { DataTableRowActions } from './data-table-row-actions'
 import { UserQuotaCell } from './user-quota-cell'
-import { useUsers } from './users-provider'
 
 export function useUsersColumns(): ColumnDef<User>[] {
   const { t } = useTranslation()
-  const { setOpen, setCurrentRow } = useUsers()
   return [
     {
       id: 'select',
@@ -238,17 +236,12 @@ export function useUsersColumns(): ColumnDef<User>[] {
                     label={`${t('Invited')}: ${affCount}`}
                     variant='neutral'
                     copyable={false}
-                    className='cursor-pointer'
-                    onClick={(event) => {
-                      event.stopPropagation()
-                      setCurrentRow(user)
-                      setOpen('invitees')
-                    }}
+                    className='cursor-help'
                   />
                 }
               />
               <TooltipContent>
-                <p className='text-xs'>{t('Click to view invited users')}</p>
+                <p className='text-xs'>{t('Number of users invited')}</p>
               </TooltipContent>
             </Tooltip>
             <Tooltip>

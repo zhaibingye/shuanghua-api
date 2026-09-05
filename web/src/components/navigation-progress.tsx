@@ -36,7 +36,7 @@ export function NavigationProgress() {
     <LoadingBar
       color='var(--muted-foreground)'
       ref={ref}
-      shadow
+      shadow={true}
       height={2}
     />
   )

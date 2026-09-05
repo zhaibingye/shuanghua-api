@@ -109,7 +109,6 @@ export interface ChannelOtherSettings {
   upstream_model_update_last_check_time?: number
   upstream_model_update_last_detected_models?: string[]
   advanced_custom?: AdvancedCustomConfig
-  mediakit_base_url?: string
 }
 
 export interface AdvancedCustomConfig {
@@ -119,7 +118,6 @@ export interface AdvancedCustomConfig {
 export interface AdvancedCustomRoute {
   incoming_path?: string
   upstream_path?: string
-  target?: AdvancedCustomTarget
   converter?: AdvancedCustomConverter
   models?: string[]
   auth?: AdvancedCustomRouteAuth
@@ -130,13 +128,6 @@ export interface AdvancedCustomRouteAuth {
   name?: string
   value?: string
 }
-
-export type AdvancedCustomTarget =
-  | 'native'
-  | 'chat'
-  | 'responses'
-  | 'claude'
-  | 'gemini'
 
 export type AdvancedCustomConverter =
   | 'none'

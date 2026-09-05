@@ -9,14 +9,14 @@
   "output": [
     {
       "type": "message",
-      "id": "msg_chatcmpl-<uuid>_0",
+      "id": "chatcmpl-<uuid>_msg_0",
       "status": "completed",
       "role": "assistant",
       "content": [
         {
           "type": "output_text",
           "text": "The answer is 42.",
-          "annotations": null
+          "annotations": []
         }
       ],
       "quality": "",
@@ -24,13 +24,13 @@
     },
     {
       "type": "function_call",
-      "id": "fc_call_ca96334fffc1_0",
+      "id": "call_<uuid>",
       "status": "completed",
       "role": "",
       "content": null,
       "quality": "",
       "size": "",
-      "call_id": "call_ca96334fffc1_0",
+      "call_id": "call_<uuid>",
       "name": "get_weather",
       "arguments": "{\"city\":\"Paris\"}"
     }
@@ -65,7 +65,7 @@
     },
     "prompt_tokens_details": {
       "cached_tokens": 0,
-      "text_tokens": 10,
+      "text_tokens": 0,
       "audio_tokens": 0,
       "image_tokens": 0
     },
@@ -75,9 +75,14 @@
       "image_tokens": 0,
       "reasoning_tokens": 2
     },
-    "input_tokens": 0,
-    "output_tokens": 0,
-    "input_tokens_details": null,
+    "input_tokens": 10,
+    "output_tokens": 7,
+    "input_tokens_details": {
+      "cached_tokens": 0,
+      "text_tokens": 10,
+      "audio_tokens": 0,
+      "image_tokens": 0
+    },
     "claude_cache_creation_5_m_tokens": 0,
     "claude_cache_creation_1_h_tokens": 0
   },

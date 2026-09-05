@@ -173,9 +173,7 @@ export function AmountDiscountVisualEditor({
                     className='font-mono'
                     copyable={false}
                   >
-                    {t('{{percent}} OFF', {
-                      percent: formatPercentage(discount.discountRate),
-                    })}
+                    {formatPercentage(discount.discountRate)} {t('off')}
                   </StatusBadge>
                 ),
               },
@@ -211,9 +209,7 @@ export function AmountDiscountVisualEditor({
                       className='font-mono'
                       copyable={false}
                     >
-                      {t('{{percent}} OFF', {
-                        percent: formatPercentage(discount.discountRate),
-                      })}
+                      {formatPercentage(discount.discountRate)} {t('off')}
                     </StatusBadge>
                   </div>
                   <div className='flex gap-1'>

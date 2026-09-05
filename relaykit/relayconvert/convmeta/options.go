@@ -1,6 +1,6 @@
 package convmeta
 
-import "strings"
+import "github.com/QuantumNous/new-api/relaykit/types"
 
 // Options is the per-request snapshot of host configuration that converters
 // consult. The host fills it from its settings system when constructing the
@@ -9,6 +9,13 @@ import "strings"
 type Options struct {
 	Claude ClaudeOptions
 	Gemini GeminiOptions
+
+	// ToolLossPolicy controls whether a cross-protocol conversion may omit or
+	// approximate built-in-tool semantics. The zero value uses the allow
+	// policy: conversion succeeds and every loss is returned as a diagnostic.
+	// safe/strict rejection is request-phase opt-in only; response and stream
+	// conversion never reject regardless of this field.
+	ToolLossPolicy types.ConversionLossPolicy
 
 	// OpenRouterDialect marks the upstream as OpenRouter's OpenAI-compatible
 	// surface, which accepts extra fields (reasoning config, cache_control on
@@ -20,11 +27,16 @@ type Options struct {
 	// suffix must be kept on the outgoing model name (host blacklist lookup).
 	// Nil means "never preserve".
 	PreserveThinkingSuffix func(modelName string) bool
+
+	// PreserveEffortTail reports real model IDs whose names already end in an
+	// effort-like token (for example qwen-max). Nil means "never preserve".
+	PreserveEffortTail func(modelName string) bool
 }
 
 type ClaudeOptions struct {
-	// ThinkingAdapterEnabled turns "-thinking"-suffixed OpenAI model names
-	// into Claude extended-thinking requests.
+	// ThinkingAdapterEnabled controls whether suffix-derived reasoning intent
+	// is rendered onto Claude thinking / output_config. Suffix parsing itself
+	// is the host entry layer's job (standalone users call Parse* themselves).
 	ThinkingAdapterEnabled bool
 	// ThinkingAdapterBudgetTokensPercentage sizes thinking budget_tokens as a
 	// fraction of max_tokens when the adapter fires.
@@ -38,11 +50,16 @@ type ClaudeOptions struct {
 	// standalone relaykit users must supply one or guarantee max_tokens on
 	// every request.
 	DefaultMaxTokens func(modelName string) int
+	// WebSearchToolVersion selects the Claude hosted web-search tool version
+	// emitted by cross-protocol conversion. Empty keeps the compatibility
+	// baseline web_search_20250305.
+	WebSearchToolVersion string
 }
 
 type GeminiOptions struct {
-	// ThinkingAdapterEnabled maps -thinking/-nothinking/effort suffixes to
-	// Gemini thinkingConfig.
+	// ThinkingAdapterEnabled controls whether suffix-derived reasoning intent
+	// is rendered onto Gemini thinkingConfig. Suffix parsing itself is the
+	// host entry layer's job (standalone users call Parse* themselves).
 	ThinkingAdapterEnabled bool
 	// ThinkingAdapterBudgetTokensPercentage sizes thinkingBudget as a fraction
 	// of maxOutputTokens when the adapter fires.
@@ -65,19 +82,8 @@ func (o *ClaudeOptions) DefaultMaxTokensFor(modelName string) (int, bool) {
 	return o.DefaultMaxTokens(modelName), true
 }
 
-func (o *GeminiOptions) SupportsImagineModel(modelNames ...string) bool {
-	if o == nil || o.SupportsImagine == nil {
-		return false
-	}
-	for _, modelName := range modelNames {
-		if strings.TrimSpace(modelName) == "" {
-			continue
-		}
-		if o.SupportsImagine(modelName) {
-			return true
-		}
-	}
-	return false
+func (o *GeminiOptions) SupportsImagineModel(modelName string) bool {
+	return o != nil && o.SupportsImagine != nil && o.SupportsImagine(modelName)
 }
 
 func (o *GeminiOptions) SafetySettingFor(category string) string {
@@ -89,4 +95,15 @@ func (o *GeminiOptions) SafetySettingFor(category string) string {
 
 func (o *Options) ShouldPreserveThinkingSuffix(modelName string) bool {
 	return o != nil && o.PreserveThinkingSuffix != nil && o.PreserveThinkingSuffix(modelName)
+}
+
+func (o *Options) ShouldPreserveEffortTail(modelName string) bool {
+	return o != nil && o.PreserveEffortTail != nil && o.PreserveEffortTail(modelName)
+}
+
+func (o *Options) EffectiveToolLossPolicy() types.ConversionLossPolicy {
+	if o == nil || o.ToolLossPolicy == "" {
+		return types.ConversionLossPolicyAllow
+	}
+	return o.ToolLossPolicy
 }

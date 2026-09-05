@@ -4,7 +4,6 @@
       "Type": "response.created",
       "Payload": {
         "type": "response.created",
-        "sequence_number": 0,
         "response": {
           "id": "stream_fixed",
           "object": "response",
@@ -33,89 +32,54 @@
       "Type": "response.output_item.added",
       "Payload": {
         "type": "response.output_item.added",
-        "sequence_number": 1,
         "item": {
           "type": "message",
-          "id": "msg_stream_fixed_0",
+          "id": "stream_fixed_msg_0",
           "status": "in_progress",
           "role": "assistant",
           "content": [],
           "quality": "",
           "size": ""
         },
-        "output_index": 0,
-        "item_id": "msg_stream_fixed_0"
-      }
-    },
-    {
-      "Type": "response.content_part.added",
-      "Payload": {
-        "type": "response.content_part.added",
-        "sequence_number": 2,
-        "output_index": 0,
-        "content_index": 0,
-        "item_id": "msg_stream_fixed_0",
-        "part": {
-          "type": "output_text",
-          "text": ""
-        }
+        "output_index": 0
       }
     },
     {
       "Type": "response.output_text.delta",
       "Payload": {
         "type": "response.output_text.delta",
-        "sequence_number": 3,
         "delta": "Hello",
         "output_index": 0,
         "content_index": 0,
-        "item_id": "msg_stream_fixed_0"
+        "item_id": "stream_fixed_msg_0"
       }
     },
     {
       "Type": "response.output_text.delta",
       "Payload": {
         "type": "response.output_text.delta",
-        "sequence_number": 4,
         "delta": " world",
         "output_index": 0,
         "content_index": 0,
-        "item_id": "msg_stream_fixed_0"
+        "item_id": "stream_fixed_msg_0"
       }
     },
     {
       "Type": "response.output_text.done",
       "Payload": {
         "type": "response.output_text.done",
-        "sequence_number": 5,
-        "text": "Hello world",
         "output_index": 0,
         "content_index": 0,
-        "item_id": "msg_stream_fixed_0"
-      }
-    },
-    {
-      "Type": "response.content_part.done",
-      "Payload": {
-        "type": "response.content_part.done",
-        "sequence_number": 6,
-        "output_index": 0,
-        "content_index": 0,
-        "item_id": "msg_stream_fixed_0",
-        "part": {
-          "type": "output_text",
-          "text": "Hello world"
-        }
+        "item_id": "stream_fixed_msg_0"
       }
     },
     {
       "Type": "response.output_item.done",
       "Payload": {
         "type": "response.output_item.done",
-        "sequence_number": 7,
         "item": {
           "type": "message",
-          "id": "msg_stream_fixed_0",
+          "id": "stream_fixed_msg_0",
           "status": "completed",
           "role": "assistant",
           "content": [
@@ -128,15 +92,13 @@
           "quality": "",
           "size": ""
         },
-        "output_index": 0,
-        "item_id": "msg_stream_fixed_0"
+        "output_index": 0
       }
     },
     {
       "Type": "response.completed",
       "Payload": {
         "type": "response.completed",
-        "sequence_number": 8,
         "response": {
           "id": "stream_fixed",
           "object": "response",
@@ -148,7 +110,7 @@
           "output": [
             {
               "type": "message",
-              "id": "msg_stream_fixed_0",
+              "id": "stream_fixed_msg_0",
               "status": "completed",
               "role": "assistant",
               "content": [
@@ -175,6 +137,21 @@
             "prompt_tokens": 4,
             "completion_tokens": 2,
             "total_tokens": 6,
+            "billing_usage": {
+              "source": "gemini_chat",
+              "semantic": "gemini",
+              "gemini_usage_metadata": {
+                "promptTokenCount": 4,
+                "toolUsePromptTokenCount": 0,
+                "candidatesTokenCount": 2,
+                "totalTokenCount": 6,
+                "thoughtsTokenCount": 0,
+                "cachedContentTokenCount": 0,
+                "promptTokensDetails": [],
+                "toolUsePromptTokensDetails": [],
+                "candidatesTokensDetails": []
+              }
+            },
             "prompt_tokens_details": {
               "cached_tokens": 0,
               "text_tokens": 0,
@@ -189,7 +166,12 @@
             },
             "input_tokens": 4,
             "output_tokens": 2,
-            "input_tokens_details": null,
+            "input_tokens_details": {
+              "cached_tokens": 0,
+              "text_tokens": 4,
+              "audio_tokens": 0,
+              "image_tokens": 0
+            },
             "claude_cache_creation_5_m_tokens": 0,
             "claude_cache_creation_1_h_tokens": 0
           },
@@ -220,7 +202,7 @@
     },
     "prompt_tokens_details": {
       "cached_tokens": 0,
-      "text_tokens": 4,
+      "text_tokens": 0,
       "audio_tokens": 0,
       "image_tokens": 0
     },
@@ -230,9 +212,14 @@
       "image_tokens": 0,
       "reasoning_tokens": 0
     },
-    "input_tokens": 0,
-    "output_tokens": 0,
-    "input_tokens_details": null,
+    "input_tokens": 4,
+    "output_tokens": 2,
+    "input_tokens_details": {
+      "cached_tokens": 0,
+      "text_tokens": 4,
+      "audio_tokens": 0,
+      "image_tokens": 0
+    },
     "claude_cache_creation_5_m_tokens": 0,
     "claude_cache_creation_1_h_tokens": 0
   }

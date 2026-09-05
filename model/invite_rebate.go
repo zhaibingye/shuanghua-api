@@ -3,6 +3,10 @@ package model
 import (
 	"errors"
 	"fmt"
+	"strings"
+
+	"github.com/go-sql-driver/mysql"
+	"github.com/jackc/pgx/v5/pgconn"
 
 	"github.com/QuantumNous/new-api/common"
 	"github.com/QuantumNous/new-api/logger"
@@ -105,6 +109,18 @@ func calcInviteRebateQuota(topUp *TopUp, percent float64) int {
 // success. It is safe to call on webhook retries: a unique TopUpId keeps the
 // payout at most once, and already-success callbacks can recover a grant that
 // crashed between invitee credit and rebate.
+func isDuplicateKeyError(err error) bool {
+	var mysqlErr *mysql.MySQLError
+	if errors.As(err, &mysqlErr) {
+		return mysqlErr.Number == 1062
+	}
+	var pgErr *pgconn.PgError
+	if errors.As(err, &pgErr) {
+		return pgErr.Code == "23505"
+	}
+	return strings.Contains(strings.ToLower(err.Error()), "unique constraint") || strings.Contains(strings.ToLower(err.Error()), "constraint failed")
+}
+
 func applyInviteRebate(topUp *TopUp) {
 	result, err := grantInviteRebate(topUp)
 	if err != nil {
@@ -238,6 +254,19 @@ func EnsureInviteStatisticsSynced() error {
 		return err
 	}
 	return UpdateOption(inviteStatisticsSyncedOptionKey, "true")
+}
+
+func GetInviteesByInviterId(inviterId int, pageInfo *common.PageInfo) ([]*User, int64, error) {
+	var users []*User
+	var total int64
+	query := DB.Unscoped().Model(&User{}).Where("inviter_id = ?", inviterId)
+	if err := query.Count(&total).Error; err != nil {
+		return nil, 0, err
+	}
+	if err := query.Omit("password", "access_token").Limit(pageInfo.GetPageSize()).Offset(pageInfo.GetStartIdx()).Find(&users).Error; err != nil {
+		return nil, 0, err
+	}
+	return users, total, nil
 }
 
 func syncInviteStatistics() error {

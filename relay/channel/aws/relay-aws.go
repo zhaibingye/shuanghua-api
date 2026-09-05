@@ -276,10 +276,6 @@ func awsStreamHandler(c *gin.Context, info *relaycommon.RelayInfo, a *Adaptor) (
 		ResponseText: strings.Builder{},
 		Usage:        &dto.Usage{},
 	}
-	streamState, stateErr := claude.NewProjectedStreamState(info, claudeInfo)
-	if stateErr != nil {
-		return types.NewError(stateErr, types.ErrorCodeBadResponseBody), nil
-	}
 
 	events := stream.Events()
 streamLoop:
@@ -298,7 +294,7 @@ streamLoop:
 			switch v := event.(type) {
 			case *bedrockruntimeTypes.ResponseStreamMemberChunk:
 				info.SetFirstResponseTime()
-				respErr := claude.HandleStreamResponseData(c, info, claudeInfo, string(v.Value.Bytes), streamState)
+				respErr := claude.HandleStreamResponseData(c, info, claudeInfo, string(v.Value.Bytes))
 				if respErr != nil {
 					return respErr, nil
 				}
@@ -313,9 +309,6 @@ streamLoop:
 	}
 
 	_ = stream.Close()
-	if finalErr := claude.FinalizeProjectedStream(c, info, claudeInfo, streamState); finalErr != nil {
-		return finalErr, nil
-	}
 	claude.HandleStreamFinalResponse(c, info, claudeInfo)
 	return nil, claudeInfo.Usage
 }

@@ -277,7 +277,8 @@ export function PrefillGroupFormDrawer({
                   <FormItem>
                     <FormLabel>Group Type</FormLabel>
                     <Select
-                      items={PREFILL_GROUP_TYPES.map((type) => ({
+                      items={[
+                        ...PREFILL_GROUP_TYPES.map((type) => ({
                           value: type.value,
                           label: (
                             <div className='flex flex-col text-left'>
@@ -290,7 +291,8 @@ export function PrefillGroupFormDrawer({
                               </span>
                             </div>
                           ),
-                        }))}
+                        })),
+                      ]}
                       value={field.value}
                       onValueChange={(value) =>
                         value !== null &&

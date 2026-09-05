@@ -156,7 +156,7 @@ export function AmountDiscountDialog({
                     placeholder={t('e.g., 100')}
                     {...field}
                     onChange={(e) =>
-                      field.onChange(Number.parseInt(e.target.value) || 0)
+                      field.onChange(parseInt(e.target.value) || 0)
                     }
                     disabled={isEditMode}
                   />
@@ -188,7 +188,7 @@ export function AmountDiscountDialog({
                     placeholder={t('e.g., 0.95')}
                     {...field}
                     onChange={(e) =>
-                      field.onChange(Number.parseFloat(e.target.value) || 0)
+                      field.onChange(parseFloat(e.target.value) || 0)
                     }
                   />
                 </FormControl>
@@ -196,10 +196,8 @@ export function AmountDiscountDialog({
                   {t('Final price multiplier (0.95 = 5% discount')}
                   {discountPercentage > 0 && (
                     <span className='ml-1 font-medium text-green-600 dark:text-green-400'>
-                      ={' '}
-                      {t('{{percent}} OFF', {
-                        percent: `${discountPercentage}%`,
-                      })}
+                      = {discountPercentage}
+                      {t('% off')}
                     </span>
                   )}
                   )

@@ -18,11 +18,11 @@ type Adaptor struct {
 }
 
 func (a *Adaptor) ConvertGeminiRequest(c *gin.Context, info *relaycommon.RelayInfo, request *dto.GeminiChatRequest) (any, error) {
-	return channel.ForeignTextRequest("submodel.ConvertGeminiRequest")
+	return nil, errors.New("submodel channel: endpoint not supported")
 }
 
 func (a *Adaptor) ConvertClaudeRequest(*gin.Context, *relaycommon.RelayInfo, *dto.ClaudeRequest) (any, error) {
-	return channel.ForeignTextRequest("submodel.ConvertClaudeRequest")
+	return nil, errors.New("submodel channel: endpoint not supported")
 }
 
 func (a *Adaptor) ConvertAudioRequest(c *gin.Context, info *relaycommon.RelayInfo, request dto.AudioRequest) (io.Reader, error) {
@@ -70,15 +70,8 @@ func (a *Adaptor) DoRequest(c *gin.Context, info *relaycommon.RelayInfo, request
 }
 
 func (a *Adaptor) DoResponse(c *gin.Context, resp *http.Response, info *relaycommon.RelayInfo) (usage any, err *types.NewAPIError) {
-	if info.TextPlanApplies() {
-		return openai.DoPlannedTextResponse(c, info, resp)
-	}
 	if info.IsStream {
-		if openai.IsLegacyCompletionsEndpoint(info) {
-			usage, err = openai.OaiCompletionsStreamHandler(c, info, resp)
-		} else {
-			usage, err = openai.OaiStreamHandler(c, info, resp)
-		}
+		usage, err = openai.OaiStreamHandler(c, info, resp)
 	} else {
 		usage, err = openai.OpenaiHandler(c, info, resp)
 	}

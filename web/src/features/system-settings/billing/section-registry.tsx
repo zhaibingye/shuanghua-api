@@ -63,10 +63,6 @@ const BILLING_SECTIONS = [
           PreConsumedQuota: settings.PreConsumedQuota,
           QuotaForInviter: settings.QuotaForInviter,
           QuotaForInvitee: settings.QuotaForInvitee,
-          invite_rebate_setting: {
-            times: settings['invite_rebate_setting.times'],
-            percent: settings['invite_rebate_setting.percent'],
-          },
           TopUpLink: settings.TopUpLink,
           general_setting: {
             docs_link: settings['general_setting.docs_link'],
@@ -115,17 +111,7 @@ const BILLING_SECTIONS = [
         modelDefaults={getModelDefaults(settings)}
         groupDefaults={getGroupDefaults(settings)}
         toolPricesDefault={settings['tool_price_setting.prices']}
-        seedancePricesDefault={settings['seedance_price_setting.prices']}
-        seedanceSuperResolutionDefault={
-          settings['seedance_price_setting.super_resolution']
-        }
-        visibleTabs={[
-          'models',
-          'unset-models',
-          'tool-prices',
-          'seedance-prices',
-          'upstream-sync',
-        ]}
+        visibleTabs={['models', 'unset-models', 'tool-prices', 'upstream-sync']}
       />
     ),
   },

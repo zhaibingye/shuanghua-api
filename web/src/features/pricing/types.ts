@@ -27,6 +27,22 @@ export type PricingVendor = {
   description?: string
 }
 
+export type BillingUsageUnit = 'second' | 'count' | 'token' | 'credit'
+
+export type BillingUsageFieldSchema = {
+  type?: 'number' | 'boolean'
+  unit?: BillingUsageUnit
+  enum?: string[]
+  description?: string | Record<string, string>
+}
+
+export type BillingUsageSchema = Record<string, BillingUsageFieldSchema>
+
+export type BillingUsageExample = {
+  label: string
+  facts: Record<string, string | number>
+}
+
 export type PricingModel = {
   id: number
   model_name: string
@@ -54,8 +70,10 @@ export type PricingModel = {
   billing_mode?: string
   /** Raw expression describing dynamic / tiered billing */
   billing_expr?: string
-  /** Seedance token + optional super-resolution public quote */
-  seedance?: SeedancePublicPricing
+  /** Task-plugin usage facts and their billing units. */
+  billing_usage_schema?: BillingUsageSchema
+  /** Display-only labeled usage vectors for pricing examples. */
+  billing_usage_examples?: BillingUsageExample[]
   /** Pricing version returned by backend, useful for cache busting */
   pricing_version?: string
   /**
@@ -111,16 +129,3 @@ export type PriceType =
   | 'audio_input'
   | 'audio_output'
 export type QuotaType = 0 | 1 // 0: token-based, 1: per-request
-
-export type SeedancePublicPricing = {
-  super_resolution?: boolean
-  tokens_per_second?: Record<string, number>
-  text_unit_price_rmb?: Record<string, number>
-  video_unit_price_rmb?: Record<string, number>
-  text_per_second_rmb?: Record<string, number>
-  video_per_second_rmb?: Record<string, number>
-  sr_480_to_720_rmb?: number
-  sr_720_to_1080_rmb?: number
-  output_text_per_second_rmb?: Record<string, number>
-  output_video_per_second_rmb?: Record<string, number>
-}

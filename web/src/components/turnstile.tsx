@@ -61,7 +61,7 @@ export function Turnstile({
       return
     }
     const scriptId = 'cf-turnstile'
-    if (document.querySelector(`#${scriptId}`)) return
+    if (document.getElementById(scriptId)) return
     const s = document.createElement('script')
     s.id = scriptId
     s.src =

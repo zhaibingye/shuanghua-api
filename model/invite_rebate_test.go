@@ -10,7 +10,14 @@ import (
 	"github.com/QuantumNous/new-api/setting/operation_setting"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+	"gorm.io/gorm"
 )
+
+func initInviteRebateSchema(t *testing.T) {
+	t.Helper()
+	require.NoError(t, DB.AutoMigrate(&InviteRebate{}))
+	require.NoError(t, DB.Session(&gorm.Session{AllowGlobalUpdate: true}).Delete(&InviteRebate{}).Error)
+}
 
 func withInviteRebateSetting(t *testing.T, times int, percent float64) {
 	t.Helper()
@@ -154,6 +161,7 @@ func TestBindInviterMarksNewInvitesEligible(t *testing.T) {
 
 func TestInsertPersistsInviteRebateEligibility(t *testing.T) {
 	truncateTables(t)
+	initInviteRebateSchema(t)
 
 	inviter := createInviteRebateUser(t, fmt.Sprintf("inviter-%d", time.Now().UnixNano()), 0, false, 0)
 	invitee := &User{
@@ -179,6 +187,7 @@ func TestInsertPersistsInviteRebateEligibility(t *testing.T) {
 
 func TestInviteRebatePaysInviterFromActualPayment(t *testing.T) {
 	truncateTables(t)
+	initInviteRebateSchema(t)
 	withInviteRebateSetting(t, 3, 15)
 	withInviteRebatePaymentEnv(t, true, 1)
 
@@ -203,6 +212,7 @@ func TestInviteRebatePaysInviterFromActualPayment(t *testing.T) {
 
 func TestInviteRebateSkipsLegacyInvitees(t *testing.T) {
 	truncateTables(t)
+	initInviteRebateSchema(t)
 	withInviteRebateSetting(t, 3, 15)
 	withInviteRebatePaymentEnv(t, true, 1)
 
@@ -220,6 +230,7 @@ func TestInviteRebateSkipsLegacyInvitees(t *testing.T) {
 
 func TestInviteRebateHonorsFirstNTopUps(t *testing.T) {
 	truncateTables(t)
+	initInviteRebateSchema(t)
 	withInviteRebateSetting(t, 1, 15)
 	withInviteRebatePaymentEnv(t, true, 1)
 
@@ -240,6 +251,7 @@ func TestInviteRebateHonorsFirstNTopUps(t *testing.T) {
 
 func TestInviteRebateIsIdempotentOnRetry(t *testing.T) {
 	truncateTables(t)
+	initInviteRebateSchema(t)
 	withInviteRebateSetting(t, 3, 15)
 	withInviteRebatePaymentEnv(t, true, 1)
 
@@ -278,6 +290,7 @@ func TestInviteRebateRequiresComplianceAndSetting(t *testing.T) {
 
 func TestInviteRebateIgnoresNonWalletProviders(t *testing.T) {
 	truncateTables(t)
+	initInviteRebateSchema(t)
 	withInviteRebateSetting(t, 3, 15)
 	withInviteRebatePaymentEnv(t, true, 1)
 
@@ -292,6 +305,7 @@ func TestInviteRebateIgnoresNonWalletProviders(t *testing.T) {
 
 func TestSyncInviteStatisticsBackfillsCountAndRevenue(t *testing.T) {
 	truncateTables(t)
+	initInviteRebateSchema(t)
 
 	inviter := createInviteRebateUser(t, "stats-inviter", 0, false, 0)
 	_ = createInviteRebateUser(t, "stats-invitee-1", inviter.Id, true, 0)

@@ -74,7 +74,7 @@ func TestValidateMultipartDirectNormalizesImageField(t *testing.T) {
 	storedReq, err := GetTaskRequest(context)
 	require.NoError(t, err)
 	require.Equal(t, []string{"https://example.com/first.png"}, storedReq.Images)
-	require.Equal(t, constant.TaskActionGenerate, info.Action)
+	require.Equal(t, constant.TaskActionImageToVideo, info.Action)
 }
 
 // TestTaskDurationBounds guards the billing invariant that user-supplied
@@ -130,7 +130,7 @@ func TestTaskDurationBounds(t *testing.T) {
 		})
 		t.Run(tt.name+" (basic task request)", func(t *testing.T) {
 			context, info := newContext(t, tt.body)
-			taskErr := ValidateBasicTaskRequest(context, info, constant.TaskActionGenerate)
+			taskErr := ValidateBasicTaskRequest(context, info, constant.TaskActionImageToVideo)
 			if tt.wantErr {
 				require.NotNil(t, taskErr)
 				require.Equal(t, "invalid_seconds", taskErr.Code)
@@ -139,39 +139,4 @@ func TestTaskDurationBounds(t *testing.T) {
 			}
 		})
 	}
-}
-
-func TestValidateTaskRequestProviderOptions(t *testing.T) {
-	gin.SetMode(gin.TestMode)
-
-	newContext := func() (*gin.Context, *RelayInfo) {
-		request := httptest.NewRequest(http.MethodPost, "/v1/video/generations", strings.NewReader(`{"model":"seedance","duration":-1}`))
-		request.Header.Set("Content-Type", "application/json")
-		context, _ := gin.CreateTestContext(httptest.NewRecorder())
-		context.Request = request
-		return context, &RelayInfo{TaskRelayInfo: &TaskRelayInfo{}}
-	}
-
-	t.Run("generic validation remains strict", func(t *testing.T) {
-		context, info := newContext()
-
-		taskErr := ValidateBasicTaskRequest(context, info, constant.TaskActionGenerate)
-
-		require.NotNil(t, taskErr)
-		assert.Equal(t, "invalid_request", taskErr.Code)
-	})
-
-	t.Run("provider can allow media-only adaptive duration", func(t *testing.T) {
-		context, info := newContext()
-
-		taskErr := ValidateTaskRequest(context, info, constant.TaskActionGenerate, TaskValidationOptions{
-			AllowEmptyPrompt:  true,
-			AllowAutoDuration: true,
-		})
-
-		require.Nil(t, taskErr)
-		storedReq, err := GetTaskRequest(context)
-		require.NoError(t, err)
-		assert.Equal(t, -1, storedReq.Duration)
-	})
 }

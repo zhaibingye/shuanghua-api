@@ -8,7 +8,7 @@ RelayKit 是从 [new-api](https://github.com/QuantumNous/new-api) 中拆分出�
 
 - 在 OpenAI Chat Completions、OpenAI Responses、Anthropic Messages 和 Gemini `generateContent` 之间转换
 - 同时支持请求、非流式响应和增量流式响应
-- 自动根据 DTO 类型识别源协议，经内部 IR 投影到目标格式（`From → IR → To`）
+- 自动根据 DTO 类型识别源协议，并选择内置的直接或多跳转换路径
 - 返回转换器 ID、质量等级、实际转换步骤和统一 usage，方便审计与调试
 - 支持常用的文本、多模态内容、工具调用、推理内容和 usage 映射
 - 作为独立 Go module 构建，不依赖 new-api 主模块、Gin、数据库或全局设置
@@ -21,15 +21,16 @@ RelayKit 是从 [new-api](https://github.com/QuantumNous/new-api) 中拆分出�
 |---|---:|---:|---:|---:|
 | OpenAI Chat | — | Good | Fair | Fair |
 | OpenAI Responses | Good | — | Fair | Fair |
-| Claude Messages | Fair | Fair | — | Fair |
-| Gemini | Fair | Fair | Fair | — |
+| Claude Messages | Fair | Fair | — | Discouraged |
+| Gemini | Fair | Fair | Discouraged | — |
 
 质量等级表示协议之间的语义匹配程度：
 
 - `Good`：两种协议的核心结构较接近
 - `Fair`：主要能力可转换，但部分协议特性可能需要适配或无法完整保留
+- `Discouraged`：目前需要经过中间协议转换，语义损失风险更高
 
-请求、非流式响应和流式事件经内部 IR 投影（`From → IR → To`），不再经 Chat Completions 两跳。宿主用 `TextPlan` 一次决定 native 格式与出站 path，不再改写 `RelayMode`。高级自定义路由选 `target`（native / chat / responses / claude / gemini），旧 converter ID 仅读取时映射。
+请求、非流式响应和流式响应均覆盖上述矩阵。实际采用的路径可从转换结果的 `Steps` 和 `Quality` 字段中读取。
 
 ## 安装
 
@@ -198,6 +199,9 @@ meta := &convmeta.Values{
 - OpenAI Chat 或 OpenAI Responses 转 Claude 时，Claude 请求必须具有 `max_tokens`。源请求未提供时，需要配置 `Claude.DefaultMaxTokens`，否则转换会返回错误。
 - RelayKit 不负责选择渠道或映射模型名。调用转换前，应将请求中的 `Model` 设置为目标上游使用的模型名。
 - 自定义 `convmeta.Meta` 的指针实现必须保证所有方法对 nil receiver 安全，完整约束见 `convmeta.Meta` 的接口注释。
+- 工具损耗策略默认是 `allow`：跨协议转换会成功，损耗以诊断形式返回。`safe` / `strict` 只在请求阶段 opt-in 拒绝；响应和流式转换无论策略如何都不会因损耗失败。
+- `ThinkingAdapterEnabled` 只控制是否把已解析的推理意图渲染到 Claude / Gemini 请求上。`-thinking` / `-nothinking` / effort 尾缀等命名约定不再由转换器自动解释。
+- 若你的入口仍使用这些模型名后缀，请在调用转换前自行调用 `relayconvert/reasoning` 的 `Parse*` 帮助函数，把结果写成 `dto.ReasoningConversionState`，并通过 `convmeta.Meta.ReasoningState()`（`convmeta.Values.ReasoningConversion`）传入。同时把发给上游的模型名裁成无后缀基础名。
 
 ## 多模态内容
 
@@ -223,7 +227,7 @@ relayconvert.SetMediaResolver(relayconvert.MediaResolver{
 - `Usage`：响应转换后的统一 token usage
 - `Stream`：结果是否来自流式转换
 
-如果需要固定转换路径，可使用 `ConvertRequestVia`。文本请求请按目标格式调用 `ConvertRequest`；按转换器 ID 的入口已删除。
+如果需要固定转换路径，可使用 `ConvertRequestVia`；如果需要按转换器 ID 执行，可使用 `ConvertRequestByID`、`ConvertResponseByID` 和 `NewResponseStreamStateByID`。
 
 ## 开发
 

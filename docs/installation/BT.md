@@ -58,7 +58,6 @@ version: '3'
 services:
   new-api:
     image: calciumion/new-api:latest
-    # 当前 fork 可使用: yeranshuanghua/shuanghua-api:latest
     container_name: new-api
     restart: always
     ports:
@@ -128,8 +127,6 @@ volumes:
 ```bash
 # 拉取最新镜像
 docker pull calciumion/new-api:latest
-# 当前 fork 镜像
-docker pull yeranshuanghua/shuanghua-api:latest
 
 # 重启容器
 docker-compose down && docker-compose up -d
@@ -143,7 +140,6 @@ docker-compose down && docker-compose up -d
 - [环境变量配置](https://docs.newapi.pro/zh/docs/installation/config-maintenance/environment-variables)
 - [常见问题](https://docs.newapi.pro/zh/docs/support/faq)
 - [GitHub 仓库](https://github.com/QuantumNous/new-api)
-- [当前 Fork 仓库](https://github.com/zhaibingye/shuanghua-api)
 
 ***
 
@@ -152,3 +148,4 @@ docker-compose down && docker-compose up -d
 ![宝塔面板 Docker 安装](https://github.com/user-attachments/assets/7a6fc03e-c457-45e4-b8f9-184508fc26b0)
 
 > ⚠️ 注意：密钥为环境变量 `SESSION_SECRET`，请务必设置！
+

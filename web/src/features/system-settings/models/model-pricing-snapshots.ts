@@ -61,15 +61,11 @@ export type ModelRow = ModelPricingSnapshot & {
 export const hasPricingValue = (value?: string) =>
   value !== undefined && value !== ''
 
-export const isBasePricingUnset = (
-  snapshot?: ModelPricingSnapshot,
-  hasExternalPricing?: (modelName: string) => boolean
-) =>
+export const isBasePricingUnset = (snapshot?: ModelPricingSnapshot) =>
   !snapshot ||
   (snapshot.billingMode !== 'tiered_expr' &&
     !hasPricingValue(snapshot.price) &&
-    !hasPricingValue(snapshot.ratio) &&
-    !hasExternalPricing?.(snapshot.name))
+    !hasPricingValue(snapshot.ratio))
 
 const toNumberOrNull = (value?: string) => {
   if (!hasPricingValue(value)) return null
@@ -233,7 +229,7 @@ export const buildModelSnapshots = ({
     ...Object.keys(billingExprMap),
   ])
 
-  return [...modelNames].map((name) => {
+  return Array.from(modelNames).map((name) => {
     const price = priceMap[name]?.toString() || ''
     const ratio = ratioMap[name]?.toString() || ''
     const cache = cacheMap[name]?.toString() || ''

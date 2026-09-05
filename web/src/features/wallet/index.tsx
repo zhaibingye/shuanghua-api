@@ -347,8 +347,6 @@ export function Wallet(props: WalletProps) {
                 topupInfo?.payment_compliance_confirmed !== false
               }
               loading={affiliateLoading}
-              rebateTimes={topupInfo?.invite_rebate?.times}
-              rebatePercent={topupInfo?.invite_rebate?.percent}
             />
           </div>
         </SectionPageLayout.Content>

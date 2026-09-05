@@ -1,6 +1,7 @@
 package gemini
 
 import (
+	"fmt"
 	"strconv"
 	"strings"
 
@@ -72,109 +73,126 @@ func AttachFirstTextThoughtSignature(opts *convmeta.Options, parts []dto.GeminiP
 	return false
 }
 
-func ApplyThinkingConfig(geminiRequest *dto.GeminiChatRequest, info convmeta.Meta, oaiRequest ...dto.GeneralOpenAIRequest) {
+func ApplyThinkingConfig(geminiRequest *dto.GeminiChatRequest, info convmeta.Meta, oaiRequest ...dto.GeneralOpenAIRequest) error {
+	opts := convmeta.OptionsOf(info)
 	if geminiRequest == nil {
-		return
+		return nil
 	}
 
-	opts := convmeta.OptionsOf(info)
 	modelName := convmeta.UpstreamModelName(info)
-	var intent reasoning.Intent
+	var source reasoning.Intent
+	crossProtocol := len(oaiRequest) > 0
 	if len(oaiRequest) > 0 {
-		intent = reasoning.IntentFromChatRequest(oaiRequest[0])
 		if modelName == "" {
 			modelName = oaiRequest[0].Model
 		}
+		var err error
+		source, err = reasoning.FromOpenAIChat(&oaiRequest[0])
+		if err != nil {
+			return err
+		}
 	}
 
-	if opts.Gemini.ThinkingAdapterEnabled {
-		switch {
-		case strings.Contains(modelName, "-thinking-") || strings.HasSuffix(modelName, "-thinking"):
-			applyGeminiThinkingLevel(geminiRequest, info, modelName, reasoning.LevelHigh)
-			return
-		case strings.HasSuffix(modelName, "-nothinking"):
-			applyGeminiThinkingDisabled(geminiRequest, modelName)
-			return
-		default:
-			if _, level, ok := reasoning.TrimEffortSuffix(modelName); ok && level != "" {
-				if reasoning.IsDisabledThinkingLevel(level) {
-					applyGeminiThinkingDisabled(geminiRequest, modelName)
-					return
+	baseModel := modelName
+	suffix := reasoning.IntentFromState(convmeta.ReasoningStateOf(info))
+	preserveSuffix := opts.ShouldPreserveThinkingSuffix(modelName)
+	if info != nil && opts.ShouldPreserveThinkingSuffix(info.GetOriginModelName()) {
+		preserveSuffix = true
+	}
+	if preserveSuffix {
+		suffix = reasoning.Intent{}
+	}
+	// Native Gemini requests already use the target protocol. Without a host
+	// modifier, read portable effort metadata without running the capability
+	// renderer or rewriting provider-native controls.
+	if !crossProtocol && suffix.IsEmpty() {
+		if info != nil {
+			effort := ""
+			if config := geminiRequest.GenerationConfig.ThinkingConfig; config != nil {
+				effort = config.ThinkingLevel
+				if effort == "" && config.ThinkingBudget != nil {
+					effort = string(reasoning.EffortFromBudget(*config.ThinkingBudget))
 				}
-				applyGeminiThinkingLevel(geminiRequest, info, modelName, level)
-				return
 			}
+			info.SetReasoningEffort(effort)
+		}
+		return nil
+	}
+	native, err := reasoning.FromGemini(geminiRequest)
+	if err != nil {
+		return err
+	}
+	source = reasoning.ResolveGeminiEnabledDefault(baseModel, source, geminiRequest.GenerationConfig.MaxOutputTokens)
+	if native.HasStrength() && source.HasStrength() {
+		equivalent, compareErr := reasoning.EquivalentGeminiStrength(baseModel, native, source)
+		if compareErr != nil {
+			return compareErr
+		}
+		if !equivalent {
+			nativeEffort := reasoning.EffectiveEffort(native)
+			sourceEffort := reasoning.EffectiveEffort(source)
+			return fmt.Errorf("%w for model %q: Gemini thinking_config effort %q differs from standard effort %q", reasoning.ErrEffortConflict, modelName, nativeEffort, sourceEffort)
+		}
+		// Native Gemini configuration is the lossless representation. Once the
+		// two controls are equivalent, retain only portable visibility metadata
+		// from the standard representation.
+		if native.IncludeThoughts == nil {
+			native.IncludeThoughts = source.IncludeThoughts
+		}
+		source = reasoning.Intent{}
+	}
+	explicit, err := reasoning.MergeExplicit(native, source, modelName)
+	if err != nil {
+		return err
+	}
+	if explicit.HasStrength() && suffix.HasStrength() {
+		equivalent, compareErr := reasoning.EquivalentGeminiStrength(baseModel, explicit, suffix)
+		if compareErr != nil {
+			return compareErr
+		}
+		if equivalent {
+			if explicit.IncludeThoughts == nil {
+				explicit.IncludeThoughts = suffix.IncludeThoughts
+			}
+			suffix = reasoning.Intent{}
 		}
 	}
+	requested, err := reasoning.MergeExplicitAndSuffix(explicit, suffix, modelName)
+	if err != nil {
+		return err
+	}
+	requested = reasoning.ResolveGeminiEnabledDefault(baseModel, requested, geminiRequest.GenerationConfig.MaxOutputTokens)
 
-	// A Gemini-native explicit budget/level is more precise than a generic
-	// OpenAI effort. Normalize it, remove conflicts, and keep it intact.
-	if cfg := geminiRequest.GenerationConfig.ThinkingConfig; cfg != nil && (cfg.ThinkingBudget != nil || cfg.ThinkingLevel != "") {
-		if cfg.ThinkingBudget != nil {
-			cfg.ThinkingLevel = ""
-		} else {
-			cfg.ThinkingLevel = reasoning.GeminiThinkingLevel(cfg.ThinkingLevel)
+	if native.HasStrength() && !suffix.HasStrength() {
+		if explicit.IncludeThoughts != nil {
+			geminiRequest.GenerationConfig.ThinkingConfig.IncludeThoughts = explicit.IncludeThoughts
 		}
-		if cfg.ThinkingBudget == nil && cfg.ThinkingLevel == "" && !cfg.IncludeThoughts {
-			geminiRequest.GenerationConfig.ThinkingConfig = nil
+		effort, err := reasoning.ValidateGeminiThinkingConfig(baseModel, geminiRequest.GenerationConfig.ThinkingConfig)
+		if err != nil {
+			return err
 		}
-		return
+		if info != nil && effort != "" {
+			info.SetReasoningEffort(string(effort))
+		}
+		return nil
 	}
-
-	switch {
-	case intent.Disabled:
-		applyGeminiThinkingDisabled(geminiRequest, modelName)
-	case intent.HasLevel():
-		applyGeminiThinkingLevel(geminiRequest, info, modelName, intent.Level)
-	case intent.WantsThoughts():
-		applyGeminiIncludeThoughts(geminiRequest)
-	case ModelSupportsThinking(modelName):
-		// includeThoughts controls response visibility, not reasoning effort.
-		applyGeminiIncludeThoughts(geminiRequest)
+	if requested.IsEmpty() {
+		return nil
 	}
-}
-
-func applyGeminiThinkingLevel(geminiRequest *dto.GeminiChatRequest, info convmeta.Meta, model, level string) {
-	include := true
-	projection := reasoning.ProjectGeminiThinking(model, false, nil, level, &include, reasoning.DisplayAuto)
-	applyGeminiThinkingProjection(geminiRequest, projection)
-	if info != nil {
-		info.SetReasoningEffort(reasoning.OpenAIReasoningEffort(level))
+	rendered, err := reasoning.RenderGemini(
+		baseModel,
+		requested,
+		geminiRequest.GenerationConfig.MaxOutputTokens,
+		opts.Gemini.ThinkingAdapterBudgetTokensPercentage,
+	)
+	if err != nil {
+		return err
 	}
-}
-
-func applyGeminiIncludeThoughts(geminiRequest *dto.GeminiChatRequest) {
-	if geminiRequest == nil {
-		return
+	geminiRequest.GenerationConfig.ThinkingConfig = rendered.Config
+	if info != nil && rendered.EffectiveEffort != "" {
+		info.SetReasoningEffort(string(rendered.EffectiveEffort))
 	}
-	if geminiRequest.GenerationConfig.ThinkingConfig == nil {
-		geminiRequest.GenerationConfig.ThinkingConfig = &dto.GeminiThinkingConfig{}
-	}
-	geminiRequest.GenerationConfig.ThinkingConfig.IncludeThoughts = true
-}
-
-func applyGeminiThinkingDisabled(geminiRequest *dto.GeminiChatRequest, model string) {
-	projection := reasoning.ProjectGeminiThinking(model, true, nil, "", nil, reasoning.DisplayHidden)
-	applyGeminiThinkingProjection(geminiRequest, projection)
-}
-
-func applyGeminiThinkingProjection(geminiRequest *dto.GeminiChatRequest, projection reasoning.GeminiThinkingProjection) {
-	if geminiRequest == nil {
-		return
-	}
-	if projection.ThinkingBudget == nil && projection.ThinkingLevel == "" && !projection.IncludeThoughts {
-		geminiRequest.GenerationConfig.ThinkingConfig = nil
-		return
-	}
-	geminiRequest.GenerationConfig.ThinkingConfig = &dto.GeminiThinkingConfig{
-		IncludeThoughts: projection.IncludeThoughts,
-		ThinkingBudget:  projection.ThinkingBudget,
-		ThinkingLevel:   projection.ThinkingLevel,
-	}
-}
-
-func ModelSupportsThinking(model string) bool {
-	return reasoning.GeminiModelSupportsThinking(model)
+	return nil
 }
 
 func ParseStopSequences(stop any) []string {

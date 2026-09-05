@@ -22,11 +22,11 @@ type Adaptor struct {
 }
 
 func (a *Adaptor) ConvertGeminiRequest(c *gin.Context, info *relaycommon.RelayInfo, request *dto.GeminiChatRequest) (any, error) {
-	return channel.ForeignTextRequest("codex.ConvertGeminiRequest")
+	return nil, errors.New("codex channel: endpoint not supported")
 }
 
 func (a *Adaptor) ConvertClaudeRequest(*gin.Context, *relaycommon.RelayInfo, *dto.ClaudeRequest) (any, error) {
-	return channel.ForeignTextRequest("codex.ConvertClaudeRequest")
+	return nil, errors.New("codex channel: /v1/messages endpoint not supported")
 }
 
 func (a *Adaptor) ConvertAudioRequest(c *gin.Context, info *relaycommon.RelayInfo, request dto.AudioRequest) (io.Reader, error) {
@@ -184,11 +184,6 @@ func (a *Adaptor) DoResponse(c *gin.Context, resp *http.Response, info *relaycom
 		return nil, types.NewError(errors.New("codex channel: alpha search response should be handled by AlphaSearchHelper"), types.ErrorCodeInvalidRequest)
 	case relayconstant.RelayModeResponsesCompact:
 		return openai.OaiResponsesCompactionHandler(c, resp)
-	}
-	if info.TextPlanApplies() && info.TextNative() == types.RelayFormatOpenAIResponses {
-		return openai.DoPlannedTextResponse(c, info, resp)
-	}
-	switch info.RelayMode {
 	case relayconstant.RelayModeResponses:
 		if info.IsStream {
 			return openai.OaiResponsesStreamHandler(c, info, resp)
@@ -212,14 +207,13 @@ func (a *Adaptor) GetChannelName() string {
 
 func (a *Adaptor) GetRequestURL(info *relaycommon.RelayInfo) (string, error) {
 	var path string
-	switch {
-	case info.RelayMode == relayconstant.RelayModeAlphaSearch:
-		path = "/backend-api/codex/alpha/search"
-	case info.RelayMode == relayconstant.RelayModeResponsesCompact:
-		path = "/backend-api/codex/responses/compact"
-	case info.RelayMode == relayconstant.RelayModeResponses,
-		info.TextPlanApplies() && info.TextNative() == types.RelayFormatOpenAIResponses:
+	switch info.RelayMode {
+	case relayconstant.RelayModeResponses:
 		path = "/backend-api/codex/responses"
+	case relayconstant.RelayModeResponsesCompact:
+		path = "/backend-api/codex/responses/compact"
+	case relayconstant.RelayModeAlphaSearch:
+		path = "/backend-api/codex/alpha/search"
 	default:
 		return "", errors.New("codex channel: only /v1/responses, /v1/responses/compact and /v1/alpha/search are supported")
 	}

@@ -69,7 +69,6 @@ type ModelRatioFormProps = {
   isSaving: boolean
   isResetting: boolean
   variant?: 'default' | 'unset'
-  seedancePricedModels?: (modelName: string) => boolean
 }
 
 type ModelJsonFieldName =
@@ -173,7 +172,6 @@ export const ModelRatioForm = memo(function ModelRatioForm({
   isSaving,
   isResetting,
   variant = 'default',
-  seedancePricedModels,
 }: ModelRatioFormProps) {
   const { t } = useTranslation()
   const isUnsetVariant = variant === 'unset'
@@ -294,7 +292,6 @@ export const ModelRatioForm = memo(function ModelRatioForm({
                 isUnsetVariant && enabledModelsQuery.isLoading
               }
               filterMode={isUnsetVariant ? 'unset' : 'all'}
-              seedancePricedModels={seedancePricedModels}
               onSave={handleSave}
               isSaving={isSaving}
               onChange={(field, value) => {

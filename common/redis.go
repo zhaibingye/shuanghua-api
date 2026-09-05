@@ -34,18 +34,17 @@ func InitRedisClient() (err error) {
 	SysLog("Redis is enabled")
 	opt, err := redis.ParseURL(os.Getenv("REDIS_CONN_STRING"))
 	if err != nil {
-		return fmt.Errorf("failed to parse Redis connection string: %w", err)
+		FatalLog("failed to parse Redis connection string: " + err.Error())
 	}
 	opt.PoolSize = GetEnvOrDefault("REDIS_POOL_SIZE", 10)
 	RDB = redis.NewClient(opt)
 
-	err = RetryTransient("redis", func() error {
-		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-		defer cancel()
-		return RDB.Ping(ctx).Err()
-	})
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	_, err = RDB.Ping(ctx).Result()
 	if err != nil {
-		return err
+		FatalLog("Redis ping test failed: " + err.Error())
 	}
 	if DebugEnabled {
 		SysLog(fmt.Sprintf("Redis connected to %s", opt.Addr))

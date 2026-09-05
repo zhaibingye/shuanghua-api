@@ -36,9 +36,11 @@ export type ContentModerationSettings = {
   user_whitelist?: string
   user_whitelist_ids?: number[]
   violation_retention_days?: number
-  provider: 'responses' | 'gemini'
+  provider: 'moderations' | 'responses' | 'gemini'
   base_url: string
   model: string
+  preflight_enabled?: boolean
+  failure_mode?: 'open' | 'closed'
   timeout_seconds: number
   max_retries: number
   normal_sample_rate: number
@@ -290,6 +292,7 @@ export type SiteSettings = {
   About: string
   HomePageContent: string
   ServerAddress: string
+  TaskPublicAddress: string
   'legal.user_agreement': string
   'legal.privacy_policy': string
   HeaderNavModules: string
@@ -373,11 +376,13 @@ export type ModelSettings = {
   'gemini.version_settings': string
   'gemini.supported_imagine_models': string
   'gemini.thinking_adapter_enabled': boolean
+  'gemini.thinking_adapter_budget_tokens_percentage': number
   'gemini.function_call_thought_signature_enabled': boolean
   'gemini.remove_function_response_id_enabled': boolean
   'claude.model_headers_settings': string
   'claude.default_max_tokens': string
   'claude.thinking_adapter_enabled': boolean
+  'claude.thinking_adapter_budget_tokens_percentage': number
   'grok.violation_deduction_enabled': boolean
   'grok.violation_deduction_amount': number
   ModelPrice: string
@@ -392,8 +397,6 @@ export type ModelSettings = {
   'billing_setting.billing_mode': string
   'billing_setting.billing_expr': string
   'tool_price_setting.prices': string
-  'seedance_price_setting.prices': string
-  'seedance_price_setting.super_resolution': string
   TopupGroupRatio: string
   GroupRatio: string
   UserUsableGroups: string
@@ -431,8 +434,6 @@ export type BillingSettings = {
   PreConsumedQuota: number
   QuotaForInviter: number
   QuotaForInvitee: number
-  'invite_rebate_setting.times': number
-  'invite_rebate_setting.percent': number
   TopUpLink: string
   'general_setting.docs_link': string
   'quota_setting.enable_free_model_pre_consume': boolean
@@ -455,8 +456,6 @@ export type BillingSettings = {
   'billing_setting.billing_mode': string
   'billing_setting.billing_expr': string
   'tool_price_setting.prices': string
-  'seedance_price_setting.prices': string
-  'seedance_price_setting.super_resolution': string
   TopupGroupRatio: string
   GroupRatio: string
   UserUsableGroups: string

@@ -33,6 +33,7 @@ import {
   FormLabel,
   FormMessage,
 } from '@/components/ui/form'
+import { Input } from '@/components/ui/input'
 import { Switch } from '@/components/ui/switch'
 
 import {
@@ -85,6 +86,10 @@ const schema = z.object({
       }
     }),
     thinking_adapter_enabled: z.boolean(),
+    thinking_adapter_budget_tokens_percentage: z.coerce
+      .number()
+      .min(0.002, { message: 'Must be at least 0.002' })
+      .max(1, { message: 'Must be 1 or less' }),
     function_call_thought_signature_enabled: z.boolean(),
     remove_function_response_id_enabled: z.boolean(),
   }),
@@ -98,6 +103,7 @@ type FlatGeminiSettings = {
   'gemini.version_settings': string
   'gemini.supported_imagine_models': string
   'gemini.thinking_adapter_enabled': boolean
+  'gemini.thinking_adapter_budget_tokens_percentage': number
   'gemini.function_call_thought_signature_enabled': boolean
   'gemini.remove_function_response_id_enabled': boolean
 }
@@ -121,6 +127,9 @@ export function GeminiSettingsCard({ defaultValues }: GeminiSettingsCardProps) {
     ),
     'gemini.thinking_adapter_enabled':
       defaultValues.gemini.thinking_adapter_enabled,
+    'gemini.thinking_adapter_budget_tokens_percentage': Number(
+      defaultValues.gemini.thinking_adapter_budget_tokens_percentage
+    ),
     'gemini.function_call_thought_signature_enabled':
       defaultValues.gemini.function_call_thought_signature_enabled ?? true,
     'gemini.remove_function_response_id_enabled':
@@ -137,6 +146,8 @@ export function GeminiSettingsCard({ defaultValues }: GeminiSettingsCardProps) {
         values.gemini.supported_imagine_models
       ),
       thinking_adapter_enabled: values.gemini.thinking_adapter_enabled,
+      thinking_adapter_budget_tokens_percentage:
+        values.gemini.thinking_adapter_budget_tokens_percentage,
       function_call_thought_signature_enabled:
         values.gemini.function_call_thought_signature_enabled ?? true,
       remove_function_response_id_enabled:
@@ -166,6 +177,9 @@ export function GeminiSettingsCard({ defaultValues }: GeminiSettingsCardProps) {
       ),
       'gemini.thinking_adapter_enabled':
         defaultValues.gemini.thinking_adapter_enabled,
+      'gemini.thinking_adapter_budget_tokens_percentage': Number(
+        defaultValues.gemini.thinking_adapter_budget_tokens_percentage
+      ),
       'gemini.function_call_thought_signature_enabled':
         defaultValues.gemini.function_call_thought_signature_enabled ?? true,
       'gemini.remove_function_response_id_enabled':
@@ -189,6 +203,8 @@ export function GeminiSettingsCard({ defaultValues }: GeminiSettingsCardProps) {
         values.gemini.supported_imagine_models
       ),
       'gemini.thinking_adapter_enabled': values.gemini.thinking_adapter_enabled,
+      'gemini.thinking_adapter_budget_tokens_percentage':
+        values.gemini.thinking_adapter_budget_tokens_percentage,
       'gemini.function_call_thought_signature_enabled':
         values.gemini.function_call_thought_signature_enabled,
       'gemini.remove_function_response_id_enabled':
@@ -213,16 +229,7 @@ export function GeminiSettingsCard({ defaultValues }: GeminiSettingsCardProps) {
   }
 
   const imaginePlaceholder = useMemo(
-    () =>
-      JSON.stringify(
-        [
-          'gemini-2.0-flash-exp-image-generation',
-          'gemini-2.5-flash-image',
-          'nano-banana-2',
-        ],
-        null,
-        2
-      ),
+    () => JSON.stringify(['gemini-2.0-flash-exp-image-generation'], null, 2),
     []
   )
 
@@ -295,7 +302,7 @@ export function GeminiSettingsCard({ defaultValues }: GeminiSettingsCardProps) {
             name='gemini.supported_imagine_models'
             render={({ field }) => (
               <FormItem>
-                <FormLabel>{t('Gemini native image models')}</FormLabel>
+                <FormLabel>{t('Supported Imagine Models')}</FormLabel>
                 <FormControl>
                   <JsonCodeEditor
                     value={field.value}
@@ -312,7 +319,7 @@ export function GeminiSettingsCard({ defaultValues }: GeminiSettingsCardProps) {
                 </FormControl>
                 <FormDescription>
                   {t(
-                    'JSON array of Gemini generateContent models that can return images. Applies to Chat Completions and the OpenAI Images API. Matching is case-insensitive; hyphens and spaces are ignored, and a listed prefix matches variants (nano-banana also matches nano-banana-2). Imagen models (imagen-*) always use the predict API and do not belong here.'
+                    'Accepts a JSON array of model identifiers that support the Imagine API.'
                   )}
                 </FormDescription>
                 <FormMessage />
@@ -329,8 +336,10 @@ export function GeminiSettingsCard({ defaultValues }: GeminiSettingsCardProps) {
                   <SettingsSwitchContent>
                     <FormLabel>{t('Thinking Suffix Adapter')}</FormLabel>
                     <FormDescription>
+                      {t('Supports `-thinking`, `-thinking-')}
+                      {'{{budget}}'}
                       {t(
-                        'Maps -thinking, -nothinking, and effort suffixes (-low, -medium, -high, -xhigh, -max) to Gemini thinkingLevel.'
+                        '`, and `-nothinking` suffixes while routing to the correct Gemini variant.'
                       )}
                     </FormDescription>
                   </SettingsSwitchContent>
@@ -344,10 +353,33 @@ export function GeminiSettingsCard({ defaultValues }: GeminiSettingsCardProps) {
               )}
             />
 
+            <FormField
+              control={form.control}
+              name='gemini.thinking_adapter_budget_tokens_percentage'
+              render={({ field }) => (
+                <FormItem>
+                  <FormLabel>{t('Budget Tokens Ratio')}</FormLabel>
+                  <FormControl>
+                    <Input
+                      {...field}
+                      value={String(field.value ?? '')}
+                      onChange={(event) => field.onChange(event.target.value)}
+                    />
+                  </FormControl>
+                  <FormDescription>
+                    {t(
+                      'Budget tokens = max tokens × ratio. Accepts a decimal between 0.002 and 1. Recommended to keep aligned with upstream billing.'
+                    )}
+                  </FormDescription>
+                  <FormMessage />
+                </FormItem>
+              )}
+            />
+
             {!isAdapterEnabled && (
               <p className='text-muted-foreground text-sm'>
                 {t(
-                  'When this is off, only explicit request fields such as reasoning_effort are converted. Turn it on to also honor thinking suffixes on the model name.'
+                  'Gemini will continue to auto-detect thinking mode even with the adapter disabled. Enable this only when you need finer control over pricing and budgeting.'
                 )}
               </p>
             )}

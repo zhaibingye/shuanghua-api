@@ -1,12 +1,9 @@
 package relayconvert
 
 import (
-	"context"
-	"encoding/json"
 	"testing"
 
 	"github.com/QuantumNous/new-api/relaykit/dto"
-	"github.com/QuantumNous/new-api/relaykit/ir"
 	"github.com/QuantumNous/new-api/relaykit/relayconvert/convmeta"
 	sharedgemini "github.com/QuantumNous/new-api/relaykit/relayconvert/internal/shared/gemini"
 	kitutil "github.com/QuantumNous/new-api/relaykit/relayconvert/kitutil"
@@ -15,79 +12,92 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-func TestConvertGeminiToolRequestToStreamingChatPreservesLifecycleInputs(t *testing.T) {
-	fixture := `{
-		"systemInstruction":{"parts":[{"text":"workspace system prompt"}]},
-		"generationConfig":{"thinkingConfig":{"includeThoughts":true,"thinkingBudget":16000}},
-		"contents":[
-			{"role":"user","parts":[{"text":"1 2 ?"}]},
-			{"role":"model","parts":[{"text":"1 2 3"}]},
-			{"role":"user","parts":[{"text":"call any tool"}]}
-		],
-		"tools":[{"functionDeclarations":[
-			{"name":"eval_javascript","description":"evaluate code","parameters":{"type":"object","properties":{"code":{"type":"string"}},"required":["code"]}},
-			{"name":"workspace_read_file","description":"read file","parameters":{"type":"object","properties":{"path":{"type":"string"}},"required":["path"]}},
-			{"name":"workspace_write_file","description":"write file","parameters":{"type":"object","properties":{"path":{"type":"string"},"text":{"type":"string"}},"required":["path","text"]}},
-			{"name":"workspace_edit_file","description":"edit file","parameters":{"type":"object","properties":{"path":{"type":"string"},"old_text":{"type":"string"},"new_text":{"type":"string"}},"required":["path","old_text","new_text"]}},
-			{"name":"workspace_shell","description":"run command","parameters":{"type":"object","properties":{"command":{"type":"string"}},"required":["command"]}}
-		]}]
-	}`
-
-	var request dto.GeminiChatRequest
-	require.NoError(t, json.Unmarshal([]byte(fixture), &request))
-	info := &convmeta.Values{
-		ChannelMetaAttached: true,
-		UpstreamModelName:   "gpt-tool-test",
-		IsStream:            true,
+func TestRequestConverterRegistryListsSupportedTextConverters(t *testing.T) {
+	tests := []struct {
+		converter      string
+		from           types.RelayFormat
+		to             types.RelayFormat
+		quality        RequestConverterQuality
+		stepConverters []string
+		advancedCustom bool
+	}{
+		{converter: ConverterClaudeMessagesToOpenAIChat, from: types.RelayFormatClaude, to: types.RelayFormatOpenAI, quality: RequestConverterQualityFair, advancedCustom: true},
+		{converter: ConverterGeminiContentToOpenAIChat, from: types.RelayFormatGemini, to: types.RelayFormatOpenAI, quality: RequestConverterQualityFair, advancedCustom: true},
+		{converter: ConverterOpenAIChatToClaudeMessages, from: types.RelayFormatOpenAI, to: types.RelayFormatClaude, quality: RequestConverterQualityFair, advancedCustom: true},
+		{converter: ConverterOpenAIChatToGeminiContent, from: types.RelayFormatOpenAI, to: types.RelayFormatGemini, quality: RequestConverterQualityFair, advancedCustom: true},
+		{converter: ConverterOpenAIChatToOpenAIResponses, from: types.RelayFormatOpenAI, to: types.RelayFormatOpenAIResponses, quality: RequestConverterQualityGood, advancedCustom: true},
+		{converter: ConverterOpenAIResponsesToOpenAIChat, from: types.RelayFormatOpenAIResponses, to: types.RelayFormatOpenAI, quality: RequestConverterQualityGood, advancedCustom: true},
+		{
+			converter: requestConverterClaudeToGemini,
+			from:      types.RelayFormatClaude,
+			to:        types.RelayFormatGemini,
+			quality:   RequestConverterQualityDiscouraged,
+			stepConverters: []string{
+				ConverterClaudeMessagesToOpenAIChat,
+				ConverterOpenAIChatToGeminiContent,
+			},
+		},
+		{
+			converter: requestConverterClaudeToResponses,
+			from:      types.RelayFormatClaude,
+			to:        types.RelayFormatOpenAIResponses,
+			quality:   RequestConverterQualityFair,
+		},
+		{
+			converter: requestConverterGeminiToClaude,
+			from:      types.RelayFormatGemini,
+			to:        types.RelayFormatClaude,
+			quality:   RequestConverterQualityDiscouraged,
+			stepConverters: []string{
+				ConverterGeminiContentToOpenAIChat,
+				ConverterOpenAIChatToClaudeMessages,
+			},
+		},
+		{
+			converter: requestConverterGeminiToResponses,
+			from:      types.RelayFormatGemini,
+			to:        types.RelayFormatOpenAIResponses,
+			quality:   RequestConverterQualityFair,
+			stepConverters: []string{
+				ConverterGeminiContentToOpenAIChat,
+				ConverterOpenAIChatToOpenAIResponses,
+			},
+		},
+		{
+			converter: requestConverterResponsesToClaude,
+			from:      types.RelayFormatOpenAIResponses,
+			to:        types.RelayFormatClaude,
+			quality:   RequestConverterQualityFair,
+		},
+		{
+			converter:      ConverterOpenAIResponsesToGemini,
+			from:           types.RelayFormatOpenAIResponses,
+			to:             types.RelayFormatGemini,
+			quality:        RequestConverterQualityFair,
+			advancedCustom: true,
+		},
 	}
 
-	result, err := ConvertRequest(context.Background(), info, types.RelayFormatOpenAI, &request)
-	require.NoError(t, err)
-	chatRequest, ok := result.Value.(*dto.GeneralOpenAIRequest)
-	require.True(t, ok)
-	require.NotNil(t, chatRequest.Stream)
-	assert.True(t, *chatRequest.Stream)
-	assert.Equal(t, "gpt-tool-test", chatRequest.Model)
-	assert.Equal(t, "high", chatRequest.ReasoningEffort)
+	require.Len(t, requestConverters, len(tests))
 
-	require.Len(t, chatRequest.Messages, 4)
-	assert.Equal(t, []string{"system", "user", "assistant", "user"}, []string{
-		chatRequest.Messages[0].Role,
-		chatRequest.Messages[1].Role,
-		chatRequest.Messages[2].Role,
-		chatRequest.Messages[3].Role,
-	})
-	assert.Equal(t, "workspace system prompt", chatRequest.Messages[0].StringContent())
-	assert.Equal(t, "1 2 3", chatRequest.Messages[2].StringContent())
+	for _, tt := range tests {
+		t.Run(tt.converter, func(t *testing.T) {
+			spec, ok := LookupRequestConverter(tt.converter)
 
-	require.Len(t, chatRequest.Tools, 5)
-	toolsByName := make(map[string]dto.ToolCallRequest, len(chatRequest.Tools))
-	for _, tool := range chatRequest.Tools {
-		assert.Equal(t, "function", tool.Type)
-		toolsByName[tool.Function.Name] = tool
+			require.True(t, ok)
+			assert.Equal(t, tt.converter, spec.ID)
+			assert.Equal(t, tt.from, spec.From)
+			assert.Equal(t, tt.to, spec.To)
+			assert.Equal(t, tt.quality, spec.Quality)
+			assert.Equal(t, tt.stepConverters, spec.StepConverters)
+			if len(tt.stepConverters) == 0 {
+				assert.NotNil(t, spec.Convert)
+			} else {
+				assert.Nil(t, spec.Convert)
+			}
+			assert.Equal(t, tt.advancedCustom, dto.IsAdvancedCustomConverterAllowed(tt.converter))
+		})
 	}
-	require.Contains(t, toolsByName, "eval_javascript")
-	require.Contains(t, toolsByName, "workspace_shell")
-	evalSchema, err := json.Marshal(toolsByName["eval_javascript"].Function.Parameters)
-	require.NoError(t, err)
-	require.JSONEq(t, `{"type":"object","properties":{"code":{"type":"string"}},"required":["code"]}`, string(evalSchema))
-	shellSchema, err := json.Marshal(toolsByName["workspace_shell"].Function.Parameters)
-	require.NoError(t, err)
-	require.JSONEq(t, `{"type":"object","properties":{"command":{"type":"string"}},"required":["command"]}`, string(shellSchema))
-
-	messagesJSON, err := json.Marshal(chatRequest.Messages)
-	require.NoError(t, err)
-	assert.NotContains(t, string(messagesJSON), "functionDeclarations")
-	assert.NotContains(t, string(messagesJSON), "workspace_shell")
-}
-
-func TestRequestConverterRegistryKeepsImageConverters(t *testing.T) {
-	spec, ok := LookupRequestConverter(ConverterOpenAIImageToGeminiContent)
-	require.True(t, ok)
-	assert.Equal(t, types.RelayFormat(types.RelayFormatOpenAIImage), spec.From)
-	assert.Equal(t, types.RelayFormat(types.RelayFormatGemini), spec.To)
-	assert.NotNil(t, spec.Convert)
-	assert.Len(t, requestConverters, 1)
 }
 
 func TestConvertRequestToTargetRecordsConversionChain(t *testing.T) {
@@ -119,441 +129,7 @@ func TestConvertRequestToTargetRecordsConversionChain(t *testing.T) {
 	assert.Equal(t, []types.RelayFormat{types.RelayFormatOpenAI, types.RelayFormatOpenAIResponses}, info.ConversionChain)
 }
 
-func TestConvertRequestChatThinkingAsksResponsesForSummary(t *testing.T) {
-	req := &dto.GeneralOpenAIRequest{
-		Model:           "gpt-test",
-		ReasoningEffort: "high",
-		Messages:        []dto.Message{{Role: "user", Content: "think"}},
-	}
-	result, err := ConvertRequest(nil, nil, types.RelayFormatOpenAIResponses, req)
-	require.NoError(t, err)
-	out, ok := result.Value.(*dto.OpenAIResponsesRequest)
-	require.True(t, ok)
-	require.NotNil(t, out.Reasoning)
-	assert.Equal(t, "high", out.Reasoning.Effort)
-	assert.Equal(t, "auto", out.Reasoning.Summary)
-}
-
-func TestConvertRequestChatXHighToGeminiNativeThinkingLevel(t *testing.T) {
-	info := &convmeta.Values{
-		ChannelMetaAttached: true,
-		UpstreamModelName:   "gemini-3.7-pro",
-		Options:             &convmeta.Options{},
-	}
-	result, err := ConvertRequest(context.Background(), info, types.RelayFormatGemini, &dto.GeneralOpenAIRequest{
-		Model:           "client-model",
-		ReasoningEffort: "xhigh",
-		Messages:        []dto.Message{{Role: "user", Content: "think"}},
-	})
-	require.NoError(t, err)
-	out := result.Value.(*dto.GeminiChatRequest)
-	require.NotNil(t, out.GenerationConfig.ThinkingConfig)
-	require.Equal(t, "HIGH", out.GenerationConfig.ThinkingConfig.ThinkingLevel)
-	require.Nil(t, out.GenerationConfig.ThinkingConfig.ThinkingBudget)
-	require.True(t, out.GenerationConfig.ThinkingConfig.IncludeThoughts)
-	require.False(t, result.Report.Empty())
-}
-
-func TestConvertRequestChatEffortToGemini25DynamicBudgetReportsLoss(t *testing.T) {
-	info := &convmeta.Values{
-		ChannelMetaAttached: true,
-		UpstreamModelName:   "gemini-2.5-pro",
-		Options:             &convmeta.Options{},
-	}
-	result, err := ConvertRequest(context.Background(), info, types.RelayFormatGemini, &dto.GeneralOpenAIRequest{
-		ReasoningEffort: "high",
-		Messages:        []dto.Message{{Role: "user", Content: "think"}},
-	})
-	require.NoError(t, err)
-	out := result.Value.(*dto.GeminiChatRequest)
-	require.NotNil(t, out.GenerationConfig.ThinkingConfig)
-	require.NotNil(t, out.GenerationConfig.ThinkingConfig.ThinkingBudget)
-	require.Equal(t, -1, *out.GenerationConfig.ThinkingConfig.ThinkingBudget)
-	found := false
-	for _, loss := range result.Report.Losses {
-		if loss.Field == "thinking.effort_to_budget" && loss.Kind == ir.LossCoerced {
-			found = true
-		}
-	}
-	require.True(t, found, "losses=%#v", result.Report.Losses)
-}
-
-func TestConvertRequestClaudeBudgetToGemini3UsesNativeHighLevel(t *testing.T) {
-	budget := 2048
-	info := &convmeta.Values{
-		ChannelMetaAttached: true,
-		UpstreamModelName:   "gemini-3.7-flash",
-		Options:             &convmeta.Options{},
-	}
-	result, err := ConvertRequest(context.Background(), info, types.RelayFormatGemini, &dto.ClaudeRequest{
-		Model:    "client-model",
-		Messages: []dto.ClaudeMessage{{Role: "user", Content: "think"}},
-		Thinking: &dto.Thinking{Type: "enabled", BudgetTokens: &budget},
-	})
-	require.NoError(t, err)
-	out := result.Value.(*dto.GeminiChatRequest)
-	requireGeminiThinkingControl(t, out, true, nil, "HIGH")
-	requireRequestLoss(t, result.Report, "thinking.budget_to_level")
-}
-
-func TestConvertRequestClaudeBudgetAndEffortToGemini3PrefersEffort(t *testing.T) {
-	budget := 2048
-	info := &convmeta.Values{
-		ChannelMetaAttached: true,
-		UpstreamModelName:   "gemini-3.7-flash",
-		Options:             &convmeta.Options{},
-	}
-	result, err := ConvertRequest(context.Background(), info, types.RelayFormatGemini, &dto.ClaudeRequest{
-		Model:        "client-model",
-		Messages:     []dto.ClaudeMessage{{Role: "user", Content: "think"}},
-		Thinking:     &dto.Thinking{Type: "enabled", BudgetTokens: &budget},
-		OutputConfig: json.RawMessage(`{"effort":"medium"}`),
-	})
-	require.NoError(t, err)
-	out := result.Value.(*dto.GeminiChatRequest)
-	requireGeminiThinkingControl(t, out, true, nil, "MEDIUM")
-	requireRequestLoss(t, result.Report, "thinking.budget")
-}
-
-func TestConvertRequestClaudeBudgetToGemini25PreservesBudget(t *testing.T) {
-	budget := 2048
-	info := &convmeta.Values{
-		ChannelMetaAttached: true,
-		UpstreamModelName:   "gemini-2.5-flash",
-		Options:             &convmeta.Options{},
-	}
-	result, err := ConvertRequest(context.Background(), info, types.RelayFormatGemini, &dto.ClaudeRequest{
-		Model:    "client-model",
-		Messages: []dto.ClaudeMessage{{Role: "user", Content: "think"}},
-		Thinking: &dto.Thinking{Type: "enabled", BudgetTokens: &budget},
-	})
-	require.NoError(t, err)
-	out := result.Value.(*dto.GeminiChatRequest)
-	requireGeminiThinkingControl(t, out, true, &budget, "")
-	for _, loss := range result.Report.Losses {
-		require.NotEqual(t, "thinking.budget_to_level", loss.Field, "losses=%#v", result.Report.Losses)
-	}
-}
-
-func TestConvertRequestClaudeDisabledToGemini3ReportsModeCoercion(t *testing.T) {
-	info := &convmeta.Values{
-		ChannelMetaAttached: true,
-		UpstreamModelName:   "gemini-3.7-flash",
-		Options:             &convmeta.Options{},
-	}
-	result, err := ConvertRequest(context.Background(), info, types.RelayFormatGemini, &dto.ClaudeRequest{
-		Model:    "client-model",
-		Messages: []dto.ClaudeMessage{{Role: "user", Content: "answer directly"}},
-		Thinking: &dto.Thinking{Type: "disabled"},
-	})
-	require.NoError(t, err)
-	out := result.Value.(*dto.GeminiChatRequest)
-	requireGeminiThinkingControl(t, out, false, nil, "MINIMAL")
-	requireRequestLoss(t, result.Report, "thinking.mode")
-}
-
-func TestConvertRequestClaudeBudgetToUnknownGeminiReportsCapabilityLoss(t *testing.T) {
-	budget := 2048
-	info := &convmeta.Values{
-		ChannelMetaAttached: true,
-		UpstreamModelName:   "gemini-future",
-		Options:             &convmeta.Options{},
-	}
-	result, err := ConvertRequest(context.Background(), info, types.RelayFormatGemini, &dto.ClaudeRequest{
-		Model:    "client-model",
-		Messages: []dto.ClaudeMessage{{Role: "user", Content: "think"}},
-		Thinking: &dto.Thinking{Type: "enabled", BudgetTokens: &budget},
-	})
-	require.NoError(t, err)
-	out := result.Value.(*dto.GeminiChatRequest)
-	requireGeminiThinkingControl(t, out, true, &budget, "")
-	requireRequestLoss(t, result.Report, "thinking.control")
-}
-
-func TestConvertRequestClaudeAdaptiveXHighToGemini3CapsAtHigh(t *testing.T) {
-	info := &convmeta.Values{
-		ChannelMetaAttached: true,
-		UpstreamModelName:   "gemini-3.7-flash",
-		Options:             &convmeta.Options{},
-	}
-	result, err := ConvertRequest(context.Background(), info, types.RelayFormatGemini, &dto.ClaudeRequest{
-		Model:        "client-model",
-		Messages:     []dto.ClaudeMessage{{Role: "user", Content: "think"}},
-		Thinking:     &dto.Thinking{Type: "adaptive", Display: "summarized"},
-		OutputConfig: json.RawMessage(`{"effort":"xhigh"}`),
-	})
-	require.NoError(t, err)
-	out := result.Value.(*dto.GeminiChatRequest)
-	requireGeminiThinkingControl(t, out, true, nil, "HIGH")
-	requireRequestLoss(t, result.Report, "thinking.level")
-}
-
-func TestConvertRequestClaudeThinkingUsesPrefixedAndSuffixedUpstreamModelCapabilities(t *testing.T) {
-	budget := 2048
-	tests := []struct {
-		name           string
-		model          string
-		adapterEnabled bool
-		thinking       *dto.Thinking
-		wantLevel      string
-		wantLoss       string
-	}{
-		{
-			name:      "models prefix",
-			model:     "models/gemini-3.7-flash",
-			thinking:  &dto.Thinking{Type: "enabled", BudgetTokens: &budget},
-			wantLevel: "HIGH",
-		},
-		{
-			name:      "vertex publisher prefix",
-			model:     "publishers/google/models/gemini-3.7-flash",
-			thinking:  &dto.Thinking{Type: "enabled", BudgetTokens: &budget},
-			wantLevel: "HIGH",
-		},
-		{
-			name:           "effort suffix",
-			model:          "google/gemini-3.7-flash-medium",
-			adapterEnabled: true,
-			thinking:       &dto.Thinking{Type: "enabled", BudgetTokens: &budget},
-			wantLevel:      "MEDIUM",
-			wantLoss:       "thinking.budget",
-		},
-	}
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			info := &convmeta.Values{
-				ChannelMetaAttached: true,
-				UpstreamModelName:   tt.model,
-				Options: &convmeta.Options{Gemini: convmeta.GeminiOptions{
-					ThinkingAdapterEnabled: tt.adapterEnabled,
-				}},
-			}
-			result, err := ConvertRequest(context.Background(), info, types.RelayFormatGemini, &dto.ClaudeRequest{
-				Model:    "client-model",
-				Messages: []dto.ClaudeMessage{{Role: "user", Content: "think"}},
-				Thinking: tt.thinking,
-			})
-			require.NoError(t, err)
-			out := result.Value.(*dto.GeminiChatRequest)
-			requireGeminiThinkingControl(t, out, true, nil, tt.wantLevel)
-			if tt.wantLoss != "" {
-				requireRequestLoss(t, result.Report, tt.wantLoss)
-			}
-		})
-	}
-}
-
-func TestConvertRequestResponsesXHighSummaryToGemini(t *testing.T) {
-	info := &convmeta.Values{
-		ChannelMetaAttached: true,
-		UpstreamModelName:   "gemini-3.7-pro",
-		Options:             &convmeta.Options{},
-	}
-	result, err := ConvertRequest(context.Background(), info, types.RelayFormatGemini, &dto.OpenAIResponsesRequest{
-		Model:     "client-model",
-		Input:     json.RawMessage(`"think"`),
-		Reasoning: &dto.Reasoning{Effort: "xhigh", Summary: "auto"},
-	})
-	require.NoError(t, err)
-	out := result.Value.(*dto.GeminiChatRequest)
-	require.NotNil(t, out.GenerationConfig.ThinkingConfig)
-	require.Equal(t, "HIGH", out.GenerationConfig.ThinkingConfig.ThinkingLevel)
-	require.True(t, out.GenerationConfig.ThinkingConfig.IncludeThoughts)
-}
-
-func TestConvertRequestClaudeSummarizedXHighToResponses(t *testing.T) {
-	result, err := ConvertRequest(context.Background(), nil, types.RelayFormatOpenAIResponses, &dto.ClaudeRequest{
-		Model:        "claude-opus-4-7",
-		Messages:     []dto.ClaudeMessage{{Role: "user", Content: "think"}},
-		Thinking:     &dto.Thinking{Type: "adaptive", Display: "summarized"},
-		OutputConfig: json.RawMessage(`{"effort":"xhigh"}`),
-	})
-	require.NoError(t, err)
-	out := result.Value.(*dto.OpenAIResponsesRequest)
-	require.NotNil(t, out.Reasoning)
-	require.Equal(t, "xhigh", out.Reasoning.Effort)
-	require.Equal(t, "auto", out.Reasoning.Summary)
-}
-
-func TestConvertRequestGeminiBudgetToChatHighWithLoss(t *testing.T) {
-	budget := 16000
-	result, err := ConvertRequest(context.Background(), nil, types.RelayFormatOpenAI, &dto.GeminiChatRequest{
-		Contents: []dto.GeminiChatContent{{Role: "user", Parts: []dto.GeminiPart{{Text: "think"}}}},
-		GenerationConfig: dto.GeminiChatGenerationConfig{
-			ThinkingConfig: &dto.GeminiThinkingConfig{ThinkingBudget: &budget, IncludeThoughts: true},
-		},
-	})
-	require.NoError(t, err)
-	out := result.Value.(*dto.GeneralOpenAIRequest)
-	require.Equal(t, "high", out.ReasoningEffort)
-	found := false
-	for _, loss := range result.Report.Losses {
-		if loss.Field == "thinking.budget" && loss.Kind == ir.LossCoerced {
-			found = true
-		}
-	}
-	require.True(t, found, "losses=%#v", result.Report.Losses)
-}
-
-func TestConvertRequestClaudeToChatDropsCacheControl(t *testing.T) {
-	req := &dto.ClaudeRequest{
-		Model: "claude-test",
-		Messages: []dto.ClaudeMessage{
-			{
-				Role: "user",
-				Content: []map[string]any{
-					{
-						"type":          "text",
-						"text":          "hello workspace",
-						"cache_control": map[string]any{"type": "ephemeral", "ttl": "1h"},
-					},
-				},
-			},
-		},
-	}
-
-	result, err := ConvertRequest(nil, nil, types.RelayFormatOpenAI, req)
-	require.NoError(t, err)
-	chatReq, ok := result.Value.(*dto.GeneralOpenAIRequest)
-	require.True(t, ok)
-	require.Len(t, chatReq.Messages, 1)
-	content, ok := chatReq.Messages[0].Content.(string)
-	require.True(t, ok, "content=%T", chatReq.Messages[0].Content)
-	require.Equal(t, "hello workspace", content)
-	raw, err := json.Marshal(chatReq.Messages[0])
-	require.NoError(t, err)
-	require.NotContains(t, string(raw), "cache_control")
-}
-
-func TestConvertRequestClaudeToolResultKeepsFollowupTextForChat(t *testing.T) {
-	req := &dto.ClaudeRequest{
-		Model: "claude-test",
-		Messages: []dto.ClaudeMessage{
-			{Role: "user", Content: "Call get_weather with city=Paris NOW."},
-			{
-				Role: "assistant",
-				Content: []map[string]any{
-					{"type": "tool_use", "id": "toolu_1", "name": "get_weather", "input": map[string]any{"city": "Paris"}},
-				},
-			},
-			{
-				Role: "user",
-				Content: []map[string]any{
-					{"type": "tool_result", "tool_use_id": "toolu_1", "content": "{\"city\":\"Paris\",\"temp_c\":18}"},
-					{"type": "text", "text": "工具结果已经给你了。现在请回答停车费谁亏谁赚？"},
-				},
-			},
-		},
-	}
-
-	result, err := ConvertRequest(nil, nil, types.RelayFormatOpenAI, req)
-	require.NoError(t, err)
-	chatReq, ok := result.Value.(*dto.GeneralOpenAIRequest)
-	require.True(t, ok)
-	require.GreaterOrEqual(t, len(chatReq.Messages), 4)
-	require.Equal(t, "tool", chatReq.Messages[2].Role)
-	require.Equal(t, "toolu_1", chatReq.Messages[2].ToolCallId)
-	require.Equal(t, "user", chatReq.Messages[3].Role)
-	require.Contains(t, chatReq.Messages[3].StringContent(), "停车费")
-}
-
-func TestConvertRequestResponsesToolResultKeepsFollowupTextForChat(t *testing.T) {
-	req := &dto.OpenAIResponsesRequest{
-		Model: "glm-5.2",
-		Input: mustRawMessage(t, []map[string]any{
-			{"role": "user", "content": "Call get_weather with city=北京."},
-			{
-				"type":      "function_call",
-				"call_id":   "call_weather",
-				"name":      "get_weather",
-				"arguments": `{"city":"北京"}`,
-			},
-			{
-				"type":    "function_call_output",
-				"call_id": "call_weather",
-				"output":  `{"temperature":"22°C"}`,
-			},
-			{"role": "user", "content": "请逆序排列文字"},
-		}),
-	}
-
-	result, err := ConvertRequest(nil, nil, types.RelayFormatOpenAI, req)
-	require.NoError(t, err)
-	chatReq, ok := result.Value.(*dto.GeneralOpenAIRequest)
-	require.True(t, ok)
-	require.Len(t, chatReq.Messages, 4)
-	require.Equal(t, "assistant", chatReq.Messages[1].Role)
-	require.Len(t, chatReq.Messages[1].ParseToolCalls(), 1)
-	require.Equal(t, "tool", chatReq.Messages[2].Role)
-	require.Equal(t, "call_weather", chatReq.Messages[2].ToolCallId)
-	require.Equal(t, "user", chatReq.Messages[3].Role)
-	require.Equal(t, "请逆序排列文字", chatReq.Messages[3].StringContent())
-}
-
-func TestConvertRequestChatToolResultKeepsFollowupTurnForGemini(t *testing.T) {
-	assistant := dto.Message{Role: "assistant"}
-	assistant.SetToolCalls([]dto.ToolCallRequest{{
-		ID:   "call_weather",
-		Type: "function",
-		Function: dto.FunctionRequest{
-			Name:      "get_weather",
-			Arguments: `{"city":"北京"}`,
-		},
-	}})
-	req := &dto.GeneralOpenAIRequest{
-		Model: "gemini-3.7-flash",
-		Messages: []dto.Message{
-			{Role: "user", Content: "Call get_weather with city=北京."},
-			assistant,
-			{Role: "tool", ToolCallId: "call_weather", Content: `{"temperature":"22°C"}`},
-			{Role: "user", Content: "请逆序排列文字"},
-		},
-	}
-
-	result, err := ConvertRequest(nil, nil, types.RelayFormatGemini, req)
-	require.NoError(t, err)
-	geminiReq, ok := result.Value.(*dto.GeminiChatRequest)
-	require.True(t, ok)
-	require.Len(t, geminiReq.Contents, 4)
-	toolResult := geminiReq.Contents[2]
-	followup := geminiReq.Contents[3]
-	require.Equal(t, "user", toolResult.Role)
-	require.Len(t, toolResult.Parts, 1)
-	require.NotNil(t, toolResult.Parts[0].FunctionResponse)
-	require.Equal(t, "user", followup.Role)
-	require.Len(t, followup.Parts, 1)
-	require.Nil(t, followup.Parts[0].FunctionResponse)
-	require.Equal(t, "请逆序排列文字", followup.Parts[0].Text)
-}
-
-func TestConvertRequestClaudeToChatRecordsSignatureLoss(t *testing.T) {
-	req := &dto.ClaudeRequest{
-		Model: "claude-test",
-		Messages: []dto.ClaudeMessage{
-			{
-				Role: "assistant",
-				Content: []map[string]any{
-					{"type": "thinking", "thinking": "secret", "signature": "sig-1"},
-					{"type": "text", "text": "hello"},
-				},
-			},
-		},
-	}
-
-	result, err := ConvertRequest(nil, nil, types.RelayFormatOpenAI, req)
-	require.NoError(t, err)
-	require.False(t, result.Report.Empty())
-	found := false
-	for _, loss := range result.Report.Losses {
-		if loss.Field == "thinking.signature" {
-			found = true
-			break
-		}
-	}
-	require.True(t, found, "losses=%#v", result.Report.Losses)
-}
-
-func TestConvertRequestPlansMultiHopPath(t *testing.T) {
+func TestConvertRequestClaudeToResponsesUsesDirectPath(t *testing.T) {
 	info := &convmeta.Values{
 		ConversionChain: []types.RelayFormat{types.RelayFormatClaude},
 	}
@@ -580,6 +156,125 @@ func TestConvertRequestPlansMultiHopPath(t *testing.T) {
 		},
 	}, result.Steps)
 	assert.Equal(t, []types.RelayFormat{types.RelayFormatClaude, types.RelayFormatOpenAIResponses}, info.ConversionChain)
+}
+
+func TestConvertRequestClaudeToResponsesPreservesMixedBlockOrder(t *testing.T) {
+	info := &convmeta.Values{ConversionChain: []types.RelayFormat{types.RelayFormatClaude}}
+	stream := true
+	strict := true
+	maxTokens := uint(4096)
+	req := &dto.ClaudeRequest{
+		Model:     "gpt-test",
+		System:    []dto.ClaudeMediaMessage{{Type: "text", Text: kitutil.GetPointer("system ")}, {Type: "text", Text: kitutil.GetPointer("rules")}},
+		MaxTokens: &maxTokens,
+		Stream:    &stream,
+		Tools: []dto.Tool{{
+			Name:        "lookup",
+			Description: "Look up a value",
+			InputSchema: map[string]any{"type": "object", "properties": map[string]any{"q": map[string]any{"type": "string"}}},
+			Strict:      &strict,
+		}},
+		ToolChoice: dto.ClaudeToolChoice{Type: "tool", Name: "lookup", DisableParallelToolUse: true},
+		Messages: []dto.ClaudeMessage{
+			{Role: "user", Content: []dto.ClaudeMediaMessage{{Type: "text", Text: kitutil.GetPointer("question")}}},
+			{Role: "assistant", Content: []dto.ClaudeMediaMessage{
+				{Type: "text", Text: kitutil.GetPointer("before")},
+				{Type: "tool_use", Id: "call_1", Name: "lookup", Input: map[string]any{"q": "x"}},
+				{Type: "text", Text: kitutil.GetPointer("after")},
+			}},
+			{Role: "user", Content: []dto.ClaudeMediaMessage{
+				{Type: "tool_result", ToolUseId: "call_1", Content: "result"},
+				{Type: "text", Text: kitutil.GetPointer("continue")},
+			}},
+		},
+	}
+
+	result, err := ConvertRequest(nil, info, types.RelayFormatOpenAIResponses, req)
+	require.NoError(t, err)
+	responsesReq := result.Value.(*dto.OpenAIResponsesRequest)
+	assert.Equal(t, "gpt-test", responsesReq.Model)
+	assert.Equal(t, maxTokens, *responsesReq.MaxOutputTokens)
+	assert.True(t, *responsesReq.Stream)
+	assert.JSONEq(t, `"system rules"`, string(responsesReq.Instructions))
+	assert.JSONEq(t, `[{"type":"function","name":"lookup","description":"Look up a value","parameters":{"type":"object","properties":{"q":{"type":"string"}}},"strict":true}]`, string(responsesReq.Tools))
+	assert.JSONEq(t, `{"type":"function","name":"lookup"}`, string(responsesReq.ToolChoice))
+	assert.JSONEq(t, `false`, string(responsesReq.ParallelToolCalls))
+
+	var input []map[string]any
+	require.NoError(t, kitutil.Unmarshal(responsesReq.Input, &input))
+	require.Len(t, input, 6)
+	assert.Equal(t, "user", input[0]["role"])
+	assert.Equal(t, "question", inputContentText(t, input[0]))
+	assert.Equal(t, "assistant", input[1]["role"])
+	assert.Equal(t, "before", inputContentText(t, input[1]))
+	assert.Equal(t, "function_call", input[2]["type"])
+	assert.Equal(t, "call_1", input[2]["call_id"])
+	assert.Equal(t, "lookup", input[2]["name"])
+	assert.JSONEq(t, `{"q":"x"}`, input[2]["arguments"].(string))
+	assert.Equal(t, "assistant", input[3]["role"])
+	assert.Equal(t, "after", inputContentText(t, input[3]))
+	assert.Equal(t, "function_call_output", input[4]["type"])
+	assert.Equal(t, "result", input[4]["output"])
+	assert.Equal(t, "user", input[5]["role"])
+	assert.Equal(t, "continue", inputContentText(t, input[5]))
+}
+
+func TestConvertRequestClaudeToResponsesDropsIncompatibleContextManagement(t *testing.T) {
+	req := &dto.ClaudeRequest{
+		Model: "gpt-test",
+		Messages: []dto.ClaudeMessage{
+			{Role: "user", Content: "hello"},
+		},
+		ContextManagement: mustRawMessage(t, map[string]any{
+			"edits": []map[string]any{{"type": "clear_tool_uses_20250919"}},
+		}),
+	}
+
+	result, err := ConvertRequest(nil, nil, types.RelayFormatOpenAIResponses, req)
+
+	require.NoError(t, err)
+	responsesReq, ok := result.Value.(*dto.OpenAIResponsesRequest)
+	require.True(t, ok)
+	assert.Empty(t, responsesReq.ContextManagement)
+}
+
+func TestConvertRequestClaudeAdaptiveThinkingPreservesEffort(t *testing.T) {
+	tests := []struct {
+		name         string
+		outputConfig []byte
+		wantEffort   string
+	}{
+		{name: "adaptive default", wantEffort: "high"},
+		{name: "explicit low", outputConfig: mustRawMessage(t, map[string]any{"effort": "low"}), wantEffort: "low"},
+		{name: "explicit xhigh", outputConfig: mustRawMessage(t, map[string]any{"effort": "xhigh"}), wantEffort: "xhigh"},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			info := &convmeta.Values{
+				OriginModelName: "gpt-5.6-sol",
+				ConversionChain: []types.RelayFormat{types.RelayFormatClaude},
+			}
+			req := &dto.ClaudeRequest{
+				Model:        "gpt-5.6-sol",
+				OutputConfig: tt.outputConfig,
+				Thinking:     &dto.Thinking{Type: "adaptive", Display: "summarized"},
+				Messages: []dto.ClaudeMessage{
+					{Role: "user", Content: "hello"},
+				},
+			}
+
+			result, err := ConvertRequest(nil, info, types.RelayFormatOpenAIResponses, req)
+
+			require.NoError(t, err)
+			responsesReq, ok := result.Value.(*dto.OpenAIResponsesRequest)
+			require.True(t, ok)
+			require.NotNil(t, responsesReq.Reasoning)
+			assert.Equal(t, tt.wantEffort, responsesReq.Reasoning.Effort)
+			assert.Equal(t, "detailed", responsesReq.Reasoning.Summary)
+			assert.Equal(t, tt.wantEffort, info.GetReasoningEffort())
+		})
+	}
 }
 
 func TestConvertRequestViaExecutesExplicitPath(t *testing.T) {
@@ -776,38 +471,25 @@ func TestConvertRequestResponsesToGeminiUsesDirectConverter(t *testing.T) {
 	require.True(t, ok)
 	assert.NotContains(t, filterItems, "additionalProperties")
 
-	require.GreaterOrEqual(t, len(geminiReq.Contents), 2)
-	modelIdx := 0
-	if geminiReq.Contents[0].Role == "user" && geminiReq.Contents[0].Parts[0].FunctionResponse == nil {
-		modelIdx = 1
-	}
-	assert.Equal(t, "model", geminiReq.Contents[modelIdx].Role)
-	require.Len(t, geminiReq.Contents[modelIdx].Parts, 2)
-	var functionPart, textPart dto.GeminiPart
-	for _, part := range geminiReq.Contents[modelIdx].Parts {
-		if part.FunctionCall != nil {
-			functionPart = part
-		}
-		if part.Text != "" {
-			textPart = part
-		}
-	}
-	require.NotNil(t, functionPart.FunctionCall)
-	assert.Equal(t, "lookup", functionPart.FunctionCall.FunctionName)
-	assert.Equal(t, map[string]any{"q": "x"}, functionPart.FunctionCall.Arguments)
+	require.Len(t, geminiReq.Contents, 2)
+	assert.Equal(t, "model", geminiReq.Contents[0].Role)
+	require.Len(t, geminiReq.Contents[0].Parts, 2)
+	functionCall := geminiReq.Contents[0].Parts[0].FunctionCall
+	require.NotNil(t, functionCall)
+	assert.Equal(t, "lookup", functionCall.FunctionName)
+	assert.Equal(t, map[string]any{"q": "x"}, functionCall.Arguments)
 	var thoughtSignature string
-	require.NoError(t, kitutil.Unmarshal(functionPart.ThoughtSignature, &thoughtSignature))
+	require.NoError(t, kitutil.Unmarshal(geminiReq.Contents[0].Parts[0].ThoughtSignature, &thoughtSignature))
 	assert.Equal(t, sharedgemini.ThoughtSignatureBypassValue, thoughtSignature)
-	assert.Equal(t, "I will call.", textPart.Text)
+	assert.Equal(t, "I will call.", geminiReq.Contents[0].Parts[1].Text)
 
-	userIdx := modelIdx + 1
-	assert.Equal(t, "user", geminiReq.Contents[userIdx].Role)
-	require.Len(t, geminiReq.Contents[userIdx].Parts, 1)
-	functionResponse := geminiReq.Contents[userIdx].Parts[0].FunctionResponse
+	assert.Equal(t, "user", geminiReq.Contents[1].Role)
+	require.Len(t, geminiReq.Contents[1].Parts, 1)
+	functionResponse := geminiReq.Contents[1].Parts[0].FunctionResponse
 	require.NotNil(t, functionResponse)
 	assert.Equal(t, "lookup", functionResponse.Name)
 	assert.Equal(t, true, functionResponse.Response["ok"])
-	assert.Empty(t, geminiReq.Contents[userIdx].Parts[0].ThoughtSignature)
+	assert.Empty(t, geminiReq.Contents[1].Parts[0].ThoughtSignature)
 }
 
 func TestConvertRequestResponsesToGeminiSkipsThoughtSignatureWhenDisabled(t *testing.T) {
@@ -837,15 +519,10 @@ func TestConvertRequestResponsesToGeminiSkipsThoughtSignatureWhenDisabled(t *tes
 	require.NoError(t, err)
 	geminiReq, ok := result.Value.(*dto.GeminiChatRequest)
 	require.True(t, ok)
-	require.NotEmpty(t, geminiReq.Contents)
-	model := geminiReq.Contents[0]
-	if model.Role != "model" && len(geminiReq.Contents) > 1 {
-		model = geminiReq.Contents[1]
-	}
-	require.Equal(t, "model", model.Role)
-	require.Len(t, model.Parts, 1)
-	require.NotNil(t, model.Parts[0].FunctionCall)
-	assert.Empty(t, model.Parts[0].ThoughtSignature)
+	require.Len(t, geminiReq.Contents, 1)
+	require.Len(t, geminiReq.Contents[0].Parts, 1)
+	require.NotNil(t, geminiReq.Contents[0].Parts[0].FunctionCall)
+	assert.Empty(t, geminiReq.Contents[0].Parts[0].ThoughtSignature)
 }
 
 func TestConvertRequestOpenAIChatToGeminiAddsThoughtSignatureForAdvancedCustom(t *testing.T) {
@@ -899,120 +576,6 @@ func TestConvertRequestOpenAIChatToGeminiAddsThoughtSignatureForAdvancedCustom(t
 	assert.Equal(t, sharedgemini.ThoughtSignatureBypassValue, thoughtSignature)
 }
 
-func TestConvertRequestResponsesToClaudeUsesDirectConverter(t *testing.T) {
-	info := &convmeta.Values{
-		ConversionChain: []types.RelayFormat{types.RelayFormatOpenAIResponses},
-	}
-	stream := true
-	parallelToolCalls := false
-	maxOutputTokens := uint(512)
-	req := &dto.OpenAIResponsesRequest{
-		Model:             "claude-test",
-		Instructions:      mustRawMessage(t, "system rules"),
-		Stream:            &stream,
-		MaxOutputTokens:   &maxOutputTokens,
-		ParallelToolCalls: mustRawMessage(t, parallelToolCalls),
-		Reasoning:         &dto.Reasoning{Effort: "medium"},
-		Input: mustRawMessage(t, []map[string]any{
-			{
-				"role":    "user",
-				"content": "question",
-			},
-			{
-				"role": "assistant",
-				"content": []map[string]any{
-					{"type": "output_text", "text": "I will call."},
-				},
-			},
-			{
-				"type":      "function_call",
-				"call_id":   "call_1",
-				"name":      "lookup",
-				"arguments": map[string]any{"q": "x"},
-			},
-			{
-				"type":    "function_call_output",
-				"call_id": "call_1",
-				"output":  map[string]any{"ok": true},
-			},
-		}),
-		Tools: mustRawMessage(t, []map[string]any{
-			{
-				"type":        "function",
-				"name":        "lookup",
-				"description": "Lookup data",
-				"parameters": map[string]any{
-					"type": "object",
-					"properties": map[string]any{
-						"q": map[string]any{"type": "string"},
-					},
-				},
-			},
-		}),
-	}
-
-	result, err := ConvertRequest(nil, info, types.RelayFormatClaude, req)
-
-	require.NoError(t, err)
-	claudeReq, ok := result.Value.(*dto.ClaudeRequest)
-	require.True(t, ok)
-	assert.Equal(t, requestConverterResponsesToClaude, result.Converter)
-	assert.Equal(t, []RequestStep{
-		{
-			Converter: requestConverterResponsesToClaude,
-			From:      types.RelayFormatOpenAIResponses,
-			To:        types.RelayFormatClaude,
-		},
-	}, result.Steps)
-	assert.Equal(t, []types.RelayFormat{types.RelayFormatOpenAIResponses, types.RelayFormatClaude}, info.ConversionChain)
-
-	if claudeReq.IsStringSystem() {
-		assert.Equal(t, "system rules", claudeReq.GetStringSystem())
-	} else {
-		system, err := kitutil.Any2Type[[]dto.ClaudeMediaMessage](claudeReq.System)
-		require.NoError(t, err)
-		require.Len(t, system, 1)
-		assert.Equal(t, "system rules", system[0].GetText())
-	}
-	require.NotNil(t, claudeReq.Stream)
-	assert.True(t, *claudeReq.Stream)
-	assert.Equal(t, maxOutputTokens, *claudeReq.MaxTokens)
-	require.NotNil(t, claudeReq.Thinking)
-	assert.Equal(t, "adaptive", claudeReq.Thinking.Type)
-	assert.Nil(t, claudeReq.Thinking.BudgetTokens)
-	assert.JSONEq(t, `{"effort":"medium"}`, string(claudeReq.OutputConfig))
-
-	tools, err := kitutil.Any2Type[[]*dto.Tool](claudeReq.Tools)
-	require.NoError(t, err)
-	require.Len(t, tools, 1)
-	assert.Equal(t, "lookup", tools[0].Name)
-
-	require.Len(t, claudeReq.Messages, 3)
-	assert.Equal(t, "user", claudeReq.Messages[0].Role)
-	userParts, err := claudeReq.Messages[0].ParseContent()
-	require.NoError(t, err)
-	require.Len(t, userParts, 1)
-	assert.Equal(t, "question", userParts[0].GetText())
-
-	assert.Equal(t, "assistant", claudeReq.Messages[1].Role)
-	assistantParts, err := claudeReq.Messages[1].ParseContent()
-	require.NoError(t, err)
-	require.Len(t, assistantParts, 2)
-	assert.Equal(t, "I will call.", assistantParts[0].GetText())
-	assert.Equal(t, "tool_use", assistantParts[1].Type)
-	assert.Equal(t, "call_1", assistantParts[1].Id)
-	assert.Equal(t, "lookup", assistantParts[1].Name)
-	assert.Equal(t, map[string]any{"q": "x"}, assistantParts[1].Input)
-
-	assert.Equal(t, "user", claudeReq.Messages[2].Role)
-	toolResultParts, err := claudeReq.Messages[2].ParseContent()
-	require.NoError(t, err)
-	require.Len(t, toolResultParts, 1)
-	assert.Equal(t, "tool_result", toolResultParts[0].Type)
-	assert.Equal(t, "call_1", toolResultParts[0].ToolUseId)
-	assert.Equal(t, `{"ok":true}`, toolResultParts[0].Content)
-}
-
 func TestConvertRequestViaResponsesToGeminiStillUsesDirectSteps(t *testing.T) {
 	info := &convmeta.Values{
 		ConversionChain:     []types.RelayFormat{types.RelayFormatOpenAIResponses},
@@ -1033,17 +596,22 @@ func TestConvertRequestViaResponsesToGeminiStillUsesDirectSteps(t *testing.T) {
 
 	require.NoError(t, err)
 	require.IsType(t, &dto.GeminiChatRequest{}, result.Value)
-	assert.Equal(t, ConverterOpenAIResponsesToGemini, result.Converter)
+	assert.Equal(t, ConverterOpenAIResponsesToOpenAIChat+","+ConverterOpenAIChatToGeminiContent, result.Converter)
 	assert.Equal(t, []RequestStep{
 		{
-			Converter: ConverterOpenAIResponsesToGemini,
+			Converter: ConverterOpenAIResponsesToOpenAIChat,
 			From:      types.RelayFormatOpenAIResponses,
+			To:        types.RelayFormatOpenAI,
+		},
+		{
+			Converter: ConverterOpenAIChatToGeminiContent,
+			From:      types.RelayFormatOpenAI,
 			To:        types.RelayFormatGemini,
 		},
 	}, result.Steps)
 }
 
-func TestConvertRequestDeduplicatesConversionChain(t *testing.T) {
+func TestConvertRequestByIDDeduplicatesConversionChain(t *testing.T) {
 	info := &convmeta.Values{
 		ConversionChain: []types.RelayFormat{types.RelayFormatOpenAI, types.RelayFormatOpenAIResponses},
 	}
@@ -1054,7 +622,7 @@ func TestConvertRequestDeduplicatesConversionChain(t *testing.T) {
 		},
 	}
 
-	result, err := ConvertRequest(nil, info, types.RelayFormatOpenAIResponses, req)
+	result, err := ConvertRequestByID(nil, info, ConverterOpenAIChatToOpenAIResponses, req)
 
 	require.NoError(t, err)
 	require.IsType(t, &dto.OpenAIResponsesRequest{}, result.Value)
@@ -1062,10 +630,53 @@ func TestConvertRequestDeduplicatesConversionChain(t *testing.T) {
 	assert.Equal(t, []types.RelayFormat{types.RelayFormatOpenAI, types.RelayFormatOpenAIResponses}, info.ConversionChain)
 }
 
+func TestConvertRequestByIDExecutesDirectClaudeToResponsesConverter(t *testing.T) {
+	info := &convmeta.Values{
+		ConversionChain: []types.RelayFormat{types.RelayFormatClaude},
+	}
+	req := &dto.ClaudeRequest{
+		Model: "claude-test",
+		Messages: []dto.ClaudeMessage{
+			{Role: "user", Content: "hello"},
+		},
+	}
+
+	result, err := ConvertRequestByID(nil, info, requestConverterClaudeToResponses, req)
+
+	require.NoError(t, err)
+	require.IsType(t, &dto.OpenAIResponsesRequest{}, result.Value)
+	assert.Equal(t, requestConverterClaudeToResponses, result.Converter)
+	assert.Equal(t, RequestConverterQualityFair, result.Quality)
+	assert.Equal(t, []RequestStep{
+		{
+			Converter: requestConverterClaudeToResponses,
+			From:      types.RelayFormatClaude,
+			To:        types.RelayFormatOpenAIResponses,
+		},
+	}, result.Steps)
+	assert.Equal(t, []types.RelayFormat{types.RelayFormatClaude, types.RelayFormatOpenAIResponses}, info.ConversionChain)
+}
+
 func TestConvertRequestRejectsUnsupportedConverterAndNilRequest(t *testing.T) {
-	_, err := ConvertRequest(nil, &convmeta.Values{}, types.RelayFormatOpenAIResponses, (*dto.GeneralOpenAIRequest)(nil))
+	_, err := ConvertRequestByID(nil, &convmeta.Values{}, "missing_converter", &dto.GeneralOpenAIRequest{Model: "gpt-test"})
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "not registered")
+
+	_, err = ConvertRequest(nil, &convmeta.Values{}, types.RelayFormatOpenAIResponses, (*dto.GeneralOpenAIRequest)(nil))
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "request is nil")
+}
+
+func TestConvertRequestByIDRejectsWrongSourceFormat(t *testing.T) {
+	_, err := ConvertRequestByID(
+		nil,
+		&convmeta.Values{},
+		ConverterOpenAIChatToOpenAIResponses,
+		&dto.ClaudeRequest{Model: "claude-test"},
+	)
+
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "expects openai request")
 }
 
 func TestConvertRequestRejectsUnregisteredExplicitPath(t *testing.T) {
@@ -1080,34 +691,21 @@ func TestConvertRequestRejectsUnregisteredExplicitPath(t *testing.T) {
 	assert.Contains(t, err.Error(), "from claude to embedding is not registered")
 }
 
-func requireGeminiThinkingControl(t *testing.T, req *dto.GeminiChatRequest, include bool, budget *int, level string) {
-	t.Helper()
-	require.NotNil(t, req.GenerationConfig.ThinkingConfig)
-	cfg := req.GenerationConfig.ThinkingConfig
-	require.Equal(t, include, cfg.IncludeThoughts)
-	require.Equal(t, level, cfg.ThinkingLevel)
-	if budget == nil {
-		require.Nil(t, cfg.ThinkingBudget)
-	} else {
-		require.NotNil(t, cfg.ThinkingBudget)
-		require.Equal(t, *budget, *cfg.ThinkingBudget)
-	}
-	require.False(t, cfg.ThinkingBudget != nil && cfg.ThinkingLevel != "", "thinkingBudget and thinkingLevel must be mutually exclusive")
-}
-
-func requireRequestLoss(t *testing.T, report ir.Report, field string) {
-	t.Helper()
-	for _, loss := range report.Losses {
-		if loss.Field == field && loss.Kind == ir.LossCoerced {
-			return
-		}
-	}
-	t.Fatalf("missing coerced loss %q in %#v", field, report.Losses)
-}
-
 func mustRawMessage(t *testing.T, value any) []byte {
 	t.Helper()
 	raw, err := kitutil.Marshal(value)
 	require.NoError(t, err)
 	return raw
+}
+
+func inputContentText(t *testing.T, item map[string]any) string {
+	t.Helper()
+	content, ok := item["content"].([]any)
+	require.True(t, ok)
+	require.Len(t, content, 1)
+	part, ok := content[0].(map[string]any)
+	require.True(t, ok)
+	text, ok := part["text"].(string)
+	require.True(t, ok)
+	return text
 }

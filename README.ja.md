@@ -108,23 +108,6 @@
 
 ## 🚀 クイックスタート
 
-### この Fork
-
-```bash
-# この fork をクローン
-git clone https://github.com/zhaibingye/shuanghua-api.git
-cd shuanghua-api
-
-# docker-compose.yml に設定された fork イメージで起動
-docker compose up -d
-```
-
-Fork Docker イメージ: `yeranshuanghua/shuanghua-api:latest`
-
-この compose は PostgreSQL / Redis が healthy になってからアプリを起動します。Docker Compose v2（`docker compose`。旧 `docker-compose` ではありません）を使ってください。ログ確認: `docker compose logs -f new-api`。
-
-`yeranshuanghua/shuanghua-api:latest` の pull が遅い・失敗する場合（Docker Hub 未キャッシュやレート制限でよく起きます）は、レジストリミラーを設定してから `docker compose pull && docker compose up -d` を実行してください。公式 QuantumNous/new-api を先にデプロイする必要は**ありません**。
-
 ### Docker Composeを使用（推奨）
 
 ```bash
@@ -301,7 +284,7 @@ docker run --name new-api -d --restart always \
 - [レスポンスインターフェース (Responses)](https://docs.newapi.pro/ja/docs/api/ai-model/chat/openai/createresponse)
 - [イメージインターフェース (Image)](https://docs.newapi.pro/ja/docs/api/ai-model/images/openai/post-v1-images-generations)
 - [オーディオインターフェース (Audio)](https://docs.newapi.pro/ja/docs/api/ai-model/audio/openai/create-transcription)
-- [ビデオインターフェース (Video)](https://docs.newapi.pro/ja/docs/api/ai-model/audio/openai/createspeech)
+- [ビデオインターフェース (Video)](https://docs.newapi.pro/ja/docs/api/ai-model/videos/sora/createvideo)
 - [エンベッドインターフェース (Embeddings)](https://docs.newapi.pro/ja/docs/api/ai-model/embeddings/createembedding)
 - [再ランク付けインターフェース (Rerank)](https://docs.newapi.pro/ja/docs/api/ai-model/rerank/creatererank)
 - [リアルタイム対話インターフェース (Realtime)](https://docs.newapi.pro/ja/docs/api/ai-model/realtime/createrealtimesession)
@@ -499,10 +482,6 @@ Token、Origin 検証、PAT の契約については[ユーザー認証とログ
 ## 🌟 スター履歴
 
 <div align="center">
-
-[![Fork Star History Chart](https://api.star-history.com/svg?repos=zhaibingye/shuanghua-api&type=Date)](https://star-history.com/#zhaibingye/shuanghua-api&Date)
-
-<sub>Fork リポジトリ: zhaibingye/shuanghua-api</sub>
 
 [![スター履歴チャート](https://api.star-history.com/svg?repos=Calcium-Ion/new-api&type=Date)](https://star-history.com/#Calcium-Ion/new-api&Date)
 

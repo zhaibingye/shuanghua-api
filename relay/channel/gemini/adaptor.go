@@ -13,6 +13,7 @@ import (
 	"github.com/QuantumNous/new-api/relaykit/dto"
 	"github.com/QuantumNous/new-api/relaykit/relayconvert"
 	"github.com/QuantumNous/new-api/relaykit/types"
+	"github.com/QuantumNous/new-api/service"
 	"github.com/QuantumNous/new-api/setting/model_setting"
 
 	"github.com/gin-gonic/gin"
@@ -22,54 +23,17 @@ import (
 type Adaptor struct {
 }
 
-func nativeGeminiAction(info *relaycommon.RelayInfo) string {
-	if info == nil || info.RelayMode != constant.RelayModeGemini {
-		return ""
-	}
-	requestPath := strings.SplitN(info.RequestURLPath, "?", 2)[0]
-	separator := strings.LastIndex(requestPath, ":")
-	if separator < 0 || separator == len(requestPath)-1 {
-		return ""
-	}
-	action := requestPath[separator+1:]
-	switch action {
-	case "generateContent", "streamGenerateContent", "countTokens", "embedContent", "batchEmbedContents", "predict":
-		return action
-	default:
-		return ""
-	}
-}
-
-func nativeGeminiVersion(info *relaycommon.RelayInfo) string {
-	if info == nil || info.RelayMode != constant.RelayModeGemini {
-		return ""
-	}
-	requestPath := strings.TrimPrefix(strings.SplitN(info.RequestURLPath, "?", 2)[0], "/")
-	version, _, found := strings.Cut(requestPath, "/")
-	if !found {
-		return ""
-	}
-	switch version {
-	case "v1beta":
-		return version
-	default:
-		return ""
-	}
-}
-
 func (a *Adaptor) ConvertGeminiRequest(c *gin.Context, info *relaycommon.RelayInfo, request *dto.GeminiChatRequest) (any, error) {
-	if request == nil {
-		return nil, errors.New("request is nil")
-	}
-	if nativeGeminiAction(info) == "countTokens" {
-		return request, nil
+	if err := relayconvert.ApplyGeminiThinkingConfigChecked(request, info); err != nil {
+		return nil, err
 	}
 	if len(request.Contents) > 0 {
-		if request.Contents[0].Role == "" {
-			request.Contents[0].Role = "user"
-		}
-		relayconvert.NormalizeGeminiTurnBoundaries(request)
-		for _, content := range request.Contents {
+		for i, content := range request.Contents {
+			if i == 0 {
+				if request.Contents[0].Role == "" {
+					request.Contents[0].Role = "user"
+				}
+			}
 			for _, part := range content.Parts {
 				if part.FileData != nil {
 					if part.FileData.MimeType == "" && strings.Contains(part.FileData.FileUri, "www.youtube.com") {
@@ -82,23 +46,8 @@ func (a *Adaptor) ConvertGeminiRequest(c *gin.Context, info *relaycommon.RelayIn
 	return request, nil
 }
 
-func (a *Adaptor) ConvertClaudeRequest(*gin.Context, *relaycommon.RelayInfo, *dto.ClaudeRequest) (any, error) {
-	return channel.ForeignTextRequest("gemini.ConvertClaudeRequest")
-}
-
-func (a *Adaptor) ConvertAudioRequest(c *gin.Context, info *relaycommon.RelayInfo, request dto.AudioRequest) (io.Reader, error) {
-	//TODO implement me
-	return nil, errors.New("not implemented")
-}
-
-func (a *Adaptor) ConvertImageRequest(c *gin.Context, info *relaycommon.RelayInfo, request dto.ImageRequest) (any, error) {
-	if relayconvert.IsImagenPredictModel(info.UpstreamModelName) {
-		return convertImagenPredictRequest(request), nil
-	}
-	if !geminiNativeImageModelAllowed(info, request.Model) {
-		return nil, errors.New("not supported model for image generation; add it to Gemini native image models")
-	}
-	result, err := relayconvert.ConvertRequest(c, info, types.RelayFormatGemini, &request)
+func (a *Adaptor) ConvertClaudeRequest(c *gin.Context, info *relaycommon.RelayInfo, req *dto.ClaudeRequest) (any, error) {
+	result, err := service.ConvertRequest(c, info, types.RelayFormatGemini, req)
 	if err != nil {
 		return nil, err
 	}
@@ -109,21 +58,18 @@ func (a *Adaptor) ConvertImageRequest(c *gin.Context, info *relaycommon.RelayInf
 	return geminiRequest, nil
 }
 
-func geminiNativeImageModelAllowed(info *relaycommon.RelayInfo, requestModel string) bool {
-	names := []string{requestModel}
-	if info != nil {
-		names = append(names, info.UpstreamModelName, info.OriginModelName)
-	}
-	for _, name := range names {
-		if model_setting.IsGeminiModelSupportImagine(name) {
-			return true
-		}
-	}
-	return false
+func (a *Adaptor) ConvertAudioRequest(c *gin.Context, info *relaycommon.RelayInfo, request dto.AudioRequest) (io.Reader, error) {
+	//TODO implement me
+	return nil, errors.New("not implemented")
 }
 
-func convertImagenPredictRequest(request dto.ImageRequest) dto.GeminiImageRequest {
-	aspectRatio := "1:1"
+func (a *Adaptor) ConvertImageRequest(c *gin.Context, info *relaycommon.RelayInfo, request dto.ImageRequest) (any, error) {
+	if !strings.HasPrefix(info.UpstreamModelName, "imagen") {
+		return nil, errors.New("not supported model for image generation, only imagen models are supported")
+	}
+
+	// convert size to aspect ratio but allow user to specify aspect ratio
+	aspectRatio := "1:1" // default aspect ratio
 	size := strings.TrimSpace(request.Size)
 	if size != "" {
 		if strings.Contains(size, ":") {
@@ -144,6 +90,7 @@ func convertImagenPredictRequest(request dto.ImageRequest) dto.GeminiImageReques
 		}
 	}
 
+	// build gemini imagen request
 	geminiRequest := dto.GeminiImageRequest{
 		Instances: []dto.GeminiImageInstance{
 			{
@@ -153,24 +100,33 @@ func convertImagenPredictRequest(request dto.ImageRequest) dto.GeminiImageReques
 		Parameters: dto.GeminiImageParameters{
 			SampleCount:      int(lo.FromPtrOr(request.N, uint(1))),
 			AspectRatio:      aspectRatio,
-			PersonGeneration: "allow_adult",
+			PersonGeneration: "allow_adult", // default allow adult
 		},
 	}
 
+	// Set imageSize when quality parameter is specified
+	// Map quality parameter to imageSize (only supported by Standard and Ultra models)
+	// quality values: auto, high, medium, low (for gpt-image-1), hd, standard (for dall-e-3)
+	// imageSize values: 1K (default), 2K
+	// https://ai.google.dev/gemini-api/docs/imagen
+	// https://platform.openai.com/docs/api-reference/images/create
 	if request.Quality != "" {
-		imageSize := "1K"
+		imageSize := "1K" // default
 		switch request.Quality {
-		case "hd", "high", "2K":
+		case "hd", "high":
 			imageSize = "2K"
-		case "4K":
-			imageSize = "4K"
+		case "2K":
+			imageSize = "2K"
 		case "standard", "medium", "low", "auto", "1K":
+			imageSize = "1K"
+		default:
+			// unknown quality value, default to 1K
 			imageSize = "1K"
 		}
 		geminiRequest.Parameters.ImageSize = imageSize
 	}
 
-	return geminiRequest
+	return geminiRequest, nil
 }
 
 func (a *Adaptor) Init(info *relaycommon.RelayInfo) {
@@ -178,41 +134,31 @@ func (a *Adaptor) Init(info *relaycommon.RelayInfo) {
 }
 
 func (a *Adaptor) GetRequestURL(info *relaycommon.RelayInfo) (string, error) {
-	modelName := URLModelName(info)
-	version := model_setting.GetGeminiVersionSetting(modelName)
-	if action := nativeGeminiAction(info); action != "" {
-		if requestVersion := nativeGeminiVersion(info); requestVersion != "" {
-			version = requestVersion
-		}
-		if action == "streamGenerateContent" {
-			action += "?alt=sse"
-			info.DisablePing = true
-		}
-		return fmt.Sprintf("%s/%s/models/%s:%s", info.ChannelBaseUrl, version, modelName, action), nil
+
+	version := model_setting.GetGeminiVersionSetting(info.UpstreamModelName)
+
+	if strings.HasPrefix(info.UpstreamModelName, "imagen") {
+		return fmt.Sprintf("%s/%s/models/%s:predict", info.ChannelBaseUrl, version, info.UpstreamModelName), nil
 	}
 
-	if relayconvert.IsImagenPredictModel(modelName) {
-		return fmt.Sprintf("%s/%s/models/%s:predict", info.ChannelBaseUrl, version, modelName), nil
-	}
-
-	if strings.HasPrefix(modelName, "text-embedding") ||
-		strings.HasPrefix(modelName, "embedding") ||
-		strings.HasPrefix(modelName, "gemini-embedding") {
+	if strings.HasPrefix(info.UpstreamModelName, "text-embedding") ||
+		strings.HasPrefix(info.UpstreamModelName, "embedding") ||
+		strings.HasPrefix(info.UpstreamModelName, "gemini-embedding") {
 		action := "embedContent"
 		if info.IsGeminiBatchEmbedding {
 			action = "batchEmbedContents"
 		}
-		return fmt.Sprintf("%s/%s/models/%s:%s", info.ChannelBaseUrl, version, modelName, action), nil
+		return fmt.Sprintf("%s/%s/models/%s:%s", info.ChannelBaseUrl, version, info.UpstreamModelName, action), nil
 	}
 
 	action := "generateContent"
-	if info.IsStream && !IsImageAPIRelay(info) {
+	if info.IsStream {
 		action = "streamGenerateContent?alt=sse"
 		if info.RelayMode == constant.RelayModeGemini {
 			info.DisablePing = true
 		}
 	}
-	return fmt.Sprintf("%s/%s/models/%s:%s", info.ChannelBaseUrl, version, modelName, action), nil
+	return fmt.Sprintf("%s/%s/models/%s:%s", info.ChannelBaseUrl, version, info.UpstreamModelName, action), nil
 }
 
 func (a *Adaptor) SetupRequestHeader(c *gin.Context, req *http.Header, info *relaycommon.RelayInfo) error {
@@ -221,8 +167,15 @@ func (a *Adaptor) SetupRequestHeader(c *gin.Context, req *http.Header, info *rel
 	return nil
 }
 
-func (a *Adaptor) ConvertOpenAIRequest(*gin.Context, *relaycommon.RelayInfo, *dto.GeneralOpenAIRequest) (any, error) {
-	return channel.ForeignTextRequest("gemini.ConvertOpenAIRequest")
+func (a *Adaptor) ConvertOpenAIRequest(c *gin.Context, info *relaycommon.RelayInfo, request *dto.GeneralOpenAIRequest) (any, error) {
+	if request == nil {
+		return nil, errors.New("request is nil")
+	}
+	result, err := service.ConvertRequest(c, info, types.RelayFormatGemini, request)
+	if err != nil {
+		return nil, err
+	}
+	return result.Value, nil
 }
 
 func (a *Adaptor) ConvertRerankRequest(c *gin.Context, relayMode int, request dto.RerankRequest) (any, error) {
@@ -273,8 +226,16 @@ func (a *Adaptor) ConvertEmbeddingRequest(c *gin.Context, info *relaycommon.Rela
 	}, nil
 }
 
-func (a *Adaptor) ConvertOpenAIResponsesRequest(*gin.Context, *relaycommon.RelayInfo, dto.OpenAIResponsesRequest) (any, error) {
-	return channel.ForeignTextRequest("gemini.ConvertOpenAIResponsesRequest")
+func (a *Adaptor) ConvertOpenAIResponsesRequest(c *gin.Context, info *relaycommon.RelayInfo, request dto.OpenAIResponsesRequest) (any, error) {
+	result, err := service.ConvertRequest(c, info, types.RelayFormatGemini, &request)
+	if err != nil {
+		return nil, err
+	}
+	geminiRequest, ok := result.Value.(*dto.GeminiChatRequest)
+	if !ok {
+		return nil, fmt.Errorf("expected Gemini generateContent request, got %T", result.Value)
+	}
+	return geminiRequest, nil
 }
 
 func (a *Adaptor) DoRequest(c *gin.Context, info *relaycommon.RelayInfo, requestBody io.Reader) (any, error) {
@@ -290,9 +251,6 @@ func (a *Adaptor) DoResponse(c *gin.Context, resp *http.Response, info *relaycom
 	}
 
 	if info.RelayMode == constant.RelayModeGemini {
-		if nativeGeminiAction(info) == "countTokens" {
-			return GeminiCountTokensHandler(c, resp)
-		}
 		if strings.Contains(info.RequestURLPath, ":embedContent") ||
 			strings.Contains(info.RequestURLPath, ":batchEmbedContents") {
 			return NativeGeminiEmbeddingHandler(c, resp, info)
@@ -304,10 +262,7 @@ func (a *Adaptor) DoResponse(c *gin.Context, resp *http.Response, info *relaycom
 		}
 	}
 
-	if IsImageAPIRelay(info) {
-		return HandleGeminiImageAPIResponse(c, info, resp)
-	}
-	if relayconvert.IsImagenPredictModel(info.UpstreamModelName) {
+	if strings.HasPrefix(info.UpstreamModelName, "imagen") {
 		return GeminiImageHandler(c, info, resp)
 	}
 

@@ -17,32 +17,6 @@ import (
 	"github.com/gin-gonic/gin"
 )
 
-type geminiCountTokensResponse struct {
-	TotalTokens int `json:"totalTokens"`
-}
-
-func GeminiCountTokensHandler(c *gin.Context, resp *http.Response) (*dto.Usage, *types.NewAPIError) {
-	defer service.CloseResponseBodyGracefully(resp)
-
-	responseBody, err := io.ReadAll(resp.Body)
-	if err != nil {
-		return nil, types.NewOpenAIError(err, types.ErrorCodeBadResponseBody, http.StatusInternalServerError)
-	}
-
-	var countResponse geminiCountTokensResponse
-	if err = common.Unmarshal(responseBody, &countResponse); err != nil {
-		return nil, types.NewOpenAIError(err, types.ErrorCodeBadResponseBody, http.StatusInternalServerError)
-	}
-
-	usage := &dto.Usage{
-		PromptTokens: countResponse.TotalTokens,
-		TotalTokens:  countResponse.TotalTokens,
-	}
-	attachEstimatedGeminiBillingUsage(usage)
-	service.IOCopyBytesGracefully(c, resp, responseBody)
-	return usage, nil
-}
-
 func GeminiTextGenerationHandler(c *gin.Context, info *relaycommon.RelayInfo, resp *http.Response) (*dto.Usage, *types.NewAPIError) {
 	defer service.CloseResponseBodyGracefully(resp)
 
@@ -60,6 +34,7 @@ func GeminiTextGenerationHandler(c *gin.Context, info *relaycommon.RelayInfo, re
 	if err != nil {
 		return nil, types.NewOpenAIError(err, types.ErrorCodeBadResponseBody, http.StatusInternalServerError)
 	}
+	countGeminiBillableFunctionCalls(info, &geminiResponse)
 
 	if len(geminiResponse.Candidates) == 0 && geminiResponse.PromptFeedback != nil && geminiResponse.PromptFeedback.BlockReason != nil {
 		common.SetContextKey(c, constant.ContextKeyAdminRejectReason, fmt.Sprintf("gemini_block_reason=%s", *geminiResponse.PromptFeedback.BlockReason))

@@ -107,23 +107,6 @@
 
 ## 🚀 快速開始
 
-### 目前 Fork
-
-```bash
-# 複製目前 fork
-git clone https://github.com/zhaibingye/shuanghua-api.git
-cd shuanghua-api
-
-# 使用 docker-compose.yml 中設定的 fork 鏡像啟動
-docker compose up -d
-```
-
-目前 Fork Docker 鏡像：`yeranshuanghua/shuanghua-api:latest`
-
-此 compose 會等 PostgreSQL / Redis 健康後再啟動主服務。請使用 Docker Compose v2（`docker compose`，不是舊版 `docker-compose`）。查看日誌：`docker compose logs -f new-api`。
-
-若拉取 `yeranshuanghua/shuanghua-api:latest` 很慢或失敗（Docker Hub 未快取/限流時很常見），請設定鏡像加速後執行 `docker compose pull && docker compose up -d`。**不必**先部署官方 QuantumNous/new-api。
-
 ### 使用 Docker Compose（推薦）
 
 ```bash
@@ -298,7 +281,7 @@ docker run --name new-api -d --restart always \
 - [響應接口 (Responses)](https://docs.newapi.pro/zh/docs/api/ai-model/chat/openai/createresponse)
 - [圖像接口 (Image)](https://docs.newapi.pro/zh/docs/api/ai-model/images/openai/post-v1-images-generations)
 - [音訊接口 (Audio)](https://docs.newapi.pro/zh/docs/api/ai-model/audio/openai/create-transcription)
-- [影片接口 (Video)](https://docs.newapi.pro/zh/docs/api/ai-model/audio/openai/createspeech)
+- [影片接口 (Video)](https://docs.newapi.pro/zh/docs/api/ai-model/videos/sora/createvideo)
 - [嵌入接口 (Embeddings)](https://docs.newapi.pro/zh/docs/api/ai-model/embeddings/createembedding)
 - [重排序接口 (Rerank)](https://docs.newapi.pro/zh/docs/api/ai-model/rerank/creatererank)
 - [即時對話 (Realtime)](https://docs.newapi.pro/zh/docs/api/ai-model/realtime/createrealtimesession)
@@ -498,10 +481,6 @@ Token、Origin 驗證和 PAT 契約請參閱[使用者鑑權與登入工作階�
 ## 🌟 Star History
 
 <div align="center">
-
-[![Fork Star History Chart](https://api.star-history.com/svg?repos=zhaibingye/shuanghua-api&type=Date)](https://star-history.com/#zhaibingye/shuanghua-api&Date)
-
-<sub>目前 Fork 倉庫：zhaibingye/shuanghua-api</sub>
 
 [![Star History Chart](https://api.star-history.com/svg?repos=Calcium-Ion/new-api&type=Date)](https://star-history.com/#Calcium-Ion/new-api&Date)
 

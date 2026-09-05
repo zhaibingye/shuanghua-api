@@ -14,10 +14,12 @@ const (
 	ContentModerationChannelsOption               = "ContentModerationChannels"
 	ContentModerationUserWhitelistOption          = "ContentModerationUserWhitelist"
 	ContentModerationViolationRetentionDaysOption = "ContentModerationViolationRetentionDays"
-	ContentModerationProviderOption               = "ContentModerationProvider"
+	ContentModerationProviderOption               = "ContentModerationProvider" // retained for backward-compatible reads
 	ContentModerationBaseURLOption                = "ContentModerationBaseURL"
 	ContentModerationAPIKeyOption                 = "ContentModerationAPIKey"
 	ContentModerationModelOption                  = "ContentModerationModel"
+	ContentModerationPreflightOption              = "ContentModerationPreflight"
+	ContentModerationFailureModeOption            = "ContentModerationFailureMode"
 	ContentModerationTimeoutSecondsOption         = "ContentModerationTimeoutSeconds"
 	ContentModerationMaxRetriesOption             = "ContentModerationMaxRetries"
 	ContentModerationNormalSampleRateOption       = "ContentModerationNormalSampleRate"
@@ -27,7 +29,10 @@ const (
 )
 
 const (
-	DefaultContentModerationProvider               = "responses"
+	DefaultContentModerationProvider               = "moderations"
+	DefaultContentModerationModel                  = "omni-moderation-latest"
+	DefaultContentModerationPreflight              = true
+	DefaultContentModerationFailureMode            = "closed"
 	DefaultContentModerationTimeoutSeconds         = 30
 	DefaultContentModerationMaxRetries             = 3
 	DefaultContentModerationNormalSampleRate       = 10
@@ -46,10 +51,12 @@ type ContentModerationSetting struct {
 	UserWhitelist          string
 	UserWhitelistIDs       []int
 	ViolationRetentionDays int
-	Provider               string
+	Provider               string // legacy field; native OpenAI Moderations API is used by default
 	BaseURL                string
 	APIKey                 string
 	Model                  string
+	PreflightEnabled       bool
+	FailureMode            string
 	TimeoutSeconds         int
 	MaxRetries             int
 	NormalSampleRate       int
@@ -74,7 +81,9 @@ func GetContentModerationSetting() ContentModerationSetting {
 		apiKey = ""
 	}
 	provider := strings.ToLower(optionString(ContentModerationProviderOption, DefaultContentModerationProvider))
-	if provider != "responses" && provider != "gemini" {
+	// responses/gemini remain readable for one upgrade cycle, but all new
+	// installations use the first-party /moderations contract.
+	if provider != "moderations" && provider != "responses" && provider != "gemini" {
 		provider = DefaultContentModerationProvider
 	}
 	timeoutSeconds := optionInt(ContentModerationTimeoutSecondsOption, DefaultContentModerationTimeoutSeconds)
@@ -98,7 +107,10 @@ func GetContentModerationSetting() ContentModerationSetting {
 		common.SysError("content moderation API URL exceeds the configured length limit")
 		baseURL = ""
 	}
-	modelName := optionString(ContentModerationModelOption, "")
+	modelName := optionString(ContentModerationModelOption, DefaultContentModerationModel)
+	if modelName == "" {
+		modelName = DefaultContentModerationModel
+	}
 	if len(modelName) > 128 {
 		common.SysError("content moderation model exceeds the configured length limit")
 		modelName = ""
@@ -123,6 +135,11 @@ func GetContentModerationSetting() ContentModerationSetting {
 		userWhitelistIDs = append([]int{RootAdminUserID}, userWhitelistIDs...)
 		slices.Sort(userWhitelistIDs)
 	}
+	preflightEnabled := optionBool(ContentModerationPreflightOption, DefaultContentModerationPreflight)
+	failureMode := strings.ToLower(optionString(ContentModerationFailureModeOption, DefaultContentModerationFailureMode))
+	if failureMode != "open" && failureMode != "closed" {
+		failureMode = DefaultContentModerationFailureMode
+	}
 	return ContentModerationSetting{
 		Enabled:                optionBool(ContentModerationEnabledOption, false),
 		Channels:               FormatChannelIDs(channelIDs),
@@ -134,6 +151,8 @@ func GetContentModerationSetting() ContentModerationSetting {
 		BaseURL:                baseURL,
 		APIKey:                 apiKey,
 		Model:                  modelName,
+		PreflightEnabled:       preflightEnabled,
+		FailureMode:            failureMode,
 		TimeoutSeconds:         timeoutSeconds,
 		MaxRetries:             maxRetries,
 		NormalSampleRate:       normalSampleRate,

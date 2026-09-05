@@ -221,10 +221,6 @@ export interface CheckinStats {
 export interface CheckinStatusResponse {
   /** Whether check-in feature is enabled */
   enabled: boolean
-  /** Minimum quota awarded for a check-in */
-  min_quota: number
-  /** Maximum quota awarded for a check-in */
-  max_quota: number
   /** Check-in statistics */
   stats: CheckinStats
 }
@@ -235,6 +231,4 @@ export interface CheckinStatusResponse {
 export interface CheckinResponse {
   /** Quota awarded for this check-in */
   quota_awarded: number
-  /** Check-in date (YYYY-MM-DD) */
-  checkin_date: string
 }

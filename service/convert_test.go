@@ -101,15 +101,7 @@ func TestStreamResponseConverterFacadesAcceptTypedNilRelayInfo(t *testing.T) {
 
 	claudeResponses := StreamResponseOpenAI2Claude(streamResp, info)
 	require.NotEmpty(t, claudeResponses)
-	assert.Equal(t, "message_start", claudeResponses[0].Type)
-	foundBlockStart := false
-	for _, event := range claudeResponses {
-		if event != nil && event.Type == "content_block_start" {
-			foundBlockStart = true
-			break
-		}
-	}
-	require.True(t, foundBlockStart)
+	assert.Equal(t, "content_block_start", claudeResponses[0].Type)
 
 	geminiResp := StreamResponseOpenAI2Gemini(streamResp, info)
 	require.NotNil(t, geminiResp)

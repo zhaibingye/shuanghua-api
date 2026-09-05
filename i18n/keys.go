@@ -215,8 +215,6 @@ const (
 	MsgCheckinAlreadyToday = "checkin.already_today"
 	MsgCheckinFailed       = "checkin.failed"
 	MsgCheckinQuotaFailed  = "checkin.quota_failed"
-	MsgCheckinSuccess      = "checkin.success"
-	MsgCheckinInvalidMonth = "checkin.invalid_month"
 )
 
 // Passkey related messages
@@ -313,37 +311,29 @@ const (
 
 // Distributor related messages
 const (
-	MsgDistributorInvalidRequest          = "distributor.invalid_request"
-	MsgDistributorInvalidChannelId        = "distributor.invalid_channel_id"
-	MsgDistributorChannelDisabled         = "distributor.channel_disabled"
-	MsgDistributorAffinityChannelDisabled = "distributor.affinity_channel_disabled"
-	MsgDistributorTokenNoModelAccess      = "distributor.token_no_model_access"
-	MsgDistributorTokenModelForbidden     = "distributor.token_model_forbidden"
-	MsgDistributorModelNameRequired       = "distributor.model_name_required"
-	MsgDistributorInvalidPlayground       = "distributor.invalid_playground_request"
-	MsgDistributorGroupAccessDenied       = "distributor.group_access_denied"
-	MsgDistributorGetChannelFailed        = "distributor.get_channel_failed"
-	MsgDistributorNoAvailableChannel      = "distributor.no_available_channel"
-	MsgDistributorInvalidMidjourney       = "distributor.invalid_midjourney_request"
-	MsgDistributorInvalidParseModel       = "distributor.invalid_request_parse_model"
+	MsgDistributorInvalidRequest               = "distributor.invalid_request"
+	MsgDistributorInvalidChannelId             = "distributor.invalid_channel_id"
+	MsgDistributorChannelDisabled              = "distributor.channel_disabled"
+	MsgDistributorAffinityChannelDisabled      = "distributor.affinity_channel_disabled"
+	MsgDistributorTokenNoModelAccess           = "distributor.token_no_model_access"
+	MsgDistributorTokenModelForbidden          = "distributor.token_model_forbidden"
+	MsgDistributorModelNameRequired            = "distributor.model_name_required"
+	MsgDistributorInvalidPlayground            = "distributor.invalid_playground_request"
+	MsgDistributorGroupAccessDenied            = "distributor.group_access_denied"
+	MsgDistributorGetChannelFailed             = "distributor.get_channel_failed"
+	MsgDistributorNoAvailableChannel           = "distributor.no_available_channel"
+	MsgDistributorNoAvailableChannelTaskPlugin = "distributor.no_available_channel_task_plugin"
+	MsgDistributorInvalidMidjourney            = "distributor.invalid_midjourney_request"
+	MsgDistributorInvalidParseModel            = "distributor.invalid_request_parse_model"
 )
 
 // Custom OAuth provider related messages
 const (
-	MsgCustomOAuthNotFound               = "custom_oauth.not_found"
-	MsgCustomOAuthSlugEmpty              = "custom_oauth.slug_empty"
-	MsgCustomOAuthSlugExists             = "custom_oauth.slug_exists"
-	MsgCustomOAuthSlugConflict           = "custom_oauth.slug_conflict"
-	MsgCustomOAuthNameEmpty              = "custom_oauth.name_empty"
-	MsgCustomOAuthHasBindings            = "custom_oauth.has_bindings"
-	MsgCustomOAuthBindingNotFound        = "custom_oauth.binding_not_found"
-	MsgCustomOAuthProviderIdInvalid      = "custom_oauth.provider_id_field_invalid"
-	MsgCustomOAuthDiscoveryURLRequired   = "custom_oauth.discovery_url_required"
-	MsgCustomOAuthDiscoveryURLInvalid    = "custom_oauth.discovery_url_invalid"
-	MsgCustomOAuthDiscoveryRequestFailed = "custom_oauth.discovery_request_failed"
-	MsgCustomOAuthDiscoveryFetchFailed   = "custom_oauth.discovery_fetch_failed"
-	MsgCustomOAuthDiscoveryParseFailed   = "custom_oauth.discovery_parse_failed"
-	MsgCustomOAuthBindingCheckFailed     = "custom_oauth.binding_check_failed"
-	MsgCustomOAuthUnbindSuccess          = "custom_oauth.unbind_success"
-	MsgCustomOAuthInvalidProviderId      = "custom_oauth.invalid_provider_id"
+	MsgCustomOAuthNotFound          = "custom_oauth.not_found"
+	MsgCustomOAuthSlugEmpty         = "custom_oauth.slug_empty"
+	MsgCustomOAuthSlugExists        = "custom_oauth.slug_exists"
+	MsgCustomOAuthNameEmpty         = "custom_oauth.name_empty"
+	MsgCustomOAuthHasBindings       = "custom_oauth.has_bindings"
+	MsgCustomOAuthBindingNotFound   = "custom_oauth.binding_not_found"
+	MsgCustomOAuthProviderIdInvalid = "custom_oauth.provider_id_field_invalid"
 )

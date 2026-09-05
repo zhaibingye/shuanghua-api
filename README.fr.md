@@ -108,23 +108,6 @@
 
 ## 🚀 Démarrage rapide
 
-### Ce Fork
-
-```bash
-# Cloner ce fork
-git clone https://github.com/zhaibingye/shuanghua-api.git
-cd shuanghua-api
-
-# Démarrer avec l'image fork configurée dans docker-compose.yml
-docker compose up -d
-```
-
-Image Docker du fork : `yeranshuanghua/shuanghua-api:latest`
-
-Ce fichier compose attend que PostgreSQL et Redis soient sains avant de démarrer l'application. Utilisez Docker Compose v2 (`docker compose`, pas l'ancien `docker-compose`). Journaux : `docker compose logs -f new-api`.
-
-Si le pull de `yeranshuanghua/shuanghua-api:latest` est lent ou échoue (fréquent quand Docker Hub est limité ou non mis en cache), configurez un miroir de registre puis exécutez `docker compose pull && docker compose up -d`. Vous n'avez **pas** besoin de déployer QuantumNous/new-api d'abord.
-
 ### Utilisation de Docker Compose (recommandé)
 
 ```bash
@@ -299,7 +282,7 @@ docker run --name new-api -d --restart always \
 - [Interface de réponse (Responses)](https://docs.newapi.pro/en/docs/api/ai-model/chat/openai/createresponse)
 - [Interface d'image (Image)](https://docs.newapi.pro/en/docs/api/ai-model/images/openai/post-v1-images-generations)
 - [Interface audio (Audio)](https://docs.newapi.pro/en/docs/api/ai-model/audio/openai/create-transcription)
-- [Interface vidéo (Video)](https://docs.newapi.pro/en/docs/api/ai-model/audio/openai/createspeech)
+- [Interface vidéo (Video)](https://docs.newapi.pro/en/docs/api/ai-model/videos/sora/createvideo)
 - [Interface d'incorporation (Embeddings)](https://docs.newapi.pro/en/docs/api/ai-model/embeddings/createembedding)
 - [Interface de rerank (Rerank)](https://docs.newapi.pro/en/docs/api/ai-model/rerank/creatererank)
 - [Conversation en temps réel (Realtime)](https://docs.newapi.pro/en/docs/api/ai-model/realtime/createrealtimesession)
@@ -499,10 +482,6 @@ Si les politiques de votre organisation ne permettent pas l'utilisation de logic
 ## 🌟 Historique des étoiles
 
 <div align="center">
-
-[![Fork Star History Chart](https://api.star-history.com/svg?repos=zhaibingye/shuanghua-api&type=Date)](https://star-history.com/#zhaibingye/shuanghua-api&Date)
-
-<sub>Dépôt fork : zhaibingye/shuanghua-api</sub>
 
 [![Graphique de l'historique des étoiles](https://api.star-history.com/svg?repos=Calcium-Ion/new-api&type=Date)](https://star-history.com/#Calcium-Ion/new-api&Date)
 

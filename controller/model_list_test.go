@@ -34,11 +34,6 @@ type userModelsResponse struct {
 	Data    []string `json:"data"`
 }
 
-type geminiListModelsResponse struct {
-	Models        []dto.GeminiModel `json:"models"`
-	NextPageToken string            `json:"nextPageToken"`
-}
-
 func setupModelListControllerTestDB(t *testing.T) *gorm.DB {
 	t.Helper()
 
@@ -184,15 +179,6 @@ func decodeUserModelsResponse(t *testing.T, recorder *httptest.ResponseRecorder)
 	require.NoError(t, common.Unmarshal(recorder.Body.Bytes(), &payload))
 	require.True(t, payload.Success)
 	return payload.Data
-}
-
-func decodeGeminiListModelsResponse(t *testing.T, recorder *httptest.ResponseRecorder) geminiListModelsResponse {
-	t.Helper()
-
-	require.Equal(t, http.StatusOK, recorder.Code)
-	var payload geminiListModelsResponse
-	require.NoError(t, common.Unmarshal(recorder.Body.Bytes(), &payload))
-	return payload
 }
 
 func TestGetUserModelsFiltersByRequestedGroup(t *testing.T) {
@@ -445,89 +431,6 @@ func TestListModelsTokenLimitIncludesTieredBillingModel(t *testing.T) {
 	require.NotContains(t, ids, "zz-token-unpriced-model")
 }
 
-func TestListModelsGeminiReturnsNativeModelListShape(t *testing.T) {
-	withSelfUseModeEnabled(t)
-
-	db := setupModelListControllerTestDB(t)
-	require.NoError(t, db.Create(&[]model.Ability{
-		{Group: "default", Model: "gemini-2.5-flash", ChannelId: 1, Enabled: true},
-		{Group: "default", Model: "gemini-embedding-001", ChannelId: 1, Enabled: true},
-	}).Error)
-
-	recorder := httptest.NewRecorder()
-	ctx, _ := gin.CreateTestContext(recorder)
-	ctx.Request = httptest.NewRequest(http.MethodGet, "/v1beta/models", nil)
-	common.SetContextKey(ctx, constant.ContextKeyUserGroup, "default")
-
-	ListModels(ctx, constant.ChannelTypeGemini)
-
-	payload := decodeGeminiListModelsResponse(t, recorder)
-	assert.Equal(t, "", payload.NextPageToken)
-	require.Len(t, payload.Models, 2)
-
-	modelsByID := make(map[string]dto.GeminiModel, len(payload.Models))
-	for _, item := range payload.Models {
-		modelsByID[item.BaseModelId] = item
-	}
-
-	flash, ok := modelsByID["gemini-2.5-flash"]
-	require.True(t, ok)
-	assert.Equal(t, "models/gemini-2.5-flash", flash.Name)
-	assert.Equal(t, "gemini-2.5-flash", flash.DisplayName)
-	assert.Equal(t, []string{"generateContent", "countTokens"}, flash.SupportedGenerationMethods)
-
-	embedding, ok := modelsByID["gemini-embedding-001"]
-	require.True(t, ok)
-	assert.Equal(t, "models/gemini-embedding-001", embedding.Name)
-	assert.Equal(t, []string{"embedContent", "batchEmbedContents"}, embedding.SupportedGenerationMethods)
-
-	body := recorder.Body.String()
-	assert.NotContains(t, body, `"name":"gemini-2.5-flash"`)
-	assert.NotContains(t, body, `"supportedGenerationMethods":null`)
-	assert.NotContains(t, body, `"nextPageToken":null`)
-}
-
-func TestRetrieveModelGeminiReturnsNativeCPACompatibleShape(t *testing.T) {
-	withSelfUseModeEnabled(t)
-
-	db := setupModelListControllerTestDB(t)
-	require.NoError(t, db.Create(&model.Ability{
-		Group: "default", Model: "gemini-2.5-flash", ChannelId: 1, Enabled: true,
-	}).Error)
-
-	recorder := httptest.NewRecorder()
-	ctx, _ := gin.CreateTestContext(recorder)
-	ctx.Request = httptest.NewRequest(http.MethodGet, "/v1beta/models/gemini-2.5-flash", nil)
-	ctx.Params = gin.Params{{Key: "model", Value: "gemini-2.5-flash"}}
-	common.SetContextKey(ctx, constant.ContextKeyUserGroup, "default")
-
-	RetrieveModel(ctx, constant.ChannelTypeGemini)
-
-	assert.Equal(t, http.StatusOK, recorder.Code)
-	var response dto.GeminiModel
-	require.NoError(t, common.Unmarshal(recorder.Body.Bytes(), &response))
-	assert.Equal(t, "models/gemini-2.5-flash", response.Name)
-	assert.Equal(t, "gemini-2.5-flash", response.BaseModelId)
-	assert.Equal(t, "gemini-2.5-flash", response.Description)
-	assert.Equal(t, []string{"generateContent", "countTokens"}, response.SupportedGenerationMethods)
-}
-
-func TestRetrieveModelGeminiReturnsCPACompatibleNotFound(t *testing.T) {
-	withSelfUseModeEnabled(t)
-	setupModelListControllerTestDB(t)
-
-	recorder := httptest.NewRecorder()
-	ctx, _ := gin.CreateTestContext(recorder)
-	ctx.Request = httptest.NewRequest(http.MethodGet, "/v1beta/models/missing-model", nil)
-	ctx.Params = gin.Params{{Key: "model", Value: "missing-model"}}
-	common.SetContextKey(ctx, constant.ContextKeyUserGroup, "default")
-
-	RetrieveModel(ctx, constant.ChannelTypeGemini)
-
-	assert.Equal(t, http.StatusNotFound, recorder.Code)
-	assert.JSONEq(t, `{"error":{"message":"Not Found","type":"not_found"}}`, recorder.Body.String())
-}
-
 func TestListModelsTokenLimitUsesResolvedCustomAutoGroups(t *testing.T) {
 	withSelfUseModeEnabled(t)
 	originalMax := setting.GetMaxTokenAutoGroups()
@@ -592,7 +495,6 @@ func TestListModelsTokenLimitUsesResolvedCustomAutoGroups(t *testing.T) {
 
 func TestCheckUpdatePasswordRequiresCurrentPassword(t *testing.T) {
 	db := setupModelListControllerTestDB(t)
-
 	hashedPassword, err := common.Password2Hash("CurrentPassword123")
 	require.NoError(t, err)
 	user := &model.User{
@@ -618,7 +520,6 @@ func TestCheckUpdatePasswordRequiresCurrentPassword(t *testing.T) {
 
 func TestCheckUpdatePasswordRejectsHistoricalEmptyPassword(t *testing.T) {
 	db := setupModelListControllerTestDB(t)
-
 	user := &model.User{
 		Username: "legacy-passwordless-user",
 		Password: "",

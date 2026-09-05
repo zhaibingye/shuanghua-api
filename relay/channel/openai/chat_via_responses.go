@@ -41,29 +41,11 @@ func OaiResponsesToChatHandler(c *gin.Context, info *relaycommon.RelayInfo, resp
 		return nil, types.WithOpenAIError(*oaiError, resp.StatusCode)
 	}
 
-	client := info.RelayFormat
-	if client == "" {
-		client = types.RelayFormatOpenAI
-	}
-	converted, err := relayconvert.ConvertResponse(c, info, client, &responsesResp)
+	responseValue, usage, err := convertResponsesResponseForClient(c, info, &responsesResp)
 	if err != nil {
 		return nil, types.NewOpenAIError(err, types.ErrorCodeBadResponseBody, http.StatusInternalServerError)
 	}
-	usage := converted.Usage
-	if chatResp, ok := converted.Value.(*dto.OpenAITextResponse); ok {
-		if chatID := helper.GetResponseID(c); chatID != "" {
-			chatResp.Id = chatID
-		}
-		if usage == nil || usage.TotalTokens == 0 {
-			text := service.ExtractOutputTextFromResponses(&responsesResp)
-			usage = service.ResponseText2Usage(c, text, info.UpstreamModelName, info.GetEstimatePromptTokens())
-			chatResp.Usage = *usage
-		}
-	} else if usage == nil || usage.TotalTokens == 0 {
-		text := service.ExtractOutputTextFromResponses(&responsesResp)
-		usage = service.ResponseText2Usage(c, text, info.UpstreamModelName, info.GetEstimatePromptTokens())
-	}
-	responseBody, err := common.Marshal(converted.Value)
+	responseBody, err := common.Marshal(responseValue)
 	if err != nil {
 		return nil, types.NewOpenAIError(err, types.ErrorCodeJsonMarshalFailed, http.StatusInternalServerError)
 	}
@@ -145,29 +127,10 @@ func OaiResponsesToChatBufferedStreamHandler(c *gin.Context, info *relaycommon.R
 	}
 	accumulator.SupplementResponseOutput(finalResponse)
 
-	client := info.RelayFormat
-	if client == "" {
-		client = types.RelayFormatOpenAI
-	}
-	converted, err := relayconvert.ConvertResponse(c, info, client, finalResponse)
+	responseValue, usage, err := convertResponsesResponseForClient(c, info, finalResponse)
 	if err != nil {
 		return nil, types.NewOpenAIError(err, types.ErrorCodeBadResponseBody, http.StatusInternalServerError)
 	}
-	usage := converted.Usage
-	if chatResp, ok := converted.Value.(*dto.OpenAITextResponse); ok {
-		if chatID := helper.GetResponseID(c); chatID != "" {
-			chatResp.Id = chatID
-		}
-		if usage == nil || usage.TotalTokens == 0 {
-			text := service.ExtractOutputTextFromResponses(finalResponse)
-			usage = service.ResponseText2Usage(c, text, info.UpstreamModelName, info.GetEstimatePromptTokens())
-			chatResp.Usage = *usage
-		}
-	} else if usage == nil || usage.TotalTokens == 0 {
-		text := service.ExtractOutputTextFromResponses(finalResponse)
-		usage = service.ResponseText2Usage(c, text, info.UpstreamModelName, info.GetEstimatePromptTokens())
-	}
-	responseValue := converted.Value
 	responseBody, err := common.Marshal(responseValue)
 	if err != nil {
 		return nil, types.NewOpenAIError(err, types.ErrorCodeJsonMarshalFailed, http.StatusInternalServerError)
@@ -175,6 +138,28 @@ func OaiResponsesToChatBufferedStreamHandler(c *gin.Context, info *relaycommon.R
 
 	service.IOCopyBytesGracefully(c, resp, responseBody)
 	return usage, nil
+}
+
+func convertResponsesResponseForClient(c *gin.Context, info *relaycommon.RelayInfo, response *dto.OpenAIResponsesResponse) (any, *dto.Usage, error) {
+	if responseID := helper.GetResponseID(c); responseID != "" {
+		response.ID = responseID
+	}
+
+	usage := relayconvert.UsageFromResponsesUsage(response.Usage)
+	if usage == nil || usage.TotalTokens == 0 {
+		text := service.ExtractOutputTextFromResponses(response)
+		usage = service.ResponseText2Usage(c, text, info.UpstreamModelName, info.GetEstimatePromptTokens())
+		response.Usage = relayconvert.UsageFromChatUsage(usage)
+	}
+
+	result, err := service.ConvertResponse(c, info, info.RelayFormat, response)
+	if err != nil {
+		return nil, nil, err
+	}
+	if result.Usage != nil && result.Usage.TotalTokens != 0 {
+		usage = result.Usage
+	}
+	return result.Value, usage, nil
 }
 
 func OaiResponsesToChatStreamHandler(c *gin.Context, info *relaycommon.RelayInfo, resp *http.Response) (*dto.Usage, *types.NewAPIError) {
@@ -200,12 +185,63 @@ func OaiResponsesToChatStreamHandler(c *gin.Context, info *relaycommon.RelayInfo
 		info.ClaudeConvertInfo = &relaycommon.ClaudeConvertInfo{LastMessagesType: relaycommon.LastMessageTypeNone}
 	}
 
-	writeResults := func(results []relayconvert.ResponseResult) bool {
-		if err := helper.WriteProjectedStreamResults(c, info, results); err != nil {
-			streamErr = types.NewOpenAIError(err, types.ErrorCodeBadResponse, http.StatusInternalServerError)
+	sendGeminiResponse := func(geminiResponse *dto.GeminiChatResponse) bool {
+		if geminiResponse == nil {
+			return true
+		}
+		geminiResponseStr, err := common.Marshal(geminiResponse)
+		if err != nil {
+			streamErr = types.NewOpenAIError(err, types.ErrorCodeJsonMarshalFailed, http.StatusInternalServerError)
 			return false
 		}
+		c.Render(-1, common.CustomEvent{Data: "data: " + string(geminiResponseStr)})
+		_ = helper.FlushWriter(c)
 		return true
+	}
+
+	sendStreamResult := func(result relayconvert.ResponseResult) bool {
+		switch value := result.Value.(type) {
+		case dto.ChatCompletionsStreamResponse:
+			if len(value.Choices) == 0 && value.Usage == nil {
+				return true
+			}
+			if err := helper.ObjectData(c, &value); err != nil {
+				streamErr = types.NewOpenAIError(err, types.ErrorCodeBadResponse, http.StatusInternalServerError)
+				return false
+			}
+			return true
+		case *dto.ChatCompletionsStreamResponse:
+			if value == nil || (len(value.Choices) == 0 && value.Usage == nil) {
+				return true
+			}
+			if err := helper.ObjectData(c, value); err != nil {
+				streamErr = types.NewOpenAIError(err, types.ErrorCodeBadResponse, http.StatusInternalServerError)
+				return false
+			}
+			return true
+		case dto.ClaudeResponse:
+			if err := helper.ClaudeData(c, value); err != nil {
+				streamErr = types.NewOpenAIError(err, types.ErrorCodeBadResponse, http.StatusInternalServerError)
+				return false
+			}
+			return true
+		case *dto.ClaudeResponse:
+			if value == nil {
+				return true
+			}
+			if err := helper.ClaudeData(c, *value); err != nil {
+				streamErr = types.NewOpenAIError(err, types.ErrorCodeBadResponse, http.StatusInternalServerError)
+				return false
+			}
+			return true
+		case dto.GeminiChatResponse:
+			return sendGeminiResponse(&value)
+		case *dto.GeminiChatResponse:
+			return sendGeminiResponse(value)
+		default:
+			streamErr = types.NewOpenAIError(fmt.Errorf("unsupported converted stream response type %T", result.Value), types.ErrorCodeBadResponse, http.StatusInternalServerError)
+			return false
+		}
 	}
 
 	helper.StreamScannerHandler(c, resp, info, func(data string, sr *helper.StreamResult) {
@@ -234,15 +270,17 @@ func OaiResponsesToChatStreamHandler(c *gin.Context, info *relaycommon.RelayInfo
 			return
 		}
 
-		results, err := relayconvert.ConvertStreamResponseChunk(c, info, state, &streamResp)
+		results, err := service.ConvertStreamResponseChunk(c, info, state, &streamResp)
 		if err != nil {
 			streamErr = types.NewOpenAIError(err, types.ErrorCodeBadResponse, http.StatusInternalServerError)
 			sr.Stop(streamErr)
 			return
 		}
-		if !writeResults(results) {
-			sr.Stop(streamErr)
-			return
+		for _, result := range results {
+			if !sendStreamResult(result) {
+				sr.Stop(streamErr)
+				return
+			}
 		}
 	})
 
@@ -259,12 +297,14 @@ func OaiResponsesToChatStreamHandler(c *gin.Context, info *relaycommon.RelayInfo
 	if info.RelayFormat == types.RelayFormatClaude && info.ClaudeConvertInfo != nil {
 		info.ClaudeConvertInfo.Usage = usage
 	}
-	finalResults, err := relayconvert.FinalizeStreamResponse(c, info, state)
+	finalResults, err := service.FinalizeStreamResponse(c, info, state)
 	if err != nil {
 		return nil, types.NewOpenAIError(err, types.ErrorCodeBadResponse, http.StatusInternalServerError)
 	}
-	if !writeResults(finalResults) {
-		return nil, streamErr
+	for _, result := range finalResults {
+		if !sendStreamResult(result) {
+			return nil, streamErr
+		}
 	}
 	if info.RelayFormat == types.RelayFormatOpenAI && info.ShouldIncludeUsage && usage != nil {
 		if err := helper.ObjectData(c, helper.GenerateFinalUsageResponse(responseId, createAt, info.UpstreamModelName, *usage)); err != nil {

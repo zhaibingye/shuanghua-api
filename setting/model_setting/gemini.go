@@ -2,7 +2,6 @@ package model_setting
 
 import (
 	"fmt"
-	"strings"
 
 	"github.com/QuantumNous/new-api/common"
 	"github.com/QuantumNous/new-api/setting/config"
@@ -47,10 +46,6 @@ var defaultGeminiSettings = GeminiSettings{
 		"gemini-2.5-flash-image",
 		"gemini-3.1-flash-image",
 		"gemini-3.1-flash-image-preview",
-		"nano-banana",
-		"nano-banana-2",
-		"nano-banana-pro",
-		"nano-banana-pro-preview",
 	},
 	ThinkingAdapterEnabled:                false,
 	ThinkingAdapterBudgetTokensPercentage: 0.6,
@@ -113,52 +108,10 @@ func GetGeminiVersionSetting(key string) string {
 }
 
 func IsGeminiModelSupportImagine(model string) bool {
-	normalized := normalizeGeminiModelID(model)
-	if normalized == "" {
-		return false
-	}
-	if strings.HasPrefix(normalized, "imagen") {
-		return false
-	}
-	if isBuiltinGeminiNativeImageModel(normalized) {
-		return true
-	}
-	compactName := compactGeminiModelID(normalized)
-	for _, entry := range geminiSettings.SupportedImagineModels {
-		configured := normalizeGeminiModelID(entry)
-		if configured == "" {
-			continue
-		}
-		compactConfigured := compactGeminiModelID(configured)
-		if normalized == configured || compactName == compactConfigured {
-			return true
-		}
-		if strings.HasPrefix(normalized, configured+"-") {
+	for _, v := range geminiSettings.SupportedImagineModels {
+		if v == model {
 			return true
 		}
 	}
 	return false
-}
-
-func isBuiltinGeminiNativeImageModel(normalized string) bool {
-	compactName := compactGeminiModelID(normalized)
-	return strings.Contains(normalized, "nano-banana") ||
-		strings.Contains(compactName, "nanobanana") ||
-		strings.Contains(normalized, "-image") ||
-		strings.Contains(normalized, "image-generation")
-}
-
-func normalizeGeminiModelID(model string) string {
-	name := strings.ToLower(strings.TrimSpace(model))
-	name = strings.TrimPrefix(name, "models/")
-	if separator := strings.LastIndex(name, "/"); separator >= 0 {
-		name = name[separator+1:]
-	}
-	return name
-}
-
-func compactGeminiModelID(model string) string {
-	name := strings.ReplaceAll(model, "-", "")
-	name = strings.ReplaceAll(name, "_", "")
-	return strings.ReplaceAll(name, " ", "")
 }

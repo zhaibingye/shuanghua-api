@@ -1,7 +1,6 @@
 package relayconvert
 
 import (
-	"context"
 	"testing"
 
 	"github.com/QuantumNous/new-api/relaykit/dto"
@@ -166,8 +165,7 @@ func TestClaudeTargetStatefulStreamTerminalTail(t *testing.T) {
 					},
 				},
 			},
-			wantFinalizerTerminals: true,
-			wantStopReason:         "end_turn",
+			wantStopReason: "end_turn",
 		},
 	}
 
@@ -229,26 +227,10 @@ func TestClaudeTargetStatefulStreamTerminalTail(t *testing.T) {
 		)
 		require.NoError(t, err)
 
-		chunks := []*dto.ResponsesStreamResponse{
-			{
-				Type:  "response.output_text.delta",
-				Delta: "Hello",
-			},
-			{
-				Type: "response.completed",
-				Response: &dto.OpenAIResponsesResponse{
-					ID:     "resp-fixed",
-					Object: "response",
-					Model:  "upstream-model",
-					Status: []byte(`"completed"`),
-					Usage: &dto.Usage{
-						InputTokens:  4,
-						OutputTokens: 2,
-						TotalTokens:  6,
-					},
-				},
-			},
-		}
+		chunks := []*dto.ResponsesStreamResponse{{
+			Type:  "response.output_text.delta",
+			Delta: "Hello",
+		}}
 		for _, chunk := range chunks {
 			_, err := ConvertStreamResponseChunk(nil, info, state, chunk)
 			require.NoError(t, err)
@@ -272,208 +254,6 @@ func TestClaudeTargetStatefulStreamTerminalTail(t *testing.T) {
 		assert.Equal(t, 11, messageDelta.Usage.InputTokens)
 		assert.Equal(t, 7, messageDelta.Usage.OutputTokens)
 	})
-}
-
-func TestGeminiMissingToolIDGetsOnePortableCanonicalID(t *testing.T) {
-	for _, target := range []types.RelayFormat{types.RelayFormatOpenAI, types.RelayFormatClaude, types.RelayFormatOpenAIResponses} {
-		target := target
-		t.Run(string(target), func(t *testing.T) {
-			state, err := NewResponseStreamState(
-				types.RelayFormatGemini,
-				target,
-				ResponseStreamOptions{ID: "stream-tool-id", Model: "gemini-3.7-pro"},
-			)
-			require.NoError(t, err)
-			finish := "STOP"
-			chunk := &dto.GeminiChatResponse{
-				Candidates: []dto.GeminiChatCandidate{{
-					Content: dto.GeminiChatContent{Role: "model", Parts: []dto.GeminiPart{{
-						FunctionCall: &dto.FunctionCall{FunctionName: "analyze_ledger", Arguments: map[string]any{"receipt": "R-1"}},
-					}}},
-					FinishReason: &finish,
-				}},
-				HasUsageMetadata: true,
-				UsageMetadata:    dto.GeminiUsageMetadata{PromptTokenCount: 4, CandidatesTokenCount: 2, TotalTokenCount: 6},
-			}
-			results, err := ConvertStreamResponseChunk(context.Background(), nil, state, chunk)
-			require.NoError(t, err)
-			final, err := FinalizeStreamResponse(context.Background(), nil, state)
-			require.NoError(t, err)
-			results = append(results, final...)
-
-			var callID string
-			switch target {
-			case types.RelayFormatOpenAI:
-				for _, result := range results {
-					response := result.Value.(*dto.ChatCompletionsStreamResponse)
-					for _, call := range response.Choices[0].Delta.ToolCalls {
-						if call.ID != "" {
-							callID = call.ID
-						}
-					}
-				}
-			case types.RelayFormatClaude:
-				for _, result := range results {
-					response := result.Value.(*dto.ClaudeResponse)
-					if response.Type == "content_block_start" && response.ContentBlock != nil && response.ContentBlock.Type == "tool_use" {
-						callID = response.ContentBlock.Id
-					}
-				}
-			case types.RelayFormatOpenAIResponses:
-				var addedCallID, doneCallID string
-				var lifecycle []string
-				for _, result := range results {
-					event, ok := asResponsesStream(result.Value)
-					require.True(t, ok, "unexpected Responses event type %T", result.Value)
-					lifecycle = append(lifecycle, event.Type)
-					switch event.Type {
-					case "response.output_item.added":
-						if event.Item != nil && event.Item.Type == "function_call" {
-							addedCallID = event.Item.CallId
-						}
-					case "response.output_item.done":
-						if event.Item != nil && event.Item.Type == "function_call" {
-							doneCallID = event.Item.CallId
-							require.Equal(t, `{"receipt":"R-1"}`, event.Item.ArgumentsString())
-						}
-					}
-				}
-				require.Contains(t, lifecycle, "response.function_call_arguments.done")
-				require.Contains(t, lifecycle, "response.output_item.done")
-				require.Contains(t, lifecycle, "response.completed")
-				require.Equal(t, addedCallID, doneCallID)
-				callID = doneCallID
-			}
-			require.NotEmpty(t, callID)
-			require.Regexp(t, `^[A-Za-z0-9_-]+$`, callID)
-			require.LessOrEqual(t, len(callID), 64)
-		})
-	}
-}
-
-func TestChatToGeminiStatefulStreamEmitsOneStableToolCall(t *testing.T) {
-	state, err := NewResponseStreamState(
-		types.RelayFormatOpenAI,
-		types.RelayFormatGemini,
-		ResponseStreamOptions{ID: "chatcmpl-tool", Model: "gemini-3.7-pro"},
-	)
-	require.NoError(t, err)
-
-	index := 0
-	chunks := []*dto.ChatCompletionsStreamResponse{
-		{
-			Id: "chatcmpl-tool", Model: "gemini-3.7-pro",
-			Choices: []dto.ChatCompletionsStreamResponseChoice{{Delta: dto.ChatCompletionsStreamResponseChoiceDelta{
-				ToolCalls: []dto.ToolCallResponse{{
-					Index: &index, ID: "call_1", Type: "function",
-					Function: dto.FunctionResponse{Name: "eval_javascript", Arguments: `{}`},
-				}},
-			}}},
-		},
-		{
-			Id: "chatcmpl-tool", Model: "gemini-3.7-pro",
-			Choices: []dto.ChatCompletionsStreamResponseChoice{{Delta: dto.ChatCompletionsStreamResponseChoiceDelta{
-				ToolCalls: []dto.ToolCallResponse{{
-					Index:    &index,
-					Function: dto.FunctionResponse{Arguments: `{"code":"1+1"}`},
-				}},
-			}}},
-		},
-		{
-			Id: "chatcmpl-tool", Model: "gemini-3.7-pro",
-			Choices: []dto.ChatCompletionsStreamResponseChoice{{FinishReason: terminalTestPtr(types.FinishReasonToolCalls)}},
-			Usage:   &dto.Usage{PromptTokens: 4, CompletionTokens: 2, TotalTokens: 6},
-		},
-	}
-
-	var results []ResponseResult
-	for i, chunk := range chunks {
-		converted, err := ConvertStreamResponseChunk(context.Background(), nil, state, chunk)
-		require.NoError(t, err)
-		if i < 2 {
-			require.Empty(t, terminalTestGeminiFunctionCalls(t, converted), "tool call emitted before finalization")
-		}
-		results = append(results, converted...)
-	}
-	final, err := FinalizeStreamResponse(context.Background(), nil, state)
-	require.NoError(t, err)
-	results = append(results, final...)
-
-	calls := terminalTestGeminiFunctionCalls(t, results)
-	require.Len(t, calls, 1)
-	require.Equal(t, "eval_javascript", calls[0].FunctionName)
-	require.Equal(t, map[string]any{"code": "1+1"}, calls[0].Arguments)
-
-	_, err = ConvertStreamResponseChunk(context.Background(), nil, state, chunks[len(chunks)-1])
-	require.ErrorContains(t, err, "already finalized")
-}
-
-func TestChatToGeminiStatefulStreamKeepsParallelToolsIsolatedAndSourceOrdered(t *testing.T) {
-	state, err := NewResponseStreamState(
-		types.RelayFormatOpenAI,
-		types.RelayFormatGemini,
-		ResponseStreamOptions{ID: "chatcmpl-parallel", Model: "gemini-3.7-pro"},
-	)
-	require.NoError(t, err)
-
-	firstIndex, secondIndex := 0, 1
-	chunks := []*dto.ChatCompletionsStreamResponse{
-		{
-			Choices: []dto.ChatCompletionsStreamResponseChoice{{
-				Delta: dto.ChatCompletionsStreamResponseChoiceDelta{ToolCalls: []dto.ToolCallResponse{
-					{Index: &secondIndex, ID: "call_2", Type: "function", Function: dto.FunctionResponse{Name: "second", Arguments: `{"value":`}},
-					{Index: &firstIndex, ID: "call_1", Type: "function", Function: dto.FunctionResponse{Name: "first", Arguments: `{"value":`}},
-				}},
-			}},
-		},
-		{
-			Choices: []dto.ChatCompletionsStreamResponseChoice{{
-				Delta: dto.ChatCompletionsStreamResponseChoiceDelta{ToolCalls: []dto.ToolCallResponse{
-					{Index: &firstIndex, Function: dto.FunctionResponse{Arguments: `"a"}`}},
-					{Index: &secondIndex, Function: dto.FunctionResponse{Arguments: `"b"}`}},
-				}},
-			}},
-		},
-		{
-			Choices: []dto.ChatCompletionsStreamResponseChoice{},
-			Usage:   &dto.Usage{PromptTokens: 4, CompletionTokens: 3, TotalTokens: 7},
-		},
-	}
-
-	var results []ResponseResult
-	for _, chunk := range chunks {
-		converted, err := ConvertStreamResponseChunk(context.Background(), nil, state, chunk)
-		require.NoError(t, err)
-		require.Empty(t, terminalTestGeminiFunctionCalls(t, converted), "parallel tool emitted before EOF")
-		results = append(results, converted...)
-	}
-	final, err := FinalizeStreamResponse(context.Background(), nil, state)
-	require.NoError(t, err)
-	results = append(results, final...)
-
-	calls := terminalTestGeminiFunctionCalls(t, results)
-	require.Len(t, calls, 2)
-	assert.Equal(t, "first", calls[0].FunctionName)
-	assert.Equal(t, map[string]any{"value": "a"}, calls[0].Arguments)
-	assert.Equal(t, "second", calls[1].FunctionName)
-	assert.Equal(t, map[string]any{"value": "b"}, calls[1].Arguments)
-}
-
-func terminalTestGeminiFunctionCalls(t *testing.T, results []ResponseResult) []dto.FunctionCall {
-	t.Helper()
-	var calls []dto.FunctionCall
-	for _, result := range results {
-		response, ok := result.Value.(*dto.GeminiChatResponse)
-		require.True(t, ok, "unexpected stream result type %T", result.Value)
-		for _, candidate := range response.Candidates {
-			for _, part := range candidate.Content.Parts {
-				if part.FunctionCall != nil {
-					calls = append(calls, *part.FunctionCall)
-				}
-			}
-		}
-	}
-	return calls
 }
 
 func TestConvertStreamResponseKeepsStatelessCompatibility(t *testing.T) {

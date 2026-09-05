@@ -1,128 +1,23 @@
 package relay
 
 import (
+	"fmt"
+	"io"
+	"net/http"
 	"strings"
 
 	"github.com/QuantumNous/new-api/common"
 	"github.com/QuantumNous/new-api/constant"
+	"github.com/QuantumNous/new-api/relay/channel"
+	openaichannel "github.com/QuantumNous/new-api/relay/channel/openai"
 	relaycommon "github.com/QuantumNous/new-api/relay/common"
+	relayconstant "github.com/QuantumNous/new-api/relay/constant"
 	"github.com/QuantumNous/new-api/relaykit/dto"
-	"github.com/QuantumNous/new-api/relaykit/relayconvert/reasoning"
 	"github.com/QuantumNous/new-api/relaykit/types"
 	"github.com/QuantumNous/new-api/service"
-	"github.com/QuantumNous/new-api/setting/model_setting"
 
 	"github.com/gin-gonic/gin"
 )
-
-// resolveTextNativeOverride returns an explicit Chat/Responses routing choice
-// when host policy must override the provider's inherent format.
-//
-// OpenAI channels use a deterministic model policy independent of the client
-// endpoint: automatic mode sends mapped gpt-* models to Responses and all
-// others to Chat; enabled custom rules use model_patterns as the complete
-// selection for targeted channels. Responses-only models remain protected.
-// Request passthrough takes precedence and preserves incoming Chat/Responses.
-//
-// Other providers retain the existing opt-in Chat→Responses behavior, including
-// visible-thinking upgrades, but only when the provider speaks Responses.
-func resolveTextNativeOverride(info *relaycommon.RelayInfo) types.RelayFormat {
-	if info == nil || info.ChannelMeta == nil {
-		return ""
-	}
-	passThrough := model_setting.GetGlobalSettings().PassThroughRequestEnabled || info.ChannelSetting.PassThroughBodyEnabled
-	if isConfiguredOpenAIChannel(info) {
-		if passThrough {
-			switch info.RelayFormat {
-			case types.RelayFormatOpenAI, types.RelayFormatOpenAIResponses:
-				return info.RelayFormat
-			default:
-				// OpenAI adaptors historically route foreign passthrough bodies to
-				// Chat. Preserve that behavior instead of applying gpt-* auto mode.
-				return types.RelayFormatOpenAI
-			}
-		}
-		if service.ShouldOpenAIChannelUseResponsesGlobal(
-			info.ChannelId,
-			info.ChannelType,
-			resolvedUpstreamModelName(info),
-		) {
-			return types.RelayFormatOpenAIResponses
-		}
-		return types.RelayFormatOpenAI
-	}
-	if passThrough {
-		return ""
-	}
-	switch info.ChannelType {
-	case constant.ChannelTypeAdvancedCustom, constant.ChannelTypeNewAPI, constant.ChannelTypeSub2API:
-		// These providers pick a converter per route or speak every client
-		// format natively. A Chat→Responses upgrade would bypass that.
-		return ""
-	case constant.ChannelTypeUnknown:
-		switch info.ApiType {
-		case constant.APITypeAdvancedCustom, constant.APITypeNewAPI, constant.APITypeSub2API:
-			return ""
-		}
-	}
-	if !relaycommon.SpeaksResponsesNatively(info) {
-		return ""
-	}
-	if requestWantsVisibleThinking(info) || service.ShouldChatCompletionsUseResponsesGlobal(
-		info.ChannelId,
-		info.ChannelType,
-		resolvedUpstreamModelName(info),
-	) {
-		return types.RelayFormatOpenAIResponses
-	}
-	return ""
-}
-
-func isConfiguredOpenAIChannel(info *relaycommon.RelayInfo) bool {
-	if info == nil || info.ChannelMeta == nil {
-		return false
-	}
-	return info.ChannelType == constant.ChannelTypeOpenAI ||
-		(info.ChannelType == constant.ChannelTypeUnknown && info.ApiType == constant.APITypeOpenAI)
-}
-
-func resolvedUpstreamModelName(info *relaycommon.RelayInfo) string {
-	if info == nil {
-		return ""
-	}
-	if model := strings.TrimSpace(info.UpstreamModelName); model != "" {
-		return model
-	}
-	return strings.TrimSpace(info.OriginModelName)
-}
-
-func requestWantsVisibleThinking(info *relaycommon.RelayInfo) bool {
-	if info == nil || info.Request == nil {
-		return false
-	}
-	switch req := info.Request.(type) {
-	case *dto.GeneralOpenAIRequest:
-		return reasoning.IntentFromChatRequest(*req).WantsThoughts()
-	case *dto.ClaudeRequest:
-		if req.Thinking != nil {
-			switch strings.ToLower(strings.TrimSpace(req.Thinking.Type)) {
-			case "", "disabled", "none", "off":
-			default:
-				return true
-			}
-		}
-		return req.GetEfforts() != ""
-	case *dto.GeminiChatRequest:
-		cfg := req.GenerationConfig.ThinkingConfig
-		return cfg != nil && cfg.IncludeThoughts
-	default:
-		return false
-	}
-}
-
-func isChatSystemRole(role, preferred string) bool {
-	return role == preferred || role == "system" || role == "developer"
-}
 
 func applySystemPromptIfNeeded(c *gin.Context, info *relaycommon.RelayInfo, request *dto.GeneralOpenAIRequest) {
 	if info == nil || request == nil {
@@ -136,7 +31,7 @@ func applySystemPromptIfNeeded(c *gin.Context, info *relaycommon.RelayInfo, requ
 
 	containSystemPrompt := false
 	for _, message := range request.Messages {
-		if isChatSystemRole(message.Role, systemRole) {
+		if message.Role == systemRole {
 			containSystemPrompt = true
 			break
 		}
@@ -156,7 +51,7 @@ func applySystemPromptIfNeeded(c *gin.Context, info *relaycommon.RelayInfo, requ
 
 	common.SetContextKey(c, constant.ContextKeySystemPromptOverride, true)
 	for i, message := range request.Messages {
-		if !isChatSystemRole(message.Role, systemRole) {
+		if message.Role != systemRole {
 			continue
 		}
 		if message.IsStringContent() {
@@ -173,4 +68,135 @@ func applySystemPromptIfNeeded(c *gin.Context, info *relaycommon.RelayInfo, requ
 		request.Messages[i].Content = contents
 		return
 	}
+}
+
+func textRequestViaResponses(c *gin.Context, info *relaycommon.RelayInfo, adaptor channel.Adaptor, request any) (*dto.Usage, *types.NewAPIError) {
+	paramOverrideApplied := false
+	if chatRequest, ok := request.(*dto.GeneralOpenAIRequest); ok {
+		chatJSON, err := common.Marshal(chatRequest)
+		if err != nil {
+			return nil, types.NewError(err, types.ErrorCodeConvertRequestFailed, types.ErrOptionWithSkipRetry())
+		}
+
+		chatJSON, err = relaycommon.RemoveDisabledFields(chatJSON, info.ChannelOtherSettings, info.ChannelSetting.PassThroughBodyEnabled)
+		if err != nil {
+			return nil, types.NewError(err, types.ErrorCodeConvertRequestFailed, types.ErrOptionWithSkipRetry())
+		}
+
+		if len(info.ParamOverride) > 0 {
+			chatJSON, err = relaycommon.ApplyParamOverrideWithRelayInfo(chatJSON, info)
+			if err != nil {
+				return nil, newAPIErrorFromParamOverride(err)
+			}
+			paramOverrideApplied = true
+		}
+
+		var overriddenChatReq dto.GeneralOpenAIRequest
+		if err := common.Unmarshal(chatJSON, &overriddenChatReq); err != nil {
+			return nil, types.NewError(err, types.ErrorCodeChannelParamOverrideInvalid, types.ErrOptionWithSkipRetry())
+		}
+		request = &overriddenChatReq
+	}
+
+	result, err := service.ConvertRequest(c, info, types.RelayFormatOpenAIResponses, request)
+	if err != nil {
+		return nil, types.NewErrorWithStatusCode(err, types.ErrorCodeInvalidRequest, http.StatusBadRequest, types.ErrOptionWithSkipRetry())
+	}
+	responsesReq, ok := result.Value.(*dto.OpenAIResponsesRequest)
+	if !ok {
+		return nil, types.NewError(fmt.Errorf("expected OpenAI responses request, got %T", result.Value), types.ErrorCodeConvertRequestFailed, types.ErrOptionWithSkipRetry())
+	}
+	return relayResponsesRequest(c, info, adaptor, responsesReq, paramOverrideApplied)
+}
+
+func relayResponsesRequest(c *gin.Context, info *relaycommon.RelayInfo, adaptor channel.Adaptor, responsesReq *dto.OpenAIResponsesRequest, paramOverrideApplied bool) (*dto.Usage, *types.NewAPIError) {
+	savedRelayMode := info.RelayMode
+	savedRequestURLPath := info.RequestURLPath
+	defer func() {
+		info.RelayMode = savedRelayMode
+		info.RequestURLPath = savedRequestURLPath
+	}()
+
+	info.RelayMode = relayconstant.RelayModeResponses
+	info.RequestURLPath = "/v1/responses"
+
+	convertedRequest, err := adaptor.ConvertOpenAIResponsesRequest(c, info, *responsesReq)
+	if err != nil {
+		return nil, newConvertRequestFailedError(c, info, err)
+	}
+	relaycommon.AppendRequestConversionFromRequest(info, convertedRequest)
+
+	jsonData, err := common.Marshal(convertedRequest)
+	if err != nil {
+		return nil, types.NewError(err, types.ErrorCodeConvertRequestFailed, types.ErrOptionWithSkipRetry())
+	}
+
+	jsonData, err = relaycommon.RemoveDisabledFields(jsonData, info.ChannelOtherSettings, info.ChannelSetting.PassThroughBodyEnabled)
+	if err != nil {
+		return nil, types.NewError(err, types.ErrorCodeConvertRequestFailed, types.ErrOptionWithSkipRetry())
+	}
+	if !paramOverrideApplied && len(info.ParamOverride) > 0 {
+		jsonData, err = relaycommon.ApplyParamOverrideWithRelayInfo(jsonData, info)
+		if err != nil {
+			return nil, newAPIErrorFromParamOverride(err)
+		}
+	}
+
+	body, closer, err := relaycommon.NewOutboundJSONBody(jsonData)
+	if err != nil {
+		return nil, types.NewError(err, types.ErrorCodeConvertRequestFailed, types.ErrOptionWithSkipRetry())
+	}
+	defer closer.Close()
+	jsonData = nil
+	var requestBody io.Reader = body
+
+	var httpResp *http.Response
+	resp, err := adaptor.DoRequest(c, info, requestBody)
+	if err != nil {
+		return nil, types.NewOpenAIError(err, types.ErrorCodeDoRequestFailed, http.StatusInternalServerError)
+	}
+	if resp == nil {
+		return nil, types.NewOpenAIError(nil, types.ErrorCodeBadResponse, http.StatusInternalServerError)
+	}
+
+	statusCodeMappingStr := c.GetString("status_code_mapping")
+
+	httpResp = resp.(*http.Response)
+	clientStream := info.IsStream
+	upstreamStream := isResponsesEventStreamContentType(httpResp.Header.Get("Content-Type"))
+	info.IsStream = clientStream || upstreamStream
+	if httpResp.StatusCode != http.StatusOK {
+		newApiErr := service.RelayErrorHandler(c.Request.Context(), httpResp, false)
+		service.ResetStatusCode(newApiErr, statusCodeMappingStr)
+		return nil, newApiErr
+	}
+
+	if upstreamStream && clientStream {
+		usage, newApiErr := openaichannel.OaiResponsesToChatStreamHandler(c, info, httpResp)
+		if newApiErr != nil {
+			service.ResetStatusCode(newApiErr, statusCodeMappingStr)
+			return nil, newApiErr
+		}
+		return usage, nil
+	}
+	if upstreamStream {
+		info.IsStream = false
+		usage, newApiErr := openaichannel.OaiResponsesToChatBufferedStreamHandler(c, info, httpResp)
+		if newApiErr != nil {
+			service.ResetStatusCode(newApiErr, statusCodeMappingStr)
+			return nil, newApiErr
+		}
+		return usage, nil
+	}
+
+	usage, newApiErr := openaichannel.OaiResponsesToChatHandler(c, info, httpResp)
+	if newApiErr != nil {
+		service.ResetStatusCode(newApiErr, statusCodeMappingStr)
+		return nil, newApiErr
+	}
+	return usage, nil
+}
+
+func isResponsesEventStreamContentType(contentType string) bool {
+	return strings.Contains(strings.ToLower(contentType), "text/event-stream")
 }

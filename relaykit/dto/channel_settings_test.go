@@ -96,7 +96,7 @@ func TestAdvancedCustomValidateModelListRouteConstraints(t *testing.T) {
 					Converter:    advancedCustomConverterOpenAIChatToOpenAIResponses,
 				},
 			},
-			want: "target must be native",
+			want: "converter must be none",
 		},
 		{
 			name: "model placeholder",
@@ -182,7 +182,7 @@ func TestAdvancedCustomValidateBalanceRouteConstraints(t *testing.T) {
 				UpstreamPath: "/provider/balance",
 				Converter:    advancedCustomConverterOpenAIChatToOpenAIResponses,
 			}},
-			want: "target must be native",
+			want: "converter must be none",
 		},
 		{
 			name: "model placeholder",
@@ -620,55 +620,6 @@ func TestChannelSettingsHTTPTransportJSONRoundTrip(t *testing.T) {
 	assert.NotContains(t, string(encoded), "http_protocol")
 }
 
-func TestAdvancedCustomResolvedTargetMapsLegacyConverter(t *testing.T) {
-	assert.Equal(t, AdvancedCustomTargetNative, AdvancedCustomRoute{}.ResolvedTarget())
-	assert.Equal(t, AdvancedCustomTargetNative, AdvancedCustomRoute{Converter: advancedCustomConverterNone}.ResolvedTarget())
-	assert.Equal(t, AdvancedCustomTargetChat, AdvancedCustomRoute{Converter: advancedCustomConverterClaudeMessagesToOpenAIChat}.ResolvedTarget())
-	assert.Equal(t, AdvancedCustomTargetChat, AdvancedCustomRoute{Converter: advancedCustomConverterOpenAIResponsesToOpenAIChat}.ResolvedTarget())
-	assert.Equal(t, AdvancedCustomTargetChat, AdvancedCustomRoute{Converter: advancedCustomConverterGeminiContentToOpenAIChat}.ResolvedTarget())
-	assert.Equal(t, AdvancedCustomTargetResponses, AdvancedCustomRoute{Converter: advancedCustomConverterOpenAIChatToOpenAIResponses}.ResolvedTarget())
-	assert.Equal(t, AdvancedCustomTargetClaude, AdvancedCustomRoute{Converter: advancedCustomConverterOpenAIChatToClaudeMessages}.ResolvedTarget())
-	assert.Equal(t, AdvancedCustomTargetGemini, AdvancedCustomRoute{Converter: advancedCustomConverterOpenAIChatToGeminiContent}.ResolvedTarget())
-	assert.Equal(t, AdvancedCustomTargetGemini, AdvancedCustomRoute{Converter: advancedCustomConverterOpenAIResponsesToGemini}.ResolvedTarget())
-	assert.Equal(t, AdvancedCustomTargetClaude, AdvancedCustomRoute{
-		Target:    AdvancedCustomTargetClaude,
-		Converter: advancedCustomConverterOpenAIChatToGeminiContent,
-	}.ResolvedTarget())
-}
-
-func TestAdvancedCustomValidateTargetOnlyRoute(t *testing.T) {
-	valid := &AdvancedCustomConfig{
-		Routes: []AdvancedCustomRoute{{
-			IncomingPath: "/v1/messages",
-			UpstreamPath: "/v1beta/models/{model}:generateContent",
-			Target:       AdvancedCustomTargetGemini,
-		}},
-	}
-	require.NoError(t, valid.Validate())
-
-	invalid := &AdvancedCustomConfig{
-		Routes: []AdvancedCustomRoute{{
-			IncomingPath: "/v1/images/generations",
-			UpstreamPath: "/v1/chat/completions",
-			Target:       AdvancedCustomTargetChat,
-		}},
-	}
-	err := invalid.Validate()
-	require.Error(t, err)
-	assert.Contains(t, err.Error(), "target does not support incoming_path")
-
-	unknown := &AdvancedCustomConfig{
-		Routes: []AdvancedCustomRoute{{
-			IncomingPath: "/v1/chat/completions",
-			UpstreamPath: "/v1/chat/completions",
-			Target:       "xml",
-		}},
-	}
-	err = unknown.Validate()
-	require.Error(t, err)
-	assert.Contains(t, err.Error(), "target is invalid")
-}
-
 func TestChannelSettingsValidateHTTPTransport(t *testing.T) {
 	require.NoError(t, (&ChannelSettings{}).ValidateHTTPTransport())
 	require.NoError(t, (&ChannelSettings{HTTPProtocol: "AUTO"}).ValidateHTTPTransport())
@@ -690,4 +641,16 @@ func TestChannelSettingsValidateHTTPTransport(t *testing.T) {
 	err = (&ChannelSettings{HTTPProtocol: "http1", HTTP2ConnectionShards: 2}).ValidateHTTPTransport()
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "http2_connection_shards")
+}
+
+func TestChannelOtherSettingsValidateToolLossPolicy(t *testing.T) {
+	require.NoError(t, (*ChannelOtherSettings)(nil).ValidateToolLossPolicy())
+	require.NoError(t, (&ChannelOtherSettings{}).ValidateToolLossPolicy())
+	require.NoError(t, (&ChannelOtherSettings{ToolLossPolicy: "allow"}).ValidateToolLossPolicy())
+	require.NoError(t, (&ChannelOtherSettings{ToolLossPolicy: "safe"}).ValidateToolLossPolicy())
+	require.NoError(t, (&ChannelOtherSettings{ToolLossPolicy: "strict"}).ValidateToolLossPolicy())
+
+	err := (&ChannelOtherSettings{ToolLossPolicy: "drop"}).ValidateToolLossPolicy()
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "tool_loss_policy")
 }

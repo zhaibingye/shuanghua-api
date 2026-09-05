@@ -9,7 +9,7 @@
   "output": [
     {
       "type": "reasoning",
-      "id": "rs_chatcmpl-fixed_0",
+      "id": "chatcmpl-fixed_reasoning_0",
       "status": "completed",
       "role": "",
       "content": null,
@@ -23,8 +23,23 @@
       "size": ""
     },
     {
+      "type": "message",
+      "id": "chatcmpl-fixed_msg_0",
+      "status": "completed",
+      "role": "assistant",
+      "content": [
+        {
+          "type": "output_text",
+          "text": "The answer is 42.",
+          "annotations": []
+        }
+      ],
+      "quality": "",
+      "size": ""
+    },
+    {
       "type": "function_call",
-      "id": "fc_call_abc",
+      "id": "call_abc",
       "status": "completed",
       "role": "",
       "content": null,
@@ -33,21 +48,6 @@
       "call_id": "call_abc",
       "name": "get_weather",
       "arguments": "{\"city\":\"Paris\"}"
-    },
-    {
-      "type": "message",
-      "id": "msg_chatcmpl-fixed_2",
-      "status": "completed",
-      "role": "assistant",
-      "content": [
-        {
-          "type": "output_text",
-          "text": "The answer is 42.",
-          "annotations": null
-        }
-      ],
-      "quality": "",
-      "size": ""
     }
   ],
   "parallel_tool_calls": false,

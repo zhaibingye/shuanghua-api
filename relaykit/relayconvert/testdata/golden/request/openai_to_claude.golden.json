@@ -1,20 +1,26 @@
 {
   "model": "gpt-test",
-  "system": "You are a helpful assistant.",
+  "system": [
+    {
+      "type": "text",
+      "text": "You are a helpful assistant."
+    }
+  ],
   "messages": [
     {
       "role": "user",
       "content": [
         {
-          "text": "What is in this image?",
-          "type": "text"
+          "type": "text",
+          "text": "What is in this image?"
         },
         {
+          "type": "image",
           "source": {
-            "type": "url",
-            "url": "https://example.com/cat.png"
-          },
-          "type": "image"
+            "type": "base64",
+            "media_type": "image/png",
+            "data": "aGVsbG8="
+          }
         }
       ]
     },
@@ -22,12 +28,16 @@
       "role": "assistant",
       "content": [
         {
+          "type": "text",
+          "text": "..."
+        },
+        {
+          "type": "tool_use",
           "id": "call_abc",
+          "name": "get_weather",
           "input": {
             "city": "Paris"
-          },
-          "name": "get_weather",
-          "type": "tool_use"
+          }
         }
       ]
     },
@@ -35,27 +45,22 @@
       "role": "user",
       "content": [
         {
+          "type": "tool_result",
           "content": "15 degrees",
-          "name": "get_weather",
-          "tool_use_id": "call_abc",
-          "type": "tool_result"
+          "tool_use_id": "call_abc"
         }
       ]
     },
     {
       "role": "user",
-      "content": [
-        {
-          "text": "Summarize.",
-          "type": "text"
-        }
-      ]
+      "content": "Summarize."
     }
   ],
   "max_tokens": 1024,
   "stream": true,
   "tools": [
     {
+      "name": "get_weather",
       "description": "Get weather by city",
       "input_schema": {
         "properties": {
@@ -67,8 +72,7 @@
           "city"
         ],
         "type": "object"
-      },
-      "name": "get_weather"
+      }
     }
   ],
   "tool_choice": {

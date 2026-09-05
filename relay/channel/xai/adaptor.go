@@ -11,6 +11,7 @@ import (
 	relaycommon "github.com/QuantumNous/new-api/relay/common"
 	"github.com/QuantumNous/new-api/relaykit/dto"
 	"github.com/QuantumNous/new-api/relaykit/types"
+	"github.com/QuantumNous/new-api/setting/model_setting"
 
 	"github.com/QuantumNous/new-api/relay/constant"
 
@@ -22,11 +23,14 @@ type Adaptor struct {
 }
 
 func (a *Adaptor) ConvertGeminiRequest(*gin.Context, *relaycommon.RelayInfo, *dto.GeminiChatRequest) (any, error) {
-	return channel.ForeignTextRequest("xai.ConvertGeminiRequest")
+	//TODO implement me
+	return nil, errors.New("not implemented")
 }
 
 func (a *Adaptor) ConvertClaudeRequest(*gin.Context, *relaycommon.RelayInfo, *dto.ClaudeRequest) (any, error) {
-	return channel.ForeignTextRequest("xai.ConvertClaudeRequest")
+	//TODO implement me
+	//panic("implement me")
+	return nil, errors.New("not available")
 }
 
 func (a *Adaptor) ConvertAudioRequest(c *gin.Context, info *relaycommon.RelayInfo, request dto.AudioRequest) (io.Reader, error) {
@@ -35,29 +39,11 @@ func (a *Adaptor) ConvertAudioRequest(c *gin.Context, info *relaycommon.RelayInf
 }
 
 func (a *Adaptor) ConvertImageRequest(c *gin.Context, info *relaycommon.RelayInfo, request dto.ImageRequest) (any, error) {
-	if info != nil && info.RelayMode == constant.RelayModeImagesEdits {
-		if c == nil || c.Request == nil || !strings.HasPrefix(strings.ToLower(c.Request.Header.Get("Content-Type")), "application/json") {
-			return nil, errors.New("xAI image edits require application/json")
-		}
-		if len(request.Image) == 0 && len(request.Images) == 0 {
-			return nil, errors.New("xAI image edits require image or images")
-		}
-	}
-
-	imageCount := int(lo.FromPtrOr(request.N, uint(1)))
-	if imageCount > maxXAIImageCount {
-		return nil, errors.New("xAI image requests support at most 10 images")
-	}
 	xaiRequest := ImageRequest{
 		Model:          request.Model,
 		Prompt:         request.Prompt,
-		N:              imageCount,
+		N:              int(lo.FromPtrOr(request.N, uint(1))),
 		ResponseFormat: request.ResponseFormat,
-		Quality:        request.Quality,
-		AspectRatio:    request.Extra["aspect_ratio"],
-		Resolution:     request.Extra["resolution"],
-		Image:          request.Image,
-		Images:         request.Images,
 	}
 	return xaiRequest, nil
 }
@@ -66,16 +52,6 @@ func (a *Adaptor) Init(info *relaycommon.RelayInfo) {
 }
 
 func (a *Adaptor) GetRequestURL(info *relaycommon.RelayInfo) (string, error) {
-	baseURL := strings.TrimRight(info.ChannelBaseUrl, "/")
-	switch info.RelayMode {
-	case constant.RelayModeImagesGenerations:
-		return baseURL + xAIImageGenerationsPath, nil
-	case constant.RelayModeImagesEdits:
-		return baseURL + xAIImageEditsPath, nil
-	}
-	if path, ok := info.OpenAICompatibleRequestPath(); ok {
-		return relaycommon.GetFullRequestURL(info.ChannelBaseUrl, path, info.ChannelType), nil
-	}
 	return relaycommon.GetFullRequestURL(info.ChannelBaseUrl, info.RequestURLPath, info.ChannelType), nil
 }
 
@@ -89,31 +65,9 @@ func (a *Adaptor) ConvertOpenAIRequest(c *gin.Context, info *relaycommon.RelayIn
 	if request == nil {
 		return nil, errors.New("request is nil")
 	}
-
-	modelName := request.Model
-	if info != nil && info.UpstreamModelName != "" {
-		modelName = info.UpstreamModelName
-	}
-
-	// Gemini→Chat can surface Gemini-only sampling fields. xAI's Chat API
-	// rejects top_k, and reasoning_effort is currently supported only by the
-	// grok-3-mini family; keep provider-specific cleanup in the xAI adaptor.
-	request.TopK = nil
-	request.EnableThinking = nil
-	request.ThinkingBudget = nil
-	request.Think = nil
-	request.THINKING = nil
-	if !strings.HasPrefix(modelName, "grok-3-mini") {
-		request.ReasoningEffort = ""
-		request.Reasoning = nil
-	}
-
-	if strings.HasSuffix(modelName, "-search") {
-		modelName = strings.TrimSuffix(modelName, "-search")
-		request.Model = modelName
-		if info != nil {
-			info.UpstreamModelName = modelName
-		}
+	if strings.HasSuffix(info.UpstreamModelName, "-search") {
+		info.UpstreamModelName = strings.TrimSuffix(info.UpstreamModelName, "-search")
+		request.Model = info.UpstreamModelName
 		toMap := request.ToMap()
 		toMap["search_parameters"] = map[string]any{
 			"mode": "on",
@@ -125,17 +79,16 @@ func (a *Adaptor) ConvertOpenAIRequest(c *gin.Context, info *relaycommon.RelayIn
 			request.MaxCompletionTokens = request.MaxTokens
 			request.MaxTokens = nil
 		}
-		if strings.HasSuffix(request.Model, "-high") {
+		preserveSuffix := model_setting.ShouldPreserveThinkingSuffix(info.OriginModelName) || model_setting.ShouldPreserveThinkingSuffix(request.Model)
+		if !preserveSuffix && strings.HasSuffix(request.Model, "-high") {
 			request.ReasoningEffort = "high"
 			request.Model = strings.TrimSuffix(request.Model, "-high")
-		} else if strings.HasSuffix(request.Model, "-low") {
+		} else if !preserveSuffix && strings.HasSuffix(request.Model, "-low") {
 			request.ReasoningEffort = "low"
 			request.Model = strings.TrimSuffix(request.Model, "-low")
 		}
-		if info != nil {
-			info.SetReasoningEffort(request.ReasoningEffort)
-			info.UpstreamModelName = request.Model
-		}
+		info.SetReasoningEffort(request.ReasoningEffort)
+		info.UpstreamModelName = request.Model
 	}
 	return request, nil
 }
@@ -163,12 +116,7 @@ func (a *Adaptor) DoRequest(c *gin.Context, info *relaycommon.RelayInfo, request
 func (a *Adaptor) DoResponse(c *gin.Context, resp *http.Response, info *relaycommon.RelayInfo) (usage any, err *types.NewAPIError) {
 	switch info.RelayMode {
 	case constant.RelayModeImagesGenerations, constant.RelayModeImagesEdits:
-		return openai.OpenaiImageHandler(c, info, resp)
-	}
-	if info.TextPlanApplies() && info.TextNative() == types.RelayFormatOpenAIResponses {
-		return openai.DoPlannedTextResponse(c, info, resp)
-	}
-	switch info.RelayMode {
+		usage, err = openai.OpenaiImageHandler(c, info, resp)
 	case constant.RelayModeResponses:
 		if info.IsStream {
 			usage, err = openai.OaiResponsesStreamHandler(c, info, resp)

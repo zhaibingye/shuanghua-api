@@ -28,6 +28,8 @@ type contentModerationSettingsResponse struct {
 	Provider               string `json:"provider"`
 	BaseURL                string `json:"base_url"`
 	Model                  string `json:"model"`
+	PreflightEnabled       bool   `json:"preflight_enabled"`
+	FailureMode            string `json:"failure_mode"`
 	TimeoutSeconds         int    `json:"timeout_seconds"`
 	MaxRetries             int    `json:"max_retries"`
 	NormalSampleRate       int    `json:"normal_sample_rate"`
@@ -47,6 +49,8 @@ type contentModerationSettingsRequest struct {
 	BaseURL                string `json:"base_url"`
 	APIKey                 string `json:"api_key"`
 	Model                  string `json:"model"`
+	PreflightEnabled       *bool  `json:"preflight_enabled"`
+	FailureMode            string `json:"failure_mode"`
 	TimeoutSeconds         int    `json:"timeout_seconds"`
 	MaxRetries             int    `json:"max_retries"`
 	NormalSampleRate       int    `json:"normal_sample_rate"`
@@ -78,6 +82,8 @@ func GetContentModerationSettings(c *gin.Context) {
 			Provider:               config.Provider,
 			BaseURL:                config.BaseURL,
 			Model:                  config.Model,
+			PreflightEnabled:       config.PreflightEnabled,
+			FailureMode:            config.FailureMode,
 			TimeoutSeconds:         config.TimeoutSeconds,
 			MaxRetries:             config.MaxRetries,
 			NormalSampleRate:       config.NormalSampleRate,
@@ -97,17 +103,35 @@ func UpdateContentModerationSettings(c *gin.Context) {
 		return
 	}
 	request.Provider = strings.ToLower(strings.TrimSpace(request.Provider))
-	if request.Provider != "responses" && request.Provider != "gemini" {
-		c.JSON(http.StatusBadRequest, gin.H{"success": false, "message": "provider must be responses or gemini"})
+	if request.Provider == "" {
+		request.Provider = setting.DefaultContentModerationProvider
+	}
+	if request.Provider != "moderations" && request.Provider != "responses" && request.Provider != "gemini" {
+		c.JSON(http.StatusBadRequest, gin.H{"success": false, "message": "provider must be moderations, responses, or gemini"})
 		return
 	}
 	modelName := strings.TrimSpace(request.Model)
+	if modelName == "" {
+		modelName = setting.DefaultContentModerationModel
+	}
 	apiKey := strings.TrimSpace(request.APIKey)
 	baseURL := strings.TrimSpace(request.BaseURL)
 	promptVersion := strings.TrimSpace(request.PromptVersion)
 	policyPrompt := strings.TrimSpace(request.PolicyPrompt)
 	if policyPrompt == "" {
 		policyPrompt = setting.DefaultContentModerationPolicyPrompt
+	}
+	if request.PreflightEnabled == nil {
+		defaultPreflight := true
+		request.PreflightEnabled = &defaultPreflight
+	}
+	failureMode := strings.ToLower(strings.TrimSpace(request.FailureMode))
+	if failureMode == "" {
+		failureMode = setting.DefaultContentModerationFailureMode
+	}
+	if failureMode != "open" && failureMode != "closed" {
+		c.JSON(http.StatusBadRequest, gin.H{"success": false, "message": "failure mode must be open or closed"})
+		return
 	}
 	parsedChannelIDs, err := setting.ValidateChannelIDsString(request.Channels)
 	if err != nil {
@@ -177,6 +201,8 @@ func UpdateContentModerationSettings(c *gin.Context) {
 		setting.ContentModerationProviderOption:               request.Provider,
 		setting.ContentModerationBaseURLOption:                baseURL,
 		setting.ContentModerationModelOption:                  modelName,
+		setting.ContentModerationPreflightOption:              strconv.FormatBool(*request.PreflightEnabled),
+		setting.ContentModerationFailureModeOption:            failureMode,
 		setting.ContentModerationTimeoutSecondsOption:         strconv.Itoa(request.TimeoutSeconds),
 		setting.ContentModerationMaxRetriesOption:             strconv.Itoa(request.MaxRetries),
 		setting.ContentModerationNormalSampleRateOption:       strconv.Itoa(request.NormalSampleRate),
