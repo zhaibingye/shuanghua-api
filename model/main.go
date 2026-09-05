@@ -518,6 +518,7 @@ func migrateDB() error {
 		&TwoFA{},
 		&TwoFABackupCode{},
 		&Checkin{},
+		&InviteRebate{},
 		&ModerationConversation{},
 		&ModerationTurn{},
 		&ModerationTokenState{},

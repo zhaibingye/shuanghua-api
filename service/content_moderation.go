@@ -1282,6 +1282,14 @@ func normalizeConversationID(value string) string {
 	return value
 }
 
+func GetModerationRequestContent(c *gin.Context) (ModerationRequestContent, bool) {
+	if c == nil {
+		return ModerationRequestContent{}, false
+	}
+	content, ok := common.GetContextKeyType[ModerationRequestContent](c, constant.ContextKeyModerationRequestContent)
+	return content, ok
+}
+
 func SetModerationRequestContent(c *gin.Context, request dto.Request) {
 	if c == nil || request == nil || !moderationRequestSupported(request) {
 		return
@@ -2089,6 +2097,18 @@ type moderationReviewPayload struct {
 	Text         any               `json:"text,omitempty"`
 }
 
+type openAIModerationResult struct {
+	Categories map[string]bool    `json:"categories"`
+	Scores     map[string]float64 `json:"category_scores"`
+	Flagged    bool               `json:"flagged"`
+}
+
+type openAIModerationResponse struct {
+	ID      string                   `json:"id"`
+	Model   string                   `json:"model"`
+	Results []openAIModerationResult `json:"results"`
+}
+
 func ProcessContentModerationQueue(ctx context.Context) error {
 	if ctx == nil {
 		ctx = context.Background()
@@ -2233,23 +2253,30 @@ func reviewModerationTurn(ctx context.Context, turn *model.ModerationTurn, confi
 	if err != nil {
 		return decision, "", err
 	}
+	provider := strings.ToLower(strings.TrimSpace(config.Provider))
+	if provider == "" || provider == "moderations" {
+		result, raw, callErr := callNativeModeration(ctx, config, input)
+		if callErr != nil {
+			return decision, string(raw), callErr
+		}
+		decision = moderationDecisionFromNativeResult(result)
+		if err := validateModerationDecision(&decision); err != nil {
+			return decision, string(raw), err
+		}
+		return decision, string(raw), nil
+	}
+	// Legacy adapters are kept only so existing installations can migrate
+	// without a flag day. New configurations never select them.
 	prompt := strings.TrimSpace(config.PolicyPrompt)
 	if prompt == "" {
 		prompt = setting.DefaultContentModerationPolicyPrompt
 	}
-	payload := moderationReviewPayload{
-		Model:        config.Model,
-		Instructions: prompt,
-		Input:        input,
-		Store:        false,
-		Reasoning:    map[string]string{"effort": "low"},
-	}
+	payload := moderationReviewPayload{Model: config.Model, Instructions: prompt, Input: input, Store: false, Reasoning: map[string]string{"effort": "low"}}
 	var response map[string]any
 	var raw []byte
-	switch strings.ToLower(strings.TrimSpace(config.Provider)) {
-	case "gemini":
+	if provider == "gemini" {
 		response, raw, err = callGeminiModeration(ctx, config, payload.Input)
-	default:
+	} else {
 		response, raw, err = callResponsesModeration(ctx, config, payload)
 	}
 	if err != nil {
@@ -2266,6 +2293,90 @@ func reviewModerationTurn(ctx context.Context, turn *model.ModerationTurn, confi
 		return decision, string(raw), err
 	}
 	return decision, string(raw), nil
+}
+
+func callNativeModeration(ctx context.Context, config setting.ContentModerationSetting, inputs ...string) (openAIModerationResult, []byte, error) {
+	var result openAIModerationResult
+	items := make([]any, 0, len(inputs))
+	for _, input := range inputs {
+		if strings.TrimSpace(input) == "" {
+			continue
+		}
+		items = append(items, map[string]any{"type": "text", "text": input})
+	}
+	if len(items) == 0 {
+		return result, nil, errors.New("moderation input is empty")
+	}
+	payload := map[string]any{"model": config.Model, "input": items}
+	response, raw, err := moderationHTTPClient(ctx, config, "moderations", payload)
+	if err != nil {
+		return result, raw, err
+	}
+	var decoded openAIModerationResponse
+	body, marshalErr := common.Marshal(response)
+	if marshalErr != nil {
+		return result, raw, marshalErr
+	}
+	if err := common.Unmarshal(body, &decoded); err != nil {
+		return result, raw, fmt.Errorf("decode moderation response: %w", err)
+	}
+	if len(decoded.Results) == 0 {
+		return result, raw, errors.New("moderation provider returned no results")
+	}
+	return decoded.Results[0], raw, nil
+}
+
+// PreflightModerationRequest performs a synchronous user-input check. It is
+// intentionally separate from the asynchronous timeline review: a provider
+// outage must not silently turn a configured closed moderation gate into an
+// allow decision.
+func PreflightModerationRequest(ctx context.Context, content ModerationRequestContent, config setting.ContentModerationSetting) error {
+	if !config.PreflightEnabled || strings.TrimSpace(config.APIKey) == "" || strings.TrimSpace(config.Model) == "" {
+		return nil
+	}
+	if strings.TrimSpace(config.Provider) != "" && strings.TrimSpace(config.Provider) != "moderations" {
+		return nil // legacy providers remain asynchronous during migration
+	}
+	result, _, err := callNativeModeration(ctx, config, content.UserPrompt)
+	if err != nil {
+		if config.FailureMode == "open" {
+			return nil
+		}
+		return fmt.Errorf("content moderation preflight unavailable: %w", err)
+	}
+	if result.Flagged {
+		return model.ErrModerationConversationBlocked
+	}
+	return nil
+}
+
+func moderationDecisionFromNativeResult(result openAIModerationResult) moderationDecision {
+	categories := make([]string, 0)
+	maxScore := 0.0
+	for category, flagged := range result.Categories {
+		if flagged {
+			categories = append(categories, category)
+		}
+		if result.Scores[category] > maxScore {
+			maxScore = result.Scores[category]
+		}
+	}
+	sort.Strings(categories)
+	severity := "none"
+	if maxScore >= 0.9 {
+		severity = "critical"
+	} else if maxScore >= 0.75 {
+		severity = "high"
+	} else if maxScore >= 0.5 {
+		severity = "medium"
+	} else if maxScore > 0 {
+		severity = "low"
+	}
+	decision := "allow"
+	if result.Flagged {
+		decision = "block"
+	}
+	return moderationDecision{Decision: decision, Actor: "user", Severity: severity, Categories: categories, Confidence: maxScore, ReasonCode: "openai_moderations"}
 }
 
 func ValidateContentModerationURL(rawURL string) error {
@@ -2320,6 +2431,11 @@ func appendModerationEndpointSuffix(endpoint, provider, modelName string) string
 	}
 	path := strings.TrimRight(parsed.Path, "/")
 	switch provider {
+	case "moderations":
+		if !strings.HasSuffix(path, "/v1") {
+			return endpoint
+		}
+		parsed.Path = path + "/moderations"
 	case "responses":
 		if !strings.HasSuffix(path, "/v1") {
 			return endpoint
