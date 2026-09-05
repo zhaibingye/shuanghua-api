@@ -262,6 +262,58 @@ type ToolCallRequest struct {
 	Type     string          `json:"type"`
 	Function FunctionRequest `json:"function,omitempty"`
 	Custom   json.RawMessage `json:"custom,omitempty"`
+	// Extra preserves provider-specific tool fields used by Codex-compatible
+	// Responses implementations, such as namespace/container metadata.
+	Extra map[string]json.RawMessage `json:"-"`
+}
+
+func (t *ToolCallRequest) UnmarshalJSON(data []byte) error {
+	type alias ToolCallRequest
+	var decoded alias
+	if err := kitutil.Unmarshal(data, &decoded); err != nil {
+		return err
+	}
+	*t = ToolCallRequest(decoded)
+
+	var fields map[string]json.RawMessage
+	if err := kitutil.Unmarshal(data, &fields); err != nil {
+		return err
+	}
+	delete(fields, "id")
+	delete(fields, "type")
+	delete(fields, "function")
+	delete(fields, "custom")
+	if len(fields) > 0 {
+		t.Extra = fields
+	}
+	return nil
+}
+
+func (t ToolCallRequest) MarshalJSON() ([]byte, error) {
+	type alias ToolCallRequest
+	data, err := kitutil.Marshal(alias(t))
+	if err != nil {
+		return nil, err
+	}
+
+	if len(t.Extra) == 0 {
+		return data, nil
+	}
+
+	var fields map[string]json.RawMessage
+	if err := kitutil.Unmarshal(data, &fields); err != nil {
+		return nil, err
+	}
+	if t.Type != "function" && t.Function.Name == "" && t.Function.Description == "" &&
+		t.Function.Arguments == "" && t.Function.Parameters == nil && t.Function.Strict == nil {
+		delete(fields, "function")
+	}
+	for key, value := range t.Extra {
+		if _, exists := fields[key]; !exists {
+			fields[key] = value
+		}
+	}
+	return kitutil.Marshal(fields)
 }
 
 type FunctionRequest struct {

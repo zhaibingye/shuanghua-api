@@ -99,14 +99,78 @@ func (a *Adaptor) ConvertOpenAIResponsesRequest(c *gin.Context, info *relaycommo
 	if isCompact {
 		return request, nil
 	}
-	// codex: store must be false
+
+	// Match CLIProxyAPI's Codex Responses compatibility envelope. The Codex
+	// backend expects a normalized input array, always streams internally, and
+	// rejects several standard Responses fields even though the public API
+	// accepts them. Tool definitions remain raw so Codex-specific namespaces and
+	// additional tool metadata are forwarded unchanged.
+	normalizeCodexResponsesRequest(&request)
+	return request, nil
+}
+
+func normalizeCodexResponsesRequest(request *dto.OpenAIResponsesRequest) {
+	if request == nil {
+		return
+	}
+
+	stream := true
+	request.Stream = &stream
 	request.Store = json.RawMessage("false")
-	// rm max_output_tokens
+	request.ParallelToolCalls = json.RawMessage("true")
+	request.Include = json.RawMessage(`["reasoning.encrypted_content"]`)
+
 	request.MaxOutputTokens = nil
+	request.TopP = nil
 	request.Temperature = nil
 	request.FrequencyPenalty = nil
 	request.PresencePenalty = nil
-	return request, nil
+	request.Truncation = nil
+	request.ContextManagement = nil
+	request.PromptCacheOptions = nil
+	request.PromptCacheRetention = nil
+	request.User = nil
+	if request.ServiceTier != "priority" {
+		request.ServiceTier = ""
+	}
+
+	if len(request.Input) == 0 {
+		request.Input = json.RawMessage(`[{"type":"message","role":"user","content":[{"type":"input_text","text":""}]}]`)
+		return
+	}
+
+	var inputText string
+	if err := common.Unmarshal(request.Input, &inputText); err == nil {
+		converted, err := common.Marshal([]map[string]any{{
+			"type": "message",
+			"role": "user",
+			"content": []map[string]any{{
+				"type": "input_text",
+				"text": inputText,
+			}},
+		}})
+		if err == nil {
+			request.Input = converted
+		}
+		return
+	}
+
+	var inputItems []map[string]any
+	if err := common.Unmarshal(request.Input, &inputItems); err != nil {
+		return
+	}
+	changed := false
+	for _, item := range inputItems {
+		if item != nil && item["role"] == "system" {
+			item["role"] = "developer"
+			changed = true
+		}
+	}
+	if changed {
+		if converted, err := common.Marshal(inputItems); err == nil {
+			request.Input = converted
+		}
+	}
 }
 
 func (a *Adaptor) DoRequest(c *gin.Context, info *relaycommon.RelayInfo, requestBody io.Reader) (any, error) {
@@ -123,6 +187,9 @@ func (a *Adaptor) DoResponse(c *gin.Context, resp *http.Response, info *relaycom
 	case relayconstant.RelayModeResponses:
 		if info.IsStream {
 			return openai.OaiResponsesStreamHandler(c, info, resp)
+		}
+		if resp != nil && strings.Contains(strings.ToLower(resp.Header.Get("Content-Type")), "text/event-stream") {
+			return openai.OaiResponsesBufferedStreamHandler(c, info, resp)
 		}
 		return openai.OaiResponsesHandler(c, info, resp)
 	default:
