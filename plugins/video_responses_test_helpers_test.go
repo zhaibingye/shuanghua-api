@@ -94,6 +94,8 @@ func testVideoResponsesProtocol(t *testing.T, testCase videoResponsesTestCase) {
 			"model":         testCase.model,
 			"upstreamModel": testCase.model,
 			"action":        testCase.wantAction,
+			"apiKey":        "test-key",
+			"baseUrl":       "https://vendor.example",
 			"requestBody":   requestBody,
 		})
 		require.NoError(t, callErr)

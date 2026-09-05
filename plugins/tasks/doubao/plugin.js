@@ -4,10 +4,11 @@ export const meta = {
   name: "Doubao Video",
   icon: "Doubao.Color",
   description: {
-    en: "Volcengine Doubao Seedance video generation (text-to-video, image-to-video, and video-to-video)",
-    zh: "火山引擎豆包 Seedance 视频生成（文生视频、图生视频、视频生视频）",
+    en: "Seedance video generation. Use an Ark API key for ordinary generation, or ark_api_key|mediakit_api_key to enable MediaKit enhancement. Use task usage expressions to price tokens plus enhancement seconds; no enhancement price is added automatically.",
+    zh: "Seedance 视频生成。普通生成填写 Ark API Key；填写 ark_api_key|mediakit_api_key 启用 MediaKit 超分。请使用任务用量表达式设置 token 与超分秒数单价，系统不会自动附加超分价格。",
   },
-  version: "1.0.1",
+  version: "1.1.0",
+  allowedHosts: ["amk.cn-beijing.volces.com"],
   author: { name: "QuantumNous" },
   channelTypes: [54, 45], // VolcEngine-type channels serve Ark video models with the same wire format
   models: [
@@ -37,6 +38,21 @@ export const meta = {
         zh: "输出视频分辨率；Seedance token 单价随分辨率档位变化。",
       },
     },
+    enhancement_seconds: {
+      type: "number",
+      unit: "second",
+      description: {
+        en: "MediaKit enhancement duration; zero for ordinary Ark generation.",
+        zh: "MediaKit 超分时长；普通 Ark 生成时为零。",
+      },
+    },
+    enhancement_resolution: {
+      enum: ["none", "720p", "1080p"],
+      description: {
+        en: "Final MediaKit resolution, separate from the Ark generation resolution.",
+        zh: "MediaKit 最终输出分辨率，与 Ark 生成分辨率分别计费。",
+      },
+    },
     video_input: {
       enum: ["none", "video"],
       description: {
@@ -48,12 +64,15 @@ export const meta = {
   // Official Ark formula tokens = (input + output seconds) × W × H × 24 / 1024,
   // 16:9 max-pixel sizes, cross-checked against Volcengine price examples.
   usageExamples: [
-    { label: "480p · 5s", facts: { tokens: 48038, resolution: "480p", video_input: "none" } },
-    { label: "720p · 5s", facts: { tokens: 108000, resolution: "720p", video_input: "none" } },
-    { label: "1080p · 5s", facts: { tokens: 243000, resolution: "1080p", video_input: "none" } },
-    { label: "4k · 5s", facts: { tokens: 972000, resolution: "4k", video_input: "none" } },
-    { label: "720p · 10s", facts: { tokens: 216000, resolution: "720p", video_input: "none" } },
-    { label: "720p · 5s (+4s 输入视频)", facts: { tokens: 194400, resolution: "720p", video_input: "video" } },
+    { label: "480p · 5s", facts: { tokens: 48038, resolution: "480p", video_input: "none", enhancement_seconds: 0, enhancement_resolution: "none" } },
+    { label: "720p · 5s", facts: { tokens: 108000, resolution: "720p", video_input: "none", enhancement_seconds: 0, enhancement_resolution: "none" } },
+    { label: "1080p · 5s", facts: { tokens: 243000, resolution: "1080p", video_input: "none", enhancement_seconds: 0, enhancement_resolution: "none" } },
+    { label: "4k · 5s", facts: { tokens: 972000, resolution: "4k", video_input: "none", enhancement_seconds: 0, enhancement_resolution: "none" } },
+    { label: "720p · 10s", facts: { tokens: 216000, resolution: "720p", video_input: "none", enhancement_seconds: 0, enhancement_resolution: "none" } },
+    { label: "720p · 5s (+4s input video)", facts: { tokens: 194400, resolution: "720p", video_input: "video", enhancement_seconds: 0, enhancement_resolution: "none" } },
+    { label: "MediaKit · 480p → 720p · 5s", facts: { tokens: 48038, resolution: "480p", video_input: "none", enhancement_seconds: 5, enhancement_resolution: "720p" } },
+    { label: "MediaKit · 480p → 1080p · 5s", facts: { tokens: 48038, resolution: "480p", video_input: "none", enhancement_seconds: 5, enhancement_resolution: "1080p" } },
+    { label: "MediaKit · 720p → 1080p · 5s", facts: { tokens: 108000, resolution: "720p", video_input: "none", enhancement_seconds: 5, enhancement_resolution: "1080p" } },
   ],
   routes: [
     { method: "POST", path: "/doubao/api/v3/contents/generations/tasks", type: "submit", decode: "createTask", render: "taskCreated" },
@@ -64,6 +83,134 @@ export const meta = {
 
 function trimmed(value) {
   return String(value || "").trim();
+}
+
+// These ceilings mirror the host-owned task usage units in Task Plugin API v1.
+const MAX_SECONDS = 3600;
+const MAX_COUNT = 128;
+const MEDIAKIT_BASE_URL = "https://amk.cn-beijing.volces.com";
+
+function channelCredentials(ctx) {
+  const raw = trimmed(ctx.apiKey);
+  let arkKey = raw;
+  let mediaKey = "";
+  let mediaBaseUrl = MEDIAKIT_BASE_URL;
+  if (raw.startsWith("{")) {
+    let parsed;
+    try {
+      parsed = JSON.parse(raw);
+    } catch {
+      throw new Error("Invalid Doubao channel credentials JSON");
+    }
+    arkKey = trimmed(parsed.ark_api_key);
+    mediaKey = trimmed(parsed.mediakit_api_key);
+    if (parsed.mediakit_base_url !== undefined) mediaBaseUrl = trimmed(parsed.mediakit_base_url);
+    if (!mediaKey) throw new Error("Both Ark and MediaKit API keys are required for composite credentials");
+  } else if (raw.includes("|")) {
+    const parts = raw.split("|");
+    if (parts.length !== 2) throw new Error("Use ark_api_key|mediakit_api_key for composite credentials");
+    arkKey = trimmed(parts[0]);
+    mediaKey = trimmed(parts[1]);
+    if (!mediaKey) throw new Error("Both Ark and MediaKit API keys are required for composite credentials");
+  }
+  if (!arkKey || /[\r\n]/.test(arkKey + mediaKey)) throw new Error("Invalid Doubao channel credentials");
+  if (mediaKey) {
+    // Custom proxies are allowed only on the channel's own origin. Additional
+    // hosts require a reviewed plugin override, not a client request parameter.
+    const match = /^(https?):\/\/([^/?#@]+)(\/[^?#]*)?$/.exec(mediaBaseUrl);
+    const base = /^(https?):\/\/([^/?#@]+)/.exec(trimmed(ctx.baseUrl));
+    if (!match || (mediaBaseUrl !== MEDIAKIT_BASE_URL && (!base || match[1] !== base[1] || match[2].toLowerCase() !== base[2].toLowerCase()))) {
+      throw new Error("MediaKit base URL must use the official endpoint or the channel origin");
+    }
+  }
+  return { arkKey: arkKey, mediaKey: mediaKey, mediaBaseUrl: mediaBaseUrl.replace(/\/+$/, "") };
+}
+
+function boundedInteger(value, name, maximum) {
+  if ((typeof value !== "number" && typeof value !== "string") || !String(value).trim()) throw new Error(name + " must be a positive integer");
+  const number = Number(value);
+  if (!Number.isInteger(number) || number < 1 || number > maximum) throw new Error(name + " must be between 1 and " + maximum);
+  return number;
+}
+
+// One canonical upstream body supplies request conversion AND estimated facts.
+// Channel credentials, never client metadata, select the enhancement pipeline.
+function generationRequest(ctx) {
+  const req = ctx.requestBody || {};
+  if (req.metadata !== undefined && (!req.metadata || typeof req.metadata !== "object" || Array.isArray(req.metadata))) throw new Error("metadata must be an object");
+  const metadata = req.metadata || {};
+  const body = Object.assign({}, metadata);
+  for (const key of ["content", "callback_url", "output_format", "return_last_frame", "service_tier", "execution_expires_after", "generate_audio", "draft", "tools", "safety_identifier", "priority", "resolution", "ratio", "frames", "seed", "camera_fixed", "watermark"]) {
+    if (req[key] !== undefined) body[key] = req[key];
+  }
+  for (const key of ["return_last_frame", "generate_audio", "draft", "camera_fixed", "watermark"]) {
+    if (body[key] === undefined) continue;
+    if (body[key] === "true") body[key] = true;
+    if (body[key] === "false") body[key] = false;
+    if (typeof body[key] !== "boolean") throw new Error(key + " must be a boolean");
+  }
+  if (body.seed !== undefined) {
+    const seed = Number(body.seed);
+    if ((typeof body.seed !== "number" && typeof body.seed !== "string") || !String(body.seed).trim() || !Number.isInteger(seed) || seed < -1 || seed > 2147483647) throw new Error("seed must be an integer between -1 and 2147483647");
+    body.seed = seed;
+  }
+  // Validate even shadowed aliases: metadata and multipart must not bypass bounds.
+  for (const source of [req, metadata]) {
+    for (const key of ["seconds", "duration"]) {
+      if (source[key] !== undefined) boundedInteger(source[key], key, MAX_SECONDS);
+    }
+    if (source.frames !== undefined) boundedInteger(source.frames, "frames", MAX_SECONDS * 24);
+    if (source.n !== undefined) boundedInteger(source.n, "n", MAX_COUNT);
+  }
+  const duration = req.seconds ?? req.duration ?? metadata.duration ?? metadata.seconds;
+  let seconds = duration === undefined ? 5 : boundedInteger(duration, "duration", MAX_SECONDS);
+  if (body.frames !== undefined) {
+    if (duration !== undefined) throw new Error("Specify duration or frames, not both");
+    body.frames = boundedInteger(body.frames, "frames", MAX_SECONDS * 24);
+    seconds = body.frames / 24;
+    delete body.duration;
+  } else {
+    body.duration = seconds;
+  }
+  delete body.seconds;
+  const rawResolution = body.resolution ?? req.size ?? "720p";
+  const resolution = normalizeResolution(rawResolution);
+  const credentials = channelCredentials(ctx);
+  let target = "none";
+  body.resolution = resolution;
+  if (credentials.mediaKey) {
+    const policy = { "480p": ["480p", "720p"], "720p": ["480p", "1080p"], "1080p": ["720p", "1080p"] }[resolution];
+    if (!policy) throw new Error("MediaKit resolution must be 480p, 720p, or 1080p");
+    body.resolution = policy[0];
+    target = policy[1];
+    if (body.draft === true) throw new Error("MediaKit enhancement does not support draft output");
+    // Ark callbacks describe only generation, not completion of the composite task.
+    if (body.callback_url) throw new Error("MediaKit tasks must be polled; Ark callbacks do not describe final enhancement");
+  }
+  if (body.content !== undefined && !Array.isArray(body.content)) throw new Error("content must be an array");
+  const content = Array.isArray(body.content) ? body.content.slice() : [];
+  if (req.prompt !== undefined && trimmed(req.prompt)) {
+    const texts = content.filter((item) => item && item.type === "text").map((item) => item.text).join("\n");
+    if (texts !== req.prompt) content.push({ type: "text", text: String(req.prompt) });
+  }
+  if (req.images !== undefined && !Array.isArray(req.images)) throw new Error("images must be an array");
+  const images = [req.image, req.input_reference].concat(req.images || []);
+  for (const image of images) {
+    if (!trimmed(image)) continue;
+    if (typeof image !== "string") throw new Error("image references must be URLs");
+    if (!content.some((item) => item && item.type === "image_url" && item.image_url && item.image_url.url === image)) content.push({ type: "image_url", image_url: { url: image } });
+  }
+  if (!content.length || content.length > MAX_COUNT) throw new Error("content must contain between 1 and 128 items");
+  for (const item of content) {
+    if (!item || typeof item !== "object" || Array.isArray(item)) throw new Error("content items must be objects");
+    if (!["text", "image_url", "video_url", "audio_url", "draft_task"].includes(item.type)) throw new Error("Unsupported content type");
+    if (item.type === "text" && !trimmed(item.text)) throw new Error("Text content must not be empty");
+    if (["image_url", "video_url", "audio_url"].includes(item.type) && (!item[item.type] || typeof item[item.type].url !== "string" || !trimmed(item[item.type].url))) throw new Error("Media content requires a URL");
+    if (item.type === "text" && /(?:^|\s)--(?:duration|dur|d|seconds|frames|f|fps|framespersecond|resolution|res|rs|ratio|rt|r|size)(?:\s|=|$)/i.test(item.text || "")) throw new Error("Use structured duration, frames, resolution and ratio fields instead of prompt flags");
+  }
+  body.content = rewriteDraftTaskContent(content, ctx.originTasks);
+  body.model = ctx.upstreamModel || ctx.model || req.model;
+  return { body: body, seconds: seconds, target: target, credentials: credentials };
 }
 
 function draftTaskIds(content) {
@@ -105,7 +252,7 @@ function normalizeResolution(value) {
   const raw = trimmed(value).toLowerCase();
   if (["480p", "720p", "1080p", "4k"].includes(raw)) return raw;
   const parts = raw.replace("*", "x").split("x");
-  if (parts.length !== 2) return "720p";
+  if (parts.length !== 2 || parts.some((part) => !/^\d+$/.test(part) || Number(part) < 1 || Number(part) > 7680)) throw new Error("Invalid video resolution");
   const max = Math.max(Number(parts[0]), Number(parts[1]));
   if (max >= 3840) return "4k";
   if (max >= 1920) return "1080p";
@@ -120,7 +267,7 @@ function hasVideo(content) {
 // Max-pixel 16:9 dimensions per resolution tier. Used when ratio is absent or
 // adaptive so the submit-time estimate overestimates rather than underestimates.
 // Official Ark formula: tokens = seconds × width × height × 24 / 1024.
-// Video input duration is omitted; extractUsageOnComplete overlays the real bill.
+// Reference clips are reserved conservatively; completion overlays the real bill.
 function resolutionMaxPixels(resolution) {
   if (resolution === "480p") return [854, 480];
   if (resolution === "1080p") return [1920, 1080];
@@ -234,9 +381,19 @@ export const native = {
     return Object.assign({}, data, { id: task.task_id });
   },
   taskStatus: function (ctx, task) {
-    if (task.data && typeof task.data === "object" && !Array.isArray(task.data)) return Object.assign({}, task.data, { id: task.task_id });
+    const data = task.data || {};
     const statusMap = { NOT_START: "queued", SUBMITTED: "queued", QUEUED: "queued", IN_PROGRESS: "running", SUCCESS: "succeeded", FAILURE: "failed" };
-    const output = { id: task.task_id, status: statusMap[task.status] || "queued" };
+    const output = { id: task.task_id, status: statusMap[task.status] || "unknown" };
+    if (task.status === "SUCCESS") {
+      if (data.result) {
+        output.content = { video_url: mediaKitVideoURL(data) };
+        if (data.result.resolution) output.resolution = data.result.resolution;
+      } else {
+        for (const key of ["content", "usage", "resolution", "duration", "ratio", "seed", "framespersecond"]) {
+          if (data[key] !== undefined) output[key] = data[key];
+        }
+      }
+    }
     if (task.fail_reason) output.error = { message: task.fail_reason };
     return output;
   },
@@ -246,24 +403,13 @@ export const native = {
 };
 
 export function buildSubmitRequest(ctx) {
-  const req = ctx.requestBody;
-  const metadata = req.metadata || {};
-  const body = Object.assign({ model: req.model || "", content: [] }, metadata);
-  const imageContent = [];
-  const images = Array.isArray(req.images) ? req.images : [];
-  for (const url of images) imageContent.push({ type: "image_url", image_url: { url: url } });
-  const metadataContent = Array.isArray(body.content) ? body.content : [];
-  body.content = imageContent.concat(metadataContent).filter((item) => item && item.type !== "text");
-  const hasReference = body.content.length > 0;
-  if (trimmed(req.prompt) || !hasReference) body.content.push({ type: "text", text: req.prompt || "" });
-  if (Array.isArray(body.content)) body.content = rewriteDraftTaskContent(body.content, ctx.originTasks);
-  const seconds = Number.parseInt(req.seconds || "", 10);
-  if (seconds > 0) body.duration = seconds;
-  body.model = ctx.upstreamModel || body.model;
+  const generation = generationRequest(ctx);
+  const body = generation.body;
+  const hasReference = body.content.some((item) => item.type !== "text");
   return {
-    url: ctx.baseUrl + "/api/v3/contents/generations/tasks",
+    url: ctx.baseUrl.replace(/\/+$/, "") + "/api/v3/contents/generations/tasks",
     method: "POST",
-    headers: { "Content-Type": "application/json", Accept: "application/json", Authorization: "Bearer " + ctx.apiKey },
+    headers: { "Content-Type": "application/json", Accept: "application/json", Authorization: "Bearer " + generation.credentials.arkKey },
     body: body,
     action: hasReference ? "image_to_video" : "text_to_video",
     rewriteModel: body.model,
@@ -271,47 +417,110 @@ export function buildSubmitRequest(ctx) {
 }
 
 export function parseSubmitResponse(ctx, resp) {
-  if (!resp.body || !resp.body.id) throw new Error("task_id is empty");
-  return { taskId: resp.body.id, taskData: resp.body };
+  if (!resp.body || !trimmed(resp.body.id)) throw new Error("task_id is empty");
+  const generation = generationRequest(ctx);
+  const result = { taskId: resp.body.id, taskData: resp.body };
+  if (generation.target !== "none") {
+    result.state = {
+      version: 1,
+      phase: "generation",
+      target: generation.target,
+      resolution: generation.body.resolution,
+      seconds: generation.seconds,
+    };
+  }
+  return result;
 }
 
 export function extractUsage(ctx) {
-  const req = ctx.requestBody || {};
-  const metadata = req.metadata || {};
+  const generation = generationRequest(ctx);
+  const body = generation.body;
   if (ctx.usagePurpose === "billing_ratios") {
-    const ratio = videoInputRatio(ctx.upstreamModel || ctx.model, metadata.resolution, metadata.content);
+    // Preserve ordinary legacy ratio billing. Composite pricing must be an
+    // administrator-owned task expression; never hide enhancement prices here.
+    const ratio = videoInputRatio(ctx.upstreamModel || ctx.model, body.resolution, body.content);
     return ratio === 1 ? null : { video_input_ratio: ratio };
   }
-  let seconds = Number(req.seconds || req.duration || metadata.duration || 0);
-  if (!Number.isFinite(seconds) || seconds <= 0) {
-    const frames = Number(metadata.frames);
-    seconds = Number.isFinite(frames) && frames > 0 ? Math.floor(frames / 24) : 15;
-  }
-  if (seconds <= 0) seconds = 5;
-  seconds = Math.min(seconds, 3600);
-  const rawResolution = metadata.resolution || req.size;
-  const raw = trimmed(rawResolution).toLowerCase();
-  const recognized = ["480p", "720p", "1080p", "4k"].includes(raw) || raw.replace("*", "x").split("x").length === 2;
-  const resolution = recognized ? normalizeResolution(rawResolution) : "1080p";
+  // A reference clip can contribute billing tokens too. Reserve 15 seconds per
+  // reference (Ark's clip limit); measured completion tokens replace the estimate.
+  const referenceSeconds = body.content.filter((item) => item.type === "video_url").length * 15;
   return {
-    tokens: estimateTokens(seconds, resolution),
-    resolution: resolution,
-    video_input: hasVideo(metadata.content) ? "video" : "none",
+    tokens: Math.ceil(estimateTokens(generation.seconds + referenceSeconds, body.resolution)),
+    resolution: body.resolution,
+    video_input: hasVideo(body.content) ? "video" : "none",
+    enhancement_seconds: generation.target === "none" ? 0 : generation.seconds,
+    enhancement_resolution: generation.target,
   };
 }
 
 export function buildQueryRequest(ctx) {
+  const credentials = channelCredentials(ctx);
+  const state = ctx.state;
+  if (state && state.version === 1 && state.phase !== "generation") {
+    if (!credentials.mediaKey) throw new Error("MediaKit credentials are required to continue this task");
+    const headers = { Accept: "application/json", "Content-Type": "application/json", Authorization: "Bearer " + credentials.mediaKey };
+    if (state.phase === "enhancement_submit") {
+      return {
+        url: credentials.mediaBaseUrl + "/api/v1/tools/enhance-video",
+        method: "POST",
+        headers: headers,
+        body: {
+          video_url: state.videoUrl,
+          scene: "aigc",
+          tool_version: "standard",
+          resolution: state.target,
+          // Independent of credentials, clock and process. A lost response or
+          // crash before state persistence replays exactly the same vendor key.
+          client_token: "new-api-" + utils.hmacSHA256(ctx.taskId + "\u0000" + state.target, "doubao-mediakit-v1").slice(0, 32),
+        },
+      };
+    }
+    if (state.phase !== "enhancement") throw new Error("Unknown MediaKit task phase");
+    return { url: credentials.mediaBaseUrl + "/api/v1/tasks/" + encodeURIComponent(state.taskId), method: "GET", headers: headers };
+  }
+  if (state && state.version !== 1) throw new Error("Unsupported Doubao task state version");
   return {
-    url: ctx.baseUrl + "/api/v3/contents/generations/tasks/" + ctx.taskId,
+    url: ctx.baseUrl.replace(/\/+$/, "") + "/api/v3/contents/generations/tasks/" + encodeURIComponent(ctx.taskId),
     method: "GET",
-    headers: { Accept: "application/json", "Content-Type": "application/json", Authorization: "Bearer " + ctx.apiKey },
+    headers: { Accept: "application/json", "Content-Type": "application/json", Authorization: "Bearer " + credentials.arkKey },
   };
 }
 
-export function parseTaskResult(ctx, body) {
+export function parseTaskResult(ctx, body, response) {
+  if (!body || typeof body !== "object") return { status: "UNKNOWN", reason: "Invalid task response" };
+  const state = ctx.state;
+  if (state && state.version === 1 && state.phase !== "generation") {
+    if (body.success === false || ["failed", "canceled", "cancelled", "expired"].includes(body.status)) {
+      return { status: "FAILURE", progress: "100%", reason: "MediaKit enhancement failed" };
+    }
+    if (state.phase === "enhancement_submit") {
+      if ((response && response.status >= 400) || !trimmed(body.task_id)) return { status: "UNKNOWN", reason: "MediaKit did not acknowledge enhancement submission" };
+      return { status: "IN_PROGRESS", progress: "75%", state: Object.assign({}, state, { phase: "enhancement", taskId: body.task_id }) };
+    }
+    if (["completed", "succeeded", "success"].includes(body.status)) {
+      const url = mediaKitVideoURL(body);
+      if (!url) return { status: "FAILURE", progress: "100%", reason: "MediaKit completed without a video URL" };
+      return { status: "SUCCESS", progress: "100%", url: url, completionTokens: state.tokens, totalTokens: state.tokens };
+    }
+    if (["queued", "running", "processing"].includes(body.status)) return { status: "IN_PROGRESS", progress: "85%" };
+    return { status: "UNKNOWN", reason: "Unrecognized MediaKit task status" };
+  }
   if (body.status === "pending" || body.status === "queued") return { status: "QUEUED", progress: "10%" };
   if (body.status === "processing" || body.status === "running") return { status: "IN_PROGRESS", progress: "50%" };
   if (body.status === "succeeded") {
+    if (state && state.phase === "generation") {
+      const url = trimmed(body.content && body.content.video_url);
+      if (!url) return { status: "FAILURE", progress: "100%", reason: "Ark completed without a video URL" };
+      const facts = arkCompletionFacts(body);
+      const next = Object.assign({}, state, { phase: "enhancement_submit", videoUrl: url });
+      if (facts.tokens !== undefined) next.tokens = facts.tokens;
+      // The enhancement duration is the actual source clip duration, not an
+      // upstream deduction number and never the sum of input + output durations.
+      const seconds = Number(body.duration);
+      if (Number.isFinite(seconds) && seconds > 0 && seconds <= MAX_SECONDS) next.seconds = seconds;
+      if (facts.resolution) next.resolution = facts.resolution;
+      return { status: "IN_PROGRESS", progress: "65%", state: next };
+    }
     const result = { status: "SUCCESS", progress: "100%", url: body.content && body.content.video_url ? body.content.video_url : "" };
     const usage = body.usage || {};
     const completionTokens = Number(usage.completion_tokens || 0);
@@ -335,7 +544,9 @@ function artifactData(ctx) {
 
 export function listArtifacts(task) {
   if (task.status !== "SUCCESS") return [];
-  const content = artifactData(task).content || {};
+  const data = artifactData(task);
+  const content = data.content || {};
+  if (data.result) return mediaKitVideoURL(data) ? [{ key: "video", type: "video", mimeType: "video/mp4" }] : [];
   const artifacts = [];
   if (trimmed(content.video_url)) artifacts.push({ key: "video", type: "video" });
   if (trimmed(content.last_frame_url)) artifacts.push({ key: "last_frame", type: "image", mimeType: "image/png" });
@@ -343,24 +554,43 @@ export function listArtifacts(task) {
 }
 
 export function buildContentRequest(ctx) {
-  const content = artifactData(ctx).content || {};
-  const urls = { video: content.video_url, last_frame: content.last_frame_url };
+  const data = artifactData(ctx);
+  const content = data.content || {};
+  const urls = { video: data.result ? mediaKitVideoURL(data) : content.video_url, last_frame: content.last_frame_url };
   const url = trimmed(urls[ctx.artifactKey]);
   if (!url) throw new Error("artifact_not_found");
   return { url: url, method: ctx.clientRequest.method, credentialless: true };
 }
 
-export function extractUsageOnComplete(task, taskResult, body) {
-  if (!body || body.status !== "succeeded") return {};
+function arkCompletionFacts(body) {
   const facts = {};
   const usage = body.usage || {};
-  let tokens = Number(usage.completion_tokens);
-  if (!Number.isFinite(tokens) || tokens <= 0) tokens = Number(usage.total_tokens);
-  if (Number.isFinite(tokens) && tokens > 0) facts.tokens = tokens;
+  const rawTokens = usage.completion_tokens ?? usage.total_tokens;
+  if (typeof rawTokens === "number" && Number.isFinite(rawTokens) && rawTokens >= 0) facts.tokens = rawTokens;
   const content = body.content || {};
   const resolution = trimmed(content.resolution || body.resolution).toLowerCase();
   if (["480p", "720p", "1080p", "4k"].includes(resolution)) facts.resolution = resolution;
   return facts;
+}
+
+export function extractUsageOnComplete(task, taskResult, body) {
+  const state = task.state;
+  if (state && state.version === 1) {
+    if (state.phase !== "enhancement" || !body || !["completed", "succeeded", "success"].includes(body.status)) return {};
+    const facts = { resolution: state.resolution, enhancement_seconds: state.seconds, enhancement_resolution: state.target };
+    if (state.tokens !== undefined) facts.tokens = state.tokens;
+    return facts;
+  }
+  if (!body || body.status !== "succeeded") return {};
+  return arkCompletionFacts(body);
+}
+
+// MediaKit response formats use an explicit result envelope; do not recursively
+// choose an arbitrary URL (it might be a thumbnail or the unenhanced source).
+function mediaKitVideoURL(body) {
+  const result = body.result || {};
+  const video = result.video || {};
+  return trimmed(result.video_url || result.output_url || result.url || video.video_url || video.url);
 }
 
 export const protocols = {
@@ -381,17 +611,17 @@ export const protocols = {
       for (const image of [req.image, req.input_reference].concat(req.images || [], input.images)) {
         if (trimmed(image) && !images.includes(trimmed(image))) images.push(trimmed(image));
       }
-      if (!prompt && images.length === 0) throw new Error("input is required");
+      if (!prompt && images.length === 0 && !(Array.isArray((req.metadata || {}).content) && req.metadata.content.length) && !(Array.isArray(req.content) && req.content.length)) throw new Error("input is required");
       const metadata = Object.assign({}, req.metadata || {});
       if (Object.prototype.hasOwnProperty.call(req, "resolution")) metadata.resolution = req.resolution;
       else if (req.size && !metadata.resolution) metadata.resolution = normalizeResolution(req.size);
-      const requestBody = { model: model, prompt: prompt, metadata: metadata };
+      const requestBody = Object.assign({}, req, { model: model, prompt: prompt, metadata: metadata });
       if (images.length) requestBody.images = images;
       if (Object.prototype.hasOwnProperty.call(req, "seconds")) requestBody.seconds = req.seconds;
       else if (Object.prototype.hasOwnProperty.call(req, "duration")) requestBody.seconds = req.duration;
       if (Object.prototype.hasOwnProperty.call(req, "size")) requestBody.size = req.size;
       const intent = { kind: "submit", model: model, action: images.length ? "image_to_video" : "text_to_video", requestBody: requestBody };
-      const originTaskIds = draftTaskIds(metadata.content);
+      const originTaskIds = draftTaskIds(req.content || metadata.content);
       if (originTaskIds.length) intent.originTaskIds = originTaskIds;
       return intent;
     },
@@ -446,21 +676,27 @@ const legacyRenderers = {
   },
 };
 
+function videoSubmitIntent(model, req) {
+  const seconds = req.seconds ?? req.duration;
+  if (seconds !== undefined) boundedInteger(seconds, "seconds", MAX_SECONDS);
+  const intent = {
+    kind: "submit",
+    model: model,
+    action: req.input_reference || req.image ? "image_to_video" : "text_to_video",
+    requestBody: Object.assign({}, req, { model: model }),
+  };
+  const originTaskIds = draftTaskIds(req.content || (req.metadata || {}).content);
+  if (originTaskIds.length) intent.originTaskIds = originTaskIds;
+  return intent;
+}
+
 protocols.openai_video = {
   decodeRequest: function (ctx) {
     if (!ctx.body || (ctx.body.kind !== "json" && ctx.body.kind !== "multipart")) throw new Error("JSON or multipart body required");
     if (ctx.body.kind === "json") {
       if (!ctx.body.value || Array.isArray(ctx.body.value)) throw new Error("JSON object required");
       const req = ctx.body.value;
-      const seconds = req.seconds === undefined ? req.duration : req.seconds;
-      if (seconds !== undefined && (!Number.isFinite(Number(seconds)) || Number(seconds) <= 0 || Number(seconds) > 3600))
-        throw new Error("seconds must be between 1 and 3600");
-      return {
-        kind: "submit",
-        model: ctx.model,
-        action: req.input_reference || req.image ? "image_to_video" : "text_to_video",
-        requestBody: Object.assign({}, req, { model: ctx.model }),
-      };
+      return videoSubmitIntent(ctx.model, req);
     }
     const first = function (name) {
       const values = (ctx.body.fields || {})[name] || [];
@@ -485,15 +721,7 @@ protocols.openai_video = {
     if ((ctx.body.files || []).length) throw new Error("Doubao requires image and video references to be URLs inside metadata.content");
     if (req.seconds !== undefined) req.seconds = Number(req.seconds);
     else if (req.duration !== undefined) req.seconds = Number(req.duration);
-    const seconds = req.seconds === undefined ? req.duration : req.seconds;
-    if (seconds !== undefined && (!Number.isFinite(Number(seconds)) || Number(seconds) <= 0 || Number(seconds) > 3600))
-      throw new Error("seconds must be between 1 and 3600");
-    return {
-      kind: "submit",
-      model: ctx.model,
-      action: req.input_reference || req.image ? "image_to_video" : "text_to_video",
-      requestBody: Object.assign({}, req, { model: ctx.model }),
-    };
+    return videoSubmitIntent(ctx.model, req);
   },
   render: function (ctx, task) {
     return legacyRenderers.openai_video(task);

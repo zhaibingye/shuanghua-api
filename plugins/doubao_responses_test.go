@@ -25,7 +25,7 @@ func TestDoubaoResponsesProtocol(t *testing.T) {
 				"resolution": "1080p",
 			},
 		},
-		wantUsageKeys:  []string{"resolution", "tokens", "video_input"},
+		wantUsageKeys:  []string{"resolution", "tokens", "video_input", "enhancement_seconds", "enhancement_resolution"},
 		wantVendorName: "doubao",
 	})
 }
