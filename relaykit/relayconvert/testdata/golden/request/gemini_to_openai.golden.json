@@ -9,15 +9,16 @@
       "role": "user",
       "content": [
         {
-          "text": "What is in this image?",
-          "type": "text"
+          "type": "text",
+          "text": "What is in this image?"
         },
         {
+          "type": "image_url",
           "image_url": {
-            "mime_type": "image/png",
-            "url": "data:image/png;base64,aGVsbG8="
-          },
-          "type": "image_url"
+            "url": "data:image/png;base64,aGVsbG8=",
+            "detail": "auto",
+            "MimeType": "image/png"
+          }
         }
       ]
     },
@@ -26,7 +27,7 @@
       "content": null,
       "tool_calls": [
         {
-          "id": "call_5a6a196ff6f5_0",
+          "id": "call_1",
           "type": "function",
           "function": {
             "name": "get_weather",
@@ -38,10 +39,11 @@
     {
       "role": "tool",
       "content": "{\"result\":\"15 degrees\"}",
-      "tool_call_id": "call_5a6a196ff6f5_0"
+      "tool_call_id": "call_0"
     }
   ],
-  "max_completion_tokens": 1024,
+  "stream": false,
+  "max_tokens": 1024,
   "temperature": 0.7,
   "tools": [
     {

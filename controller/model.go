@@ -220,12 +220,17 @@ func buildGeminiModel(model dto.OpenAIModels) dto.GeminiModel {
 		methods = []string{"predict"}
 	}
 
+	methodsAny := make([]interface{}, len(methods))
+	for i, m := range methods {
+		methodsAny[i] = m
+	}
+
 	return dto.GeminiModel{
 		Name:                       "models/" + modelName,
 		BaseModelId:                modelName,
 		DisplayName:                modelName,
 		Description:                modelName,
-		SupportedGenerationMethods: methods,
+		SupportedGenerationMethods: methodsAny,
 	}
 }
 

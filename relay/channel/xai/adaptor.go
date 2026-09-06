@@ -21,12 +21,12 @@ import (
 type Adaptor struct {
 }
 
-func (a *Adaptor) ConvertGeminiRequest(*gin.Context, *relaycommon.RelayInfo, *dto.GeminiChatRequest) (any, error) {
-	return channel.ForeignTextRequest("xai.ConvertGeminiRequest")
+func (a *Adaptor) ConvertGeminiRequest(c *gin.Context, info *relaycommon.RelayInfo, request *dto.GeminiChatRequest) (any, error) {
+	return nil, errors.New("not implemented")
 }
 
-func (a *Adaptor) ConvertClaudeRequest(*gin.Context, *relaycommon.RelayInfo, *dto.ClaudeRequest) (any, error) {
-	return channel.ForeignTextRequest("xai.ConvertClaudeRequest")
+func (a *Adaptor) ConvertClaudeRequest(c *gin.Context, info *relaycommon.RelayInfo, request *dto.ClaudeRequest) (any, error) {
+	return nil, errors.New("not available")
 }
 
 func (a *Adaptor) ConvertAudioRequest(c *gin.Context, info *relaycommon.RelayInfo, request dto.AudioRequest) (io.Reader, error) {
@@ -72,9 +72,6 @@ func (a *Adaptor) GetRequestURL(info *relaycommon.RelayInfo) (string, error) {
 		return baseURL + xAIImageGenerationsPath, nil
 	case constant.RelayModeImagesEdits:
 		return baseURL + xAIImageEditsPath, nil
-	}
-	if path, ok := info.OpenAICompatibleRequestPath(); ok {
-		return relaycommon.GetFullRequestURL(info.ChannelBaseUrl, path, info.ChannelType), nil
 	}
 	return relaycommon.GetFullRequestURL(info.ChannelBaseUrl, info.RequestURLPath, info.ChannelType), nil
 }
@@ -164,11 +161,6 @@ func (a *Adaptor) DoResponse(c *gin.Context, resp *http.Response, info *relaycom
 	switch info.RelayMode {
 	case constant.RelayModeImagesGenerations, constant.RelayModeImagesEdits:
 		return openai.OpenaiImageHandler(c, info, resp)
-	}
-	if info.TextPlanApplies() && info.TextNative() == types.RelayFormatOpenAIResponses {
-		return openai.DoPlannedTextResponse(c, info, resp)
-	}
-	switch info.RelayMode {
 	case constant.RelayModeResponses:
 		if info.IsStream {
 			usage, err = openai.OaiResponsesStreamHandler(c, info, resp)

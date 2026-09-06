@@ -29,6 +29,178 @@ export type SystemOptionsResponse = {
   data: SystemOption[]
 }
 
+export type ContentModerationSettings = {
+  enabled: boolean
+  channels?: string
+  channel_ids?: number[]
+  user_whitelist?: string
+  user_whitelist_ids?: number[]
+  violation_retention_days?: number
+  base_url: string
+  model: string
+  preflight_enabled?: boolean
+  failure_mode?: 'open' | 'closed'
+  timeout_seconds: number
+  max_retries: number
+  api_key_configured: boolean
+}
+
+export type ContentModerationSettingsResponse = {
+  success: boolean
+  data: ContentModerationSettings
+}
+
+export type ContentModerationSettingsUpdate = Omit<
+  ContentModerationSettings,
+  'api_key_configured' | 'channel_ids' | 'user_whitelist_ids'
+> & {
+  api_key: string
+}
+
+export type ModerationConversation = {
+  id: number
+  user_id: number
+  conversation_id: string
+  status: string
+  first_activity_at: number
+  last_activity_at: number
+  expires_at: number
+  blocked_at?: number
+  blocked_reason?: string
+}
+
+export type ModerationTurn = {
+  id: number
+  round_number: number
+  channel_id?: number
+  request_id: string
+  system_prompt: string
+  user_prompt: string
+  assistant_reply: string
+  response_status: string
+  relay_format: string
+  model: string
+  review_required: boolean
+  review_trigger?: string
+  created_at: number
+  content_unavailable?: boolean
+}
+
+export type ModerationJob = {
+  id: number
+  turn_id: number
+  status: string
+  attempts: number
+  next_attempt_at: number
+  provider: string
+  model: string
+  prompt_version: string
+  expires_at: number
+  request_payload?: string
+  response_payload?: string
+  request_payload_unavailable?: boolean
+  response_payload_unavailable?: boolean
+  last_error?: string
+}
+
+export type ModerationViolation = {
+  id: number
+  user_id: number
+  conversation_id: string
+  turn_id: number
+  actor: string
+  user_violation: boolean
+  decision: string
+  severity: string
+  categories: string
+  confidence: number
+  reason_code: string
+  status: string
+  created_at: number
+}
+
+export type ModerationAction = {
+  id: number
+  admin_id: number
+  user_id?: number
+  conversation_id?: string
+  violation_id?: number
+  action: string
+  reason?: string
+  created_at: number
+}
+
+export type ModerationNotification = {
+  id: number
+  alert_type: string
+  recipient: string
+  status: string
+  attempts: number
+  next_attempt_at?: number
+  last_error?: string
+}
+
+export type ModerationConversationDetail = {
+  conversation: ModerationConversation
+  turns: ModerationTurn[]
+  jobs: ModerationJob[]
+  violations: ModerationViolation[]
+  actions: ModerationAction[]
+  notifications: ModerationNotification[]
+}
+
+export type ModerationConversationListResponse = {
+  success: boolean
+  data: ModerationConversation[]
+  total: number
+}
+
+export type ModerationConversationDetailResponse = {
+  success: boolean
+  data: ModerationConversationDetail
+}
+
+export type ModerationViolationListResponse = {
+  success: boolean
+  data: ModerationViolation[]
+  total: number
+}
+
+export type ModerationUser = {
+  record_id: number
+  user_id: number
+  username: string
+  display_name: string
+  email: string
+  account_status: number
+  record_status: 'active' | 'history'
+  violation_count: number
+  actual_violation_count: number
+  max_violation_count: number
+  last_violation_at: number
+  note: string
+  archived_at?: number
+  created_at: number
+  updated_at: number
+}
+
+export type ModerationUserDetail = {
+  user: ModerationUser
+  conversations: ModerationConversation[]
+  violations: ModerationViolation[]
+}
+
+export type ModerationUserListResponse = {
+  success: boolean
+  data: ModerationUser[]
+  total: number
+}
+
+export type ModerationUserDetailResponse = {
+  success: boolean
+  data: ModerationUserDetail
+}
+
 export type UpdateOptionRequest = {
   key: string
   value: string | boolean | number

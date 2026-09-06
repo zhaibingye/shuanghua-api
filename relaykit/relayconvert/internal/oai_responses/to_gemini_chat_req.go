@@ -12,6 +12,19 @@ import (
 	kitutil "github.com/QuantumNous/new-api/relaykit/relayconvert/kitutil"
 )
 
+func convertOpenAIResponsesRequestToGeminiChat(c context.Context, info convmeta.Meta, request any) (any, error) {
+	responsesRequest, err := OpenAIResponsesRequestFromAny(request)
+	if err != nil {
+		return nil, err
+	}
+
+	prepared, err := PrepareOpenAIResponsesRequest(*responsesRequest)
+	if err != nil {
+		return nil, err
+	}
+	return OpenAIResponsesRequestToGeminiChat(c, &prepared, info)
+}
+
 func OpenAIResponsesRequestToGeminiChat(c context.Context, req *dto.OpenAIResponsesRequest, info convmeta.Meta) (*dto.GeminiChatRequest, error) {
 	opts := convmeta.OptionsOf(info)
 	if req == nil {
@@ -40,11 +53,7 @@ func OpenAIResponsesRequestToGeminiChat(c context.Context, req *dto.OpenAIRespon
 	if modelName := convmeta.UpstreamModelName(info); modelName != "" {
 		upstreamModelName = modelName
 	}
-	originModelName := ""
-	if info != nil {
-		originModelName = info.GetOriginModelName()
-	}
-	if opts.Gemini.SupportsImagineModel(upstreamModelName, req.Model, originModelName) {
+	if opts.Gemini.SupportsImagineModel(upstreamModelName) {
 		geminiRequest.GenerationConfig.ResponseModalities = []string{"TEXT", "IMAGE"}
 	}
 	if err := applyResponsesTextToGemini(req.Text, geminiRequest); err != nil {

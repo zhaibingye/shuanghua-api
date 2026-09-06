@@ -6,8 +6,6 @@ import (
 	"github.com/QuantumNous/new-api/common"
 	relaycommon "github.com/QuantumNous/new-api/relay/common"
 	"github.com/QuantumNous/new-api/relaykit/dto"
-	"github.com/QuantumNous/new-api/relaykit/types"
-	"github.com/QuantumNous/new-api/service"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	"github.com/tidwall/gjson"
@@ -90,29 +88,19 @@ func TestConvertOpenAIResponsesRequestToGeminiFunctionCallConversation(t *testin
 		}),
 	})
 
-	contents := geminiContentsWithoutLeadingPad(got.Contents)
-	require.Len(t, contents, 2)
-	assert.Equal(t, "model", contents[0].Role)
-	require.Len(t, contents[0].Parts, 2)
-	var functionPart, textPart dto.GeminiPart
-	for _, part := range contents[0].Parts {
-		if part.FunctionCall != nil {
-			functionPart = part
-		}
-		if part.Text != "" {
-			textPart = part
-		}
-	}
-	require.NotNil(t, functionPart.FunctionCall)
-	assert.Equal(t, "lookup", functionPart.FunctionCall.FunctionName)
-	assert.Equal(t, map[string]interface{}{"q": "x"}, functionPart.FunctionCall.Arguments)
-	assert.Equal(t, "I will call.", textPart.Text)
+	require.Len(t, got.Contents, 2)
+	assert.Equal(t, "model", got.Contents[0].Role)
+	require.Len(t, got.Contents[0].Parts, 2)
+	require.NotNil(t, got.Contents[0].Parts[0].FunctionCall)
+	assert.Equal(t, "lookup", got.Contents[0].Parts[0].FunctionCall.FunctionName)
+	assert.Equal(t, map[string]interface{}{"q": "x"}, got.Contents[0].Parts[0].FunctionCall.Arguments)
+	assert.Equal(t, "I will call.", got.Contents[0].Parts[1].Text)
 
-	assert.Equal(t, "user", contents[1].Role)
-	require.Len(t, contents[1].Parts, 1)
-	require.NotNil(t, contents[1].Parts[0].FunctionResponse)
-	assert.Equal(t, "lookup", contents[1].Parts[0].FunctionResponse.Name)
-	assert.Equal(t, map[string]interface{}{"ok": true}, contents[1].Parts[0].FunctionResponse.Response)
+	assert.Equal(t, "user", got.Contents[1].Role)
+	require.Len(t, got.Contents[1].Parts, 1)
+	require.NotNil(t, got.Contents[1].Parts[0].FunctionResponse)
+	assert.Equal(t, "lookup", got.Contents[1].Parts[0].FunctionResponse.Name)
+	assert.Equal(t, map[string]interface{}{"ok": true}, got.Contents[1].Parts[0].FunctionResponse.Response)
 }
 
 func TestConvertOpenAIResponsesRequestToGeminiSkipsCustomToolCalls(t *testing.T) {
@@ -153,28 +141,16 @@ func TestConvertOpenAIResponsesRequestToGeminiSkipsCustomToolCalls(t *testing.T)
 	})
 
 	assert.Empty(t, got.GetTools())
-	contents := geminiContentsWithoutLeadingPad(got.Contents)
-	require.Len(t, contents, 2)
-	assert.Equal(t, "model", contents[0].Role)
-	require.Len(t, contents[0].Parts, 1)
-	assert.Equal(t, "before custom", contents[0].Parts[0].Text)
-	assert.Nil(t, contents[0].Parts[0].FunctionCall)
+	require.Len(t, got.Contents, 2)
+	assert.Equal(t, "model", got.Contents[0].Role)
+	require.Len(t, got.Contents[0].Parts, 1)
+	assert.Equal(t, "before custom", got.Contents[0].Parts[0].Text)
+	assert.Nil(t, got.Contents[0].Parts[0].FunctionCall)
 
-	assert.Equal(t, "user", contents[1].Role)
-	require.Len(t, contents[1].Parts, 1)
-	assert.Equal(t, "next turn", contents[1].Parts[0].Text)
-	assert.Nil(t, contents[1].Parts[0].FunctionResponse)
-}
-
-func geminiContentsWithoutLeadingPad(contents []dto.GeminiChatContent) []dto.GeminiChatContent {
-	if len(contents) == 0 {
-		return contents
-	}
-	first := contents[0]
-	if first.Role == "user" && len(first.Parts) == 1 && first.Parts[0].FunctionResponse == nil && first.Parts[0].Text == " " {
-		return contents[1:]
-	}
-	return contents
+	assert.Equal(t, "user", got.Contents[1].Role)
+	require.Len(t, got.Contents[1].Parts, 1)
+	assert.Equal(t, "next turn", got.Contents[1].Parts[0].Text)
+	assert.Nil(t, got.Contents[1].Parts[0].FunctionResponse)
 }
 
 func mustConvertResponsesToGemini(t *testing.T, req dto.OpenAIResponsesRequest) *dto.GeminiChatRequest {
@@ -185,15 +161,11 @@ func mustConvertResponsesToGemini(t *testing.T, req dto.OpenAIResponsesRequest) 
 			UpstreamModelName: req.Model,
 		},
 	}
-	converted, err := service.ConvertRequest(nil, info, types.RelayFormatGemini, &req)
+	got, err := (&Adaptor{}).ConvertOpenAIResponsesRequest(nil, info, req)
 	require.NoError(t, err)
-	geminiReq, ok := converted.Value.(*dto.GeminiChatRequest)
+	geminiReq, ok := got.(*dto.GeminiChatRequest)
 	require.True(t, ok)
-	dialect, err := (&Adaptor{}).ConvertGeminiRequest(nil, info, geminiReq)
-	require.NoError(t, err)
-	got, ok := dialect.(*dto.GeminiChatRequest)
-	require.True(t, ok)
-	return got
+	return geminiReq
 }
 
 func mustGeminiRawMessage(t *testing.T, value any) []byte {

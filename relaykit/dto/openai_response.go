@@ -87,7 +87,6 @@ type ChatCompletionsStreamResponseChoice struct {
 
 type ChatCompletionsStreamResponseChoiceDelta struct {
 	Content          *string            `json:"content,omitempty"`
-	Images           json.RawMessage    `json:"images,omitempty"`
 	ReasoningContent *string            `json:"reasoning_content,omitempty"`
 	Reasoning        *string            `json:"reasoning,omitempty"`
 	Role             string             `json:"role,omitempty"`
@@ -148,14 +147,6 @@ type ChatCompletionsStreamResponse struct {
 	SystemFingerprint *string                               `json:"system_fingerprint"`
 	Choices           []ChatCompletionsStreamResponseChoice `json:"choices"`
 	Usage             *Usage                                `json:"usage"`
-	Error             any                                   `json:"error,omitempty"`
-}
-
-func (c *ChatCompletionsStreamResponse) GetOpenAIError() *types.OpenAIError {
-	if c == nil {
-		return nil
-	}
-	return GetOpenAIError(c.Error)
 }
 
 func (c *ChatCompletionsStreamResponse) IsFinished() bool {
@@ -203,7 +194,6 @@ func (c *ChatCompletionsStreamResponse) Copy() *ChatCompletionsStreamResponse {
 		SystemFingerprint: c.SystemFingerprint,
 		Choices:           choices,
 		Usage:             c.Usage,
-		Error:             c.Error,
 	}
 }
 
@@ -223,28 +213,11 @@ type ChatCompletionsStreamResponseSimple struct {
 	Usage   *Usage                                `json:"usage"`
 }
 
-type CompletionsStreamResponseChoice struct {
-	Text         string `json:"text"`
-	Index        int    `json:"index"`
-	FinishReason string `json:"finish_reason"`
-}
-
 type CompletionsStreamResponse struct {
-	Id                string                            `json:"id"`
-	Object            string                            `json:"object"`
-	Created           int64                             `json:"created"`
-	Model             string                            `json:"model"`
-	SystemFingerprint *string                           `json:"system_fingerprint,omitempty"`
-	Choices           []CompletionsStreamResponseChoice `json:"choices"`
-	Usage             *Usage                            `json:"usage,omitempty"`
-	Error             any                               `json:"error,omitempty"`
-}
-
-func (c *CompletionsStreamResponse) GetOpenAIError() *types.OpenAIError {
-	if c == nil {
-		return nil
-	}
-	return GetOpenAIError(c.Error)
+	Choices []struct {
+		Text         string `json:"text"`
+		FinishReason string `json:"finish_reason"`
+	} `json:"choices"`
 }
 
 type Usage struct {
@@ -352,18 +325,17 @@ type IncompleteDetails struct {
 }
 
 type ResponsesOutput struct {
-	Type      string                          `json:"type"`
-	ID        string                          `json:"id"`
-	Status    string                          `json:"status"`
-	Role      string                          `json:"role"`
-	Content   []ResponsesOutputContent        `json:"content"`
-	Summary   []ResponsesReasoningSummaryPart `json:"summary,omitempty"`
-	Quality   string                          `json:"quality"`
-	Size      string                          `json:"size"`
-	Result    string                          `json:"result,omitempty"`
-	CallId    string                          `json:"call_id,omitempty"`
-	Name      string                          `json:"name,omitempty"`
-	Arguments json.RawMessage                 `json:"arguments,omitempty"`
+	Type      string                   `json:"type"`
+	ID        string                   `json:"id"`
+	Status    string                   `json:"status"`
+	Role      string                   `json:"role"`
+	Content   []ResponsesOutputContent `json:"content"`
+	Quality   string                   `json:"quality"`
+	Size      string                   `json:"size"`
+	Result    string                   `json:"result,omitempty"`
+	CallId    string                   `json:"call_id,omitempty"`
+	Name      string                   `json:"name,omitempty"`
+	Arguments json.RawMessage          `json:"arguments,omitempty"`
 }
 
 // ArgumentsString returns function call arguments in the string form expected by Chat Completions.
@@ -386,9 +358,8 @@ type ResponsesOutputContent struct {
 }
 
 type ResponsesReasoningSummaryPart struct {
-	Type        string        `json:"type"`
-	Text        string        `json:"text"`
-	Annotations []interface{} `json:"annotations,omitempty"`
+	Type string `json:"type"`
+	Text string `json:"text"`
 }
 
 const (
@@ -413,13 +384,10 @@ const (
 
 // ResponsesStreamResponse 用于处理 /v1/responses 流式响应
 type ResponsesStreamResponse struct {
-	Type           string                   `json:"type"`
-	SequenceNumber *int64                   `json:"sequence_number,omitempty"`
-	Response       *OpenAIResponsesResponse `json:"response,omitempty"`
-	Delta          string                   `json:"delta,omitempty"`
-	Text           string                   `json:"text,omitempty"`
-	Arguments      string                   `json:"arguments,omitempty"`
-	Item           *ResponsesOutput         `json:"item,omitempty"`
+	Type     string                   `json:"type"`
+	Response *OpenAIResponsesResponse `json:"response,omitempty"`
+	Delta    string                   `json:"delta,omitempty"`
+	Item     *ResponsesOutput         `json:"item,omitempty"`
 	// - response.function_call_arguments.delta
 	// - response.function_call_arguments.done
 	OutputIndex  *int                           `json:"output_index,omitempty"`

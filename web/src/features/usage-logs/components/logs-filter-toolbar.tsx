@@ -38,7 +38,7 @@ import { useMediaQuery } from '@/hooks'
 import { cn } from '@/lib/utils'
 
 interface LogsFilterToolbarProps<TData> {
-  table: Table<TData>
+  table?: Table<TData>
   primaryFilters: ReactNode
   advancedFilters?: ReactNode
   mobilePinnedFilters?: ReactNode
@@ -96,6 +96,9 @@ export function LogsFilterToolbar<TData>(props: LogsFilterToolbarProps<TData>) {
   const activeAdvancedCount =
     props.advancedFilterCount ?? (props.hasAdvancedActiveFilters ? 1 : 0)
   const activeMobileFilterCount = props.mobileFilterCount ?? activeAdvancedCount
+  const viewOptions = props.table ? (
+    <DataTableViewOptions table={props.table} />
+  ) : null
 
   const handleMobileReset = () => {
     props.onReset()
@@ -198,7 +201,7 @@ export function LogsFilterToolbar<TData>(props: LogsFilterToolbarProps<TData>) {
                 {props.searchLoading && <Loader2 className='animate-spin' />}
                 {t('Search')}
               </Button>
-              <DataTableViewOptions table={props.table} />
+              {viewOptions}
             </div>
           </div>
         </div>
@@ -287,7 +290,7 @@ export function LogsFilterToolbar<TData>(props: LogsFilterToolbarProps<TData>) {
             {props.searchLoading && <Loader2 className='animate-spin' />}
             {t('Search')}
           </Button>
-          <DataTableViewOptions table={props.table} />
+          {viewOptions}
         </div>
       </div>
     </div>

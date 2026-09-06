@@ -373,12 +373,10 @@ func GetAndValidateGeminiRequest(c *gin.Context) (*dto.GeminiChatRequest, error)
 	if err != nil {
 		return nil, err
 	}
-	isCountTokens := strings.Contains(c.Request.URL.Path, ":countTokens")
-	if len(request.Contents) == 0 && len(request.Requests) == 0 && (!isCountTokens || request.GenerateContentRequest == nil) {
+	if len(request.Contents) == 0 && len(request.Requests) == 0 {
 		return nil, errors.New("contents is required")
 	}
-	if exceedsMaxTokensLimit(request.GenerationConfig.MaxOutputTokens) ||
-		(request.GenerateContentRequest != nil && exceedsMaxTokensLimit(request.GenerateContentRequest.GenerationConfig.MaxOutputTokens)) {
+	if exceedsMaxTokensLimit(request.GenerationConfig.MaxOutputTokens) {
 		return nil, errors.New("maxOutputTokens is invalid")
 	}
 

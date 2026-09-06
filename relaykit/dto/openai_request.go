@@ -1,11 +1,9 @@
 package dto
 
 import (
-	"bytes"
 	"encoding/json"
 	"fmt"
 	"net/http"
-	"sort"
 	"strings"
 
 	kitutil "github.com/QuantumNous/new-api/relaykit/relayconvert/kitutil"
@@ -257,136 +255,10 @@ func (r *GeneralOpenAIRequest) GetSystemRoleName() string {
 const CustomType = "custom"
 
 type ToolCallRequest struct {
-	ID       string                     `json:"id,omitempty"`
-	Type     string                     `json:"type"`
-	Function FunctionRequest            `json:"function,omitempty"`
-	Custom   json.RawMessage            `json:"custom,omitempty"`
-	Extra    map[string]json.RawMessage `json:"-"`
-}
-
-func (t *ToolCallRequest) UnmarshalJSON(data []byte) error {
-	type alias ToolCallRequest
-	var decoded alias
-	if err := kitutil.Unmarshal(data, &decoded); err != nil {
-		return err
-	}
-	*t = ToolCallRequest(decoded)
-
-	var fields map[string]json.RawMessage
-	if err := kitutil.Unmarshal(data, &fields); err != nil {
-		return err
-	}
-	delete(fields, "id")
-	delete(fields, "type")
-	delete(fields, "function")
-	delete(fields, "custom")
-	if len(fields) > 0 {
-		t.Extra = fields
-	}
-	return nil
-}
-
-func (t ToolCallRequest) shouldMarshalFunction() bool {
-	if t.Type == "function" {
-		return true
-	}
-	return t.Function.Name != "" || t.Function.Arguments != "" || t.Function.Description != "" || t.Function.Parameters != nil
-}
-
-func (t ToolCallRequest) MarshalJSON() ([]byte, error) {
-	fields := make(map[string]json.RawMessage, 4+len(t.Extra))
-
-	if t.ID != "" {
-		idRaw, err := kitutil.Marshal(t.ID)
-		if err != nil {
-			return nil, err
-		}
-		fields["id"] = idRaw
-	}
-
-	typeRaw, err := kitutil.Marshal(t.Type)
-	if err != nil {
-		return nil, err
-	}
-	fields["type"] = typeRaw
-
-	if t.shouldMarshalFunction() {
-		fnRaw, err := kitutil.Marshal(t.Function)
-		if err != nil {
-			return nil, err
-		}
-		fields["function"] = fnRaw
-	}
-
-	if len(t.Custom) > 0 {
-		fields["custom"] = append(json.RawMessage(nil), t.Custom...)
-	}
-
-	for key, value := range t.Extra {
-		if _, exists := fields[key]; !exists {
-			fields[key] = value
-		}
-	}
-
-	return marshalJSONObject([]string{"id", "type", "function", "custom"}, fields)
-}
-
-func marshalJSONObject(order []string, fields map[string]json.RawMessage) ([]byte, error) {
-	if len(fields) == 0 {
-		return []byte("{}"), nil
-	}
-
-	var buf bytes.Buffer
-	buf.Grow(64)
-	buf.WriteByte('{')
-
-	written := make(map[string]struct{}, len(fields))
-	first := true
-	writeField := func(key string) error {
-		value, ok := fields[key]
-		if !ok {
-			return nil
-		}
-		if !first {
-			buf.WriteByte(',')
-		}
-		first = false
-		keyJSON, err := json.Marshal(key)
-		if err != nil {
-			return err
-		}
-		buf.Write(keyJSON)
-		buf.WriteByte(':')
-		if len(value) == 0 {
-			buf.WriteString("null")
-		} else {
-			buf.Write(value)
-		}
-		written[key] = struct{}{}
-		return nil
-	}
-
-	for _, key := range order {
-		if err := writeField(key); err != nil {
-			return nil, err
-		}
-	}
-
-	extras := make([]string, 0, len(fields))
-	for key := range fields {
-		if _, ok := written[key]; !ok {
-			extras = append(extras, key)
-		}
-	}
-	sort.Strings(extras)
-	for _, key := range extras {
-		if err := writeField(key); err != nil {
-			return nil, err
-		}
-	}
-
-	buf.WriteByte('}')
-	return buf.Bytes(), nil
+	ID       string          `json:"id,omitempty"`
+	Type     string          `json:"type"`
+	Function FunctionRequest `json:"function,omitempty"`
+	Custom   json.RawMessage `json:"custom,omitempty"`
 }
 
 type FunctionRequest struct {
@@ -433,7 +305,6 @@ func (r *GeneralOpenAIRequest) ParseInput() []string {
 type Message struct {
 	Role             string          `json:"role"`
 	Content          any             `json:"content"`
-	Images           json.RawMessage `json:"images,omitempty"`
 	Name             *string         `json:"name,omitempty"`
 	Prefix           *bool           `json:"prefix,omitempty"`
 	ReasoningContent *string         `json:"reasoning_content,omitempty"`
@@ -1062,14 +933,10 @@ func (r *OpenAIResponsesRequest) GetTokenCountMeta() *types.TokenCountMeta {
 					})
 				}
 			} else if input.Type == "input_file" {
-				fileData := input.FileUrl
-				if input.FileData != "" {
-					fileData = input.FileData
-				}
-				if fileData != "" {
+				if input.FileUrl != "" {
 					fileMeta = append(fileMeta, &types.FileMeta{
 						FileType: types.FileTypeFile,
-						Source:   types.NewFileSourceFromData(fileData, input.MimeType),
+						Source:   types.NewFileSourceFromData(input.FileUrl, ""),
 					})
 				}
 			} else {
@@ -1144,10 +1011,6 @@ type MediaInput struct {
 	Type     string `json:"type"`
 	Text     string `json:"text,omitempty"`
 	FileUrl  string `json:"file_url,omitempty"`
-	FileData string `json:"file_data,omitempty"`
-	FileID   string `json:"file_id,omitempty"`
-	Filename string `json:"filename,omitempty"`
-	MimeType string `json:"mime_type,omitempty"`
 	ImageUrl string `json:"image_url,omitempty"`
 	Detail   string `json:"detail,omitempty"` // 仅 input_image 有效
 }
@@ -1158,74 +1021,88 @@ type MediaInput struct {
 //   - input can be an array of objects with a `type` field
 //     supported types: input_text, input_image, input_file
 func (r *OpenAIResponsesRequest) ParseInput() []MediaInput {
-	if r == nil || len(r.Input) == 0 {
+	if r.Input == nil {
 		return nil
 	}
-	var value any
-	if err := kitutil.Unmarshal(r.Input, &value); err != nil {
-		return nil
-	}
-	return parseResponsesMediaInputs(value)
-}
 
-func parseResponsesMediaInputs(value any) []MediaInput {
-	switch typed := value.(type) {
-	case string:
-		return []MediaInput{{Type: "input_text", Text: typed}}
-	case []any:
-		var out []MediaInput
-		for _, item := range typed {
-			out = append(out, parseResponsesMediaInputs(item)...)
+	var mediaInputs []MediaInput
+
+	// Try string first
+	// if str, ok := kitutil.GetJsonType(r.Input); ok {
+	// 	inputs = append(inputs, MediaInput{Type: "input_text", Text: str})
+	// 	return inputs
+	// }
+	if kitutil.GetJsonType(r.Input) == "string" {
+		var str string
+		_ = kitutil.Unmarshal(r.Input, &str)
+		mediaInputs = append(mediaInputs, MediaInput{Type: "input_text", Text: str})
+		return mediaInputs
+	}
+
+	// Try array of parts
+	if kitutil.GetJsonType(r.Input) == "array" {
+		var inputs []Input
+		_ = kitutil.Unmarshal(r.Input, &inputs)
+		for _, input := range inputs {
+			if kitutil.GetJsonType(input.Content) == "string" {
+				var str string
+				_ = kitutil.Unmarshal(input.Content, &str)
+				mediaInputs = append(mediaInputs, MediaInput{Type: "input_text", Text: str})
+			}
+
+			if kitutil.GetJsonType(input.Content) == "array" {
+				var array []any
+				_ = kitutil.Unmarshal(input.Content, &array)
+				for _, itemAny := range array {
+					// Already parsed MediaContent
+					if media, ok := itemAny.(MediaInput); ok {
+						mediaInputs = append(mediaInputs, media)
+						continue
+					}
+
+					// Generic map
+					item, ok := itemAny.(map[string]any)
+					if !ok {
+						continue
+					}
+
+					typeVal, ok := item["type"].(string)
+					if !ok {
+						continue
+					}
+					switch typeVal {
+					case "input_text":
+						text, _ := item["text"].(string)
+						mediaInputs = append(mediaInputs, MediaInput{Type: "input_text", Text: text})
+					case "input_image":
+						// image_url may be string or object with url field
+						var imageUrl string
+						switch v := item["image_url"].(type) {
+						case string:
+							imageUrl = v
+						case map[string]any:
+							if url, ok := v["url"].(string); ok {
+								imageUrl = url
+							}
+						}
+						mediaInputs = append(mediaInputs, MediaInput{Type: "input_image", ImageUrl: imageUrl})
+					case "input_file":
+						// file_url may be string or object with url field
+						var fileUrl string
+						switch v := item["file_url"].(type) {
+						case string:
+							fileUrl = v
+						case map[string]any:
+							if url, ok := v["url"].(string); ok {
+								fileUrl = url
+							}
+						}
+						mediaInputs = append(mediaInputs, MediaInput{Type: "input_file", FileUrl: fileUrl})
+					}
+				}
+			}
 		}
-		return out
-	case map[string]any:
-		typeValue, _ := typed["type"].(string)
-		switch typeValue {
-		case "", "message":
-			return parseResponsesMediaInputs(typed["content"])
-		case "input_text", "output_text", "text":
-			text, _ := typed["text"].(string)
-			return []MediaInput{{Type: "input_text", Text: text}}
-		case "input_image":
-			return []MediaInput{{
-				Type:     "input_image",
-				ImageUrl: nestedStringValue(typed["image_url"], "url"),
-				Detail:   stringValue(typed["detail"]),
-			}}
-		case "input_file":
-			return []MediaInput{{
-				Type:     "input_file",
-				FileUrl:  nestedStringValue(typed["file_url"], "url"),
-				FileData: stringValue(typed["file_data"]),
-				FileID:   stringValue(typed["file_id"]),
-				Filename: firstNonEmptyDTO(stringValue(typed["filename"]), stringValue(typed["file_name"])),
-				MimeType: firstNonEmptyDTO(stringValue(typed["mime_type"]), stringValue(typed["media_type"])),
-			}}
-		}
 	}
-	return nil
-}
 
-func nestedStringValue(value any, key string) string {
-	if text, ok := value.(string); ok {
-		return text
-	}
-	if object, ok := value.(map[string]any); ok {
-		return stringValue(object[key])
-	}
-	return ""
-}
-
-func stringValue(value any) string {
-	text, _ := value.(string)
-	return text
-}
-
-func firstNonEmptyDTO(values ...string) string {
-	for _, value := range values {
-		if value != "" {
-			return value
-		}
-	}
-	return ""
+	return mediaInputs
 }

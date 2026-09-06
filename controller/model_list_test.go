@@ -467,19 +467,20 @@ func TestListModelsGeminiReturnsNativeModelListShape(t *testing.T) {
 
 	modelsByID := make(map[string]dto.GeminiModel, len(payload.Models))
 	for _, item := range payload.Models {
-		modelsByID[item.BaseModelId] = item
+		baseModelId, _ := item.BaseModelId.(string)
+		modelsByID[baseModelId] = item
 	}
 
 	flash, ok := modelsByID["gemini-2.5-flash"]
 	require.True(t, ok)
 	assert.Equal(t, "models/gemini-2.5-flash", flash.Name)
 	assert.Equal(t, "gemini-2.5-flash", flash.DisplayName)
-	assert.Equal(t, []string{"generateContent", "countTokens"}, flash.SupportedGenerationMethods)
+	assert.Equal(t, []interface{}{"generateContent", "countTokens"}, flash.SupportedGenerationMethods)
 
 	embedding, ok := modelsByID["gemini-embedding-001"]
 	require.True(t, ok)
 	assert.Equal(t, "models/gemini-embedding-001", embedding.Name)
-	assert.Equal(t, []string{"embedContent", "batchEmbedContents"}, embedding.SupportedGenerationMethods)
+	assert.Equal(t, []interface{}{"embedContent", "batchEmbedContents"}, embedding.SupportedGenerationMethods)
 
 	body := recorder.Body.String()
 	assert.NotContains(t, body, `"name":"gemini-2.5-flash"`)
@@ -509,7 +510,7 @@ func TestRetrieveModelGeminiReturnsNativeCPACompatibleShape(t *testing.T) {
 	assert.Equal(t, "models/gemini-2.5-flash", response.Name)
 	assert.Equal(t, "gemini-2.5-flash", response.BaseModelId)
 	assert.Equal(t, "gemini-2.5-flash", response.Description)
-	assert.Equal(t, []string{"generateContent", "countTokens"}, response.SupportedGenerationMethods)
+	assert.Equal(t, []interface{}{"generateContent", "countTokens"}, response.SupportedGenerationMethods)
 }
 
 func TestRetrieveModelGeminiReturnsCPACompatibleNotFound(t *testing.T) {

@@ -279,6 +279,30 @@ func SetApiRouter(router *gin.Engine) {
 		logRoute.GET("/self", middleware.UserAuth(), controller.GetUserLogs)
 		logRoute.GET("/self/search", middleware.UserAuth(), middleware.SearchRateLimit(), controller.SearchUserLogs)
 
+		moderationRoute := apiRouter.Group("/moderation")
+		{
+			moderationRoute.GET("/settings", middleware.RootAuth(), controller.GetContentModerationSettings)
+			moderationRoute.PUT("/settings", middleware.RootAuth(), controller.UpdateContentModerationSettings)
+			moderationRoute.POST("/key",
+				middleware.RootAuth(),
+				middleware.CriticalRateLimit(),
+				middleware.DisableCache(),
+				middleware.SecureVerificationRequired(),
+				controller.GetContentModerationKey,
+			)
+			moderationRoute.GET("/conversations", middleware.AdminAuth(), controller.ListContentModerationConversations)
+			moderationRoute.GET("/conversations/:id", middleware.AdminAuth(), controller.GetContentModerationConversation)
+			moderationRoute.POST("/conversations/:id/unblock", middleware.AdminAuth(), controller.UnblockContentModerationConversation)
+			moderationRoute.GET("/violations", middleware.AdminAuth(), controller.ListContentModerationViolations)
+			moderationRoute.POST("/violations/:id/resolve", middleware.AdminAuth(), controller.ResolveContentModerationViolation)
+			moderationRoute.GET("/users", middleware.AdminAuth(), controller.ListContentModerationUsers)
+			moderationRoute.GET("/users/:id", middleware.AdminAuth(), controller.GetContentModerationUser)
+			moderationRoute.PUT("/users/:id", middleware.AdminAuth(), controller.UpdateContentModerationUser)
+			moderationRoute.PATCH("/users/:id/status", middleware.AdminAuth(), controller.UpdateContentModerationUserStatus)
+			moderationRoute.DELETE("/users/:id/history", middleware.AdminAuth(), controller.DeleteContentModerationUserHistory)
+			moderationRoute.POST("/users/:id/restore", middleware.RootAuth(), controller.RestoreContentModerationUser)
+		}
+
 		systemTaskRoute := apiRouter.Group("/system-task")
 		systemTaskRoute.Use(middleware.RootAuth())
 		{

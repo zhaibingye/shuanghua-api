@@ -8,18 +8,19 @@
           "type": "input_text"
         },
         {
-          "detail": "high",
           "image_url": "https://example.com/cat.png",
           "type": "input_image"
         }
       ],
-      "role": "user",
-      "type": "message"
+      "role": "user"
+    },
+    {
+      "content": "",
+      "role": "assistant"
     },
     {
       "arguments": "{\"city\":\"Paris\"}",
       "call_id": "call_abc",
-      "id": "fc_call_abc",
       "name": "get_weather",
       "type": "function_call"
     },
@@ -30,8 +31,7 @@
     },
     {
       "content": "Summarize.",
-      "role": "user",
-      "type": "message"
+      "role": "user"
     }
   ],
   "instructions": "You are a helpful assistant.",

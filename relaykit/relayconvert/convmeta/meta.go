@@ -47,12 +47,6 @@ type Meta interface {
 	// ConvOptions returns the request-scoped conversion options snapshot.
 	// Must never return nil.
 	ConvOptions() *Options
-
-	// GetStreamHub / SetStreamHub are retained only for the legacy
-	// ConvertStreamResponse compatibility entry point. Runtime multi-chunk
-	// sessions must own an explicit ResponseStreamState and finalize it at EOF.
-	GetStreamHub() any
-	SetStreamHub(state any)
 }
 
 // ClaudeConvertInfo carries mutable state for OpenAI chat → Claude Messages
@@ -90,7 +84,6 @@ type Values struct {
 	ClaudeConvertInfo *ClaudeConvertInfo
 	SendResponseCount int
 	ConversionChain   []types.RelayFormat
-	StreamHub         any
 
 	Options *Options
 }
@@ -184,19 +177,6 @@ func (v *Values) AppendRequestConversion(format types.RelayFormat) {
 		return
 	}
 	v.ConversionChain = append(v.ConversionChain, format)
-}
-
-func (v *Values) GetStreamHub() any {
-	if v == nil {
-		return nil
-	}
-	return v.StreamHub
-}
-
-func (v *Values) SetStreamHub(state any) {
-	if v != nil {
-		v.StreamHub = state
-	}
 }
 
 func (v *Values) ConvOptions() *Options {

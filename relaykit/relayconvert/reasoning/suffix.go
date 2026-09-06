@@ -6,9 +6,9 @@ import (
 	"github.com/samber/lo"
 )
 
-var EffortSuffixes = []string{"-minimal", "-xhigh", "-medium", "-high", "-none", "-low", "-max"}
+var EffortSuffixes = []string{"-max", "-xhigh", "-high", "-medium", "-low", "-minimal"}
 
-var OpenAIEffortSuffixes = []string{"-minimal", "-xhigh", "-medium", "-high", "-none", "-low", "-max"}
+var OpenAIEffortSuffixes = []string{"-high", "-minimal", "-low", "-medium", "-none", "-xhigh"}
 
 var DeepSeekV4EffortSuffixes = []string{"-none", "-max"}
 

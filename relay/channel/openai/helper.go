@@ -1,140 +1,126 @@
 package openai
 
 import (
+	"fmt"
 	"strings"
 
+	"github.com/QuantumNous/new-api/common"
+	"github.com/QuantumNous/new-api/logger"
+	relaycommon "github.com/QuantumNous/new-api/relay/common"
+	relayconstant "github.com/QuantumNous/new-api/relay/constant"
 	"github.com/QuantumNous/new-api/relay/helper"
 	"github.com/QuantumNous/new-api/relaykit/dto"
+	"github.com/QuantumNous/new-api/relaykit/relayconvert"
+	"github.com/QuantumNous/new-api/relaykit/types"
+	"github.com/QuantumNous/new-api/service"
+
+	"github.com/samber/lo"
 
 	"github.com/gin-gonic/gin"
 )
 
-type chatStreamToolSlot struct {
-	choice int
-	index  int
-}
+// 辅助函数
+func HandleStreamFormat(c *gin.Context, info *relaycommon.RelayInfo, data string, forceFormat bool, thinkToContent bool) error {
+	info.SendResponseCount++
 
-type chatStreamToolID struct {
-	choice int
-	id     string
-}
-
-type chatStreamToolStats struct {
-	id   string
-	name string
-}
-
-// chatStreamStats accumulates token-estimation text and logical tool calls from
-// an OpenAI Chat Completions stream. Tool identity is stable across argument
-// fragments: choice/index is the primary slot and call ID is an alias. A new ID
-// reusing a slot starts a new logical call instead of merging or double-billing
-// fragments from the previous call.
-type chatStreamStats struct {
-	text   strings.Builder
-	tools  []*chatStreamToolStats
-	bySlot map[chatStreamToolSlot]int
-	byID   map[chatStreamToolID]int
-}
-
-func newChatStreamStats() *chatStreamStats {
-	return &chatStreamStats{
-		bySlot: make(map[chatStreamToolSlot]int),
-		byID:   make(map[chatStreamToolID]int),
+	switch info.RelayFormat {
+	case types.RelayFormatOpenAI:
+		return sendStreamData(c, info, data, forceFormat, thinkToContent)
+	case types.RelayFormatClaude:
+		return handleClaudeFormat(c, data, info)
+	case types.RelayFormatGemini:
+		return handleGeminiFormat(c, data, info)
 	}
+	return nil
 }
 
-func (s *chatStreamStats) Observe(streamResponse dto.ChatCompletionsStreamResponse) {
-	if s == nil {
-		return
-	}
-	for _, choice := range streamResponse.Choices {
-		s.text.WriteString(choice.Delta.GetContentString())
-		s.text.WriteString(choice.Delta.GetReasoningContent())
-		for position, toolCall := range choice.Delta.ToolCalls {
-			toolIndex := position
-			if toolCall.Index != nil {
-				toolIndex = *toolCall.Index
-			}
-			tool := s.resolveTool(choice.Index, toolIndex, toolCall.ID)
-			if tool.name == "" && toolCall.Function.Name != "" {
-				tool.name = toolCall.Function.Name
-				s.text.WriteString(tool.name)
-			}
-			s.text.WriteString(toolCall.Function.Arguments)
-		}
-	}
-}
-
-func (s *chatStreamStats) resolveTool(choiceIndex, toolIndex int, callID string) *chatStreamToolStats {
-	if callID != "" {
-		if index, ok := s.byID[chatStreamToolID{choice: choiceIndex, id: callID}]; ok {
-			return s.tools[index]
-		}
+func handleClaudeFormat(c *gin.Context, data string, info *relaycommon.RelayInfo) error {
+	var streamResponse dto.ChatCompletionsStreamResponse
+	if err := common.Unmarshal(common.StringToByteSlice(data), &streamResponse); err != nil {
+		return err
 	}
 
-	slot := chatStreamToolSlot{choice: choiceIndex, index: toolIndex}
-	if index, ok := s.bySlot[slot]; ok {
-		tool := s.tools[index]
-		if callID == "" || tool.id == "" || tool.id == callID {
-			if callID != "" && tool.id == "" {
-				tool.id = callID
-				s.byID[chatStreamToolID{choice: choiceIndex, id: callID}] = index
-			}
-			return tool
-		}
+	if streamResponse.Usage != nil {
+		info.ClaudeConvertInfo.Usage = streamResponse.Usage
 	}
-
-	tool := &chatStreamToolStats{id: callID}
-	index := len(s.tools)
-	s.tools = append(s.tools, tool)
-	s.bySlot[slot] = index
-	if callID != "" {
-		s.byID[chatStreamToolID{choice: choiceIndex, id: callID}] = index
+	result, err := relayconvert.ConvertStreamResponse(c, info, types.RelayFormatClaude, &streamResponse)
+	if err != nil {
+		return err
 	}
-	return tool
+	claudeResponses, ok := result.Value.([]*dto.ClaudeResponse)
+	if !ok {
+		return fmt.Errorf("expected Claude stream responses, got %T", result.Value)
+	}
+	for _, resp := range claudeResponses {
+		helper.ClaudeData(c, *resp)
+	}
+	return nil
 }
 
-func (s *chatStreamStats) Text() string {
-	if s == nil {
-		return ""
+func handleGeminiFormat(c *gin.Context, data string, info *relaycommon.RelayInfo) error {
+	var streamResponse dto.ChatCompletionsStreamResponse
+	if err := common.Unmarshal(common.StringToByteSlice(data), &streamResponse); err != nil {
+		logger.LogError(c, "failed to unmarshal stream response: "+err.Error())
+		return err
 	}
-	return s.text.String()
-}
 
-func (s *chatStreamStats) ToolCount() int {
-	if s == nil {
-		return 0
+	result, err := relayconvert.ConvertStreamResponse(c, info, types.RelayFormatGemini, &streamResponse)
+	if err != nil {
+		return err
 	}
-	return len(s.tools)
-}
+	geminiResponse, ok := result.Value.(*dto.GeminiChatResponse)
+	if !ok {
+		return fmt.Errorf("expected Gemini stream response, got %T", result.Value)
+	}
 
-func (s *chatStreamStats) FunctionCallNames() []string {
-	if s == nil {
+	// 如果返回 nil，表示没有实际内容，跳过发送
+	if geminiResponse == nil {
 		return nil
 	}
-	names := make([]string, 0, len(s.tools))
-	for _, tool := range s.tools {
-		if tool != nil && tool.name != "" {
-			names = append(names, tool.name)
-		}
+
+	geminiResponseStr, err := common.Marshal(geminiResponse)
+	if err != nil {
+		logger.LogError(c, "failed to marshal gemini response: "+err.Error())
+		return err
 	}
-	return names
+
+	// send gemini format response
+	c.Render(-1, common.CustomEvent{Data: "data: " + string(geminiResponseStr)})
+	_ = helper.FlushWriter(c)
+	return nil
 }
 
-// ProcessStreamResponse is retained for channel-specific stream handlers that
-// already own their lifecycle. OaiStreamHandler uses chatStreamStats so logical
-// tool calls are deduplicated across the complete stream.
 func ProcessStreamResponse(streamResponse dto.ChatCompletionsStreamResponse, responseTextBuilder *strings.Builder, toolCount *int) error {
 	for _, choice := range streamResponse.Choices {
 		responseTextBuilder.WriteString(choice.Delta.GetContentString())
 		responseTextBuilder.WriteString(choice.Delta.GetReasoningContent())
-		if len(choice.Delta.ToolCalls) > *toolCount {
-			*toolCount = len(choice.Delta.ToolCalls)
+		if choice.Delta.ToolCalls != nil {
+			if len(choice.Delta.ToolCalls) > *toolCount {
+				*toolCount = len(choice.Delta.ToolCalls)
+			}
+			for _, tool := range choice.Delta.ToolCalls {
+				responseTextBuilder.WriteString(tool.Function.Name)
+				responseTextBuilder.WriteString(tool.Function.Arguments)
+			}
 		}
-		for _, tool := range choice.Delta.ToolCalls {
-			responseTextBuilder.WriteString(tool.Function.Name)
-			responseTextBuilder.WriteString(tool.Function.Arguments)
+	}
+	return nil
+}
+
+func processTokenData(relayMode int, data string, responseTextBuilder *strings.Builder, toolCount *int) error {
+	switch relayMode {
+	case relayconstant.RelayModeChatCompletions:
+		var streamResponse dto.ChatCompletionsStreamResponse
+		if err := common.UnmarshalJsonStr(data, &streamResponse); err != nil {
+			return err
 		}
+		return ProcessStreamResponse(streamResponse, responseTextBuilder, toolCount)
+	case relayconstant.RelayModeCompletions:
+		var streamResponse dto.CompletionsStreamResponse
+		if err := common.UnmarshalJsonStr(data, &streamResponse); err != nil {
+			return err
+		}
+		processCompletionsStreamResponse(streamResponse, responseTextBuilder)
 	}
 	return nil
 }
@@ -142,6 +128,111 @@ func ProcessStreamResponse(streamResponse dto.ChatCompletionsStreamResponse, res
 func processCompletionsStreamResponse(streamResponse dto.CompletionsStreamResponse, responseTextBuilder *strings.Builder) {
 	for _, choice := range streamResponse.Choices {
 		responseTextBuilder.WriteString(choice.Text)
+	}
+}
+
+func handleLastResponse(lastStreamData string, responseId *string, createAt *int64,
+	systemFingerprint *string, model *string, usage **dto.Usage,
+	containStreamUsage *bool, info *relaycommon.RelayInfo,
+	shouldSendLastResp *bool) error {
+
+	var lastStreamResponse dto.ChatCompletionsStreamResponse
+	if err := common.Unmarshal(common.StringToByteSlice(lastStreamData), &lastStreamResponse); err != nil {
+		return err
+	}
+
+	*responseId = lastStreamResponse.Id
+	*createAt = lastStreamResponse.Created
+	*systemFingerprint = lastStreamResponse.GetSystemFingerprint()
+	*model = lastStreamResponse.Model
+
+	if service.ValidUsage(lastStreamResponse.Usage) {
+		*containStreamUsage = true
+		*usage = lastStreamResponse.Usage
+		if !info.ShouldIncludeUsage {
+			*shouldSendLastResp = lo.SomeBy(lastStreamResponse.Choices, func(choice dto.ChatCompletionsStreamResponseChoice) bool {
+				return choice.Delta.GetContentString() != "" || choice.Delta.GetReasoningContent() != ""
+			})
+		}
+	}
+
+	return nil
+}
+
+func HandleFinalResponse(c *gin.Context, info *relaycommon.RelayInfo, lastStreamData string,
+	responseId string, createAt int64, model string, systemFingerprint string,
+	usage *dto.Usage, containStreamUsage bool) {
+
+	switch info.RelayFormat {
+	case types.RelayFormatOpenAI:
+		if info.ShouldIncludeUsage && !containStreamUsage {
+			response := helper.GenerateFinalUsageResponse(responseId, createAt, model, *usage)
+			response.SetSystemFingerprint(systemFingerprint)
+			helper.ObjectData(c, response)
+		}
+		helper.Done(c)
+
+	case types.RelayFormatClaude:
+		var streamResponse dto.ChatCompletionsStreamResponse
+		if err := common.Unmarshal(common.StringToByteSlice(lastStreamData), &streamResponse); err != nil {
+			common.SysLog("error unmarshalling stream response: " + err.Error())
+			return
+		}
+
+		info.ClaudeConvertInfo.Usage = usage
+
+		result, err := relayconvert.ConvertStreamResponse(c, info, types.RelayFormatClaude, &streamResponse)
+		if err != nil {
+			common.SysLog("error converting Claude stream response: " + err.Error())
+			return
+		}
+		claudeResponses, ok := result.Value.([]*dto.ClaudeResponse)
+		if !ok {
+			common.SysLog(fmt.Sprintf("expected Claude stream responses, got %T", result.Value))
+			return
+		}
+		for _, resp := range claudeResponses {
+			_ = helper.ClaudeData(c, *resp)
+		}
+		info.ClaudeConvertInfo.Done = true
+
+	case types.RelayFormatGemini:
+		var streamResponse dto.ChatCompletionsStreamResponse
+		if err := common.Unmarshal(common.StringToByteSlice(lastStreamData), &streamResponse); err != nil {
+			common.SysLog("error unmarshalling stream response: " + err.Error())
+			return
+		}
+
+		// 这里处理的是 openai 最后一个流响应，其 delta 为空，有 finish_reason 字段
+		// 因此相比较于 google 官方的流响应，由 openai 转换而来会多一个 parts 为空，finishReason 为 STOP 的响应
+		// 而包含最后一段文本输出的响应（倒数第二个）的 finishReason 为 null
+		// 暂不知是否有程序会不兼容。
+
+		result, err := relayconvert.ConvertStreamResponse(c, info, types.RelayFormatGemini, &streamResponse)
+		if err != nil {
+			common.SysLog("error converting Gemini stream response: " + err.Error())
+			return
+		}
+		geminiResponse, ok := result.Value.(*dto.GeminiChatResponse)
+		if !ok {
+			common.SysLog(fmt.Sprintf("expected Gemini stream response, got %T", result.Value))
+			return
+		}
+
+		// openai 流响应开头的空数据
+		if geminiResponse == nil {
+			return
+		}
+
+		geminiResponseStr, err := common.Marshal(geminiResponse)
+		if err != nil {
+			common.SysLog("error marshalling gemini response: " + err.Error())
+			return
+		}
+
+		// 发送最终的 Gemini 响应
+		c.Render(-1, common.CustomEvent{Data: "data: " + string(geminiResponseStr)})
+		_ = helper.FlushWriter(c)
 	}
 }
 

@@ -69,10 +69,10 @@
         }
       ],
       "usageMetadata": {
-        "promptTokenCount": 4,
+        "promptTokenCount": 0,
         "toolUsePromptTokenCount": 0,
-        "candidatesTokenCount": 2,
-        "totalTokenCount": 6,
+        "candidatesTokenCount": 0,
+        "totalTokenCount": 0,
         "thoughtsTokenCount": 0,
         "cachedContentTokenCount": 0,
         "promptTokensDetails": null,

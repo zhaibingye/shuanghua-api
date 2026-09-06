@@ -5,8 +5,7 @@
         "role": "model",
         "parts": [
           {
-            "text": "Deep thought.",
-            "thought": true
+            "text": "The answer is 42."
           },
           {
             "functionCall": {
@@ -15,23 +14,20 @@
                 "city": "Paris"
               }
             }
-          },
-          {
-            "text": "The answer is 42."
           }
         ]
       },
       "finishReason": "STOP",
       "index": 0,
-      "safetyRatings": null
+      "safetyRatings": []
     }
   ],
   "usageMetadata": {
     "promptTokenCount": 10,
     "toolUsePromptTokenCount": 0,
-    "candidatesTokenCount": 3,
+    "candidatesTokenCount": 5,
     "totalTokenCount": 15,
-    "thoughtsTokenCount": 2,
+    "thoughtsTokenCount": 0,
     "cachedContentTokenCount": 0,
     "promptTokensDetails": null,
     "toolUsePromptTokensDetails": null,

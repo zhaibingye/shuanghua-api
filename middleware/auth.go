@@ -387,12 +387,21 @@ func TokenAuth() func(c *gin.Context) {
 				c.Request.Header.Set("Authorization", "Bearer "+anthropicKey)
 			}
 		}
-		// gemini api 从query中获取key
-		if c.Request.URL.Path == "/v1/models" ||
+		// gemini api 从query中获取key，支持通过api key查询credits
+		path := strings.TrimSuffix(c.Request.URL.Path, "/")
+		if path == "/v1/models" ||
+			path == "/v1/credits" ||
+			path == "/credits" ||
 			strings.HasPrefix(c.Request.URL.Path, "/v1beta/models") ||
 			strings.HasPrefix(c.Request.URL.Path, "/v1beta/openai/models") ||
 			strings.HasPrefix(c.Request.URL.Path, "/v1/models/") {
 			skKey := c.Query("key")
+			if skKey == "" {
+				skKey = c.Query("api_key")
+			}
+			if skKey == "" {
+				skKey = c.Query("apiKey")
+			}
 			if skKey != "" {
 				c.Request.Header.Set("Authorization", "Bearer "+skKey)
 			}

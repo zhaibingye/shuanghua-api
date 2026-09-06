@@ -16,6 +16,9 @@ along with this program. If not, see <https://www.gnu.org/licenses/>.
 
 For commercial licensing, please contact support@quantumnous.com
 */
+import { ContentModerationRecordsSection } from '../request-limits/content-moderation-records-section'
+import { ContentModerationSection } from '../request-limits/content-moderation-section'
+import { ContentModerationUsersSection } from '../request-limits/content-moderation-users-section'
 import { RateLimitSection } from '../request-limits/rate-limit-section'
 import { SensitiveWordsSection } from '../request-limits/sensitive-words-section'
 import { SSRFSection } from '../request-limits/ssrf-section'
@@ -53,6 +56,21 @@ const SECURITY_SECTIONS = [
         }}
       />
     ),
+  },
+  {
+    id: 'content-moderation',
+    titleKey: 'Content Moderation',
+    build: () => <ContentModerationSection />,
+  },
+  {
+    id: 'moderation-records',
+    titleKey: 'Moderation Records',
+    build: () => <ContentModerationRecordsSection />,
+  },
+  {
+    id: 'moderation-users',
+    titleKey: 'Violating Users',
+    build: () => <ContentModerationUsersSection />,
   },
   {
     id: 'ssrf',

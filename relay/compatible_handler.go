@@ -10,6 +10,7 @@ import (
 	"github.com/QuantumNous/new-api/constant"
 	"github.com/QuantumNous/new-api/logger"
 	relaycommon "github.com/QuantumNous/new-api/relay/common"
+	relayconstant "github.com/QuantumNous/new-api/relay/constant"
 	"github.com/QuantumNous/new-api/relay/helper"
 	"github.com/QuantumNous/new-api/relaykit/dto"
 	"github.com/QuantumNous/new-api/relaykit/types"
@@ -67,10 +68,29 @@ func TextHelper(c *gin.Context, info *relaycommon.RelayInfo) (newAPIError *types
 	if adaptor == nil {
 		return types.NewError(fmt.Errorf("invalid api type: %d", info.ApiType), types.ErrorCodeInvalidApiType, types.ErrOptionWithSkipRetry())
 	}
-	applyTextPlan(info)
 	adaptor.Init(info)
 
 	passThroughGlobal := model_setting.GetGlobalSettings().PassThroughRequestEnabled
+	if info.RelayMode == relayconstant.RelayModeChatCompletions &&
+		!passThroughGlobal &&
+		!info.ChannelSetting.PassThroughBodyEnabled &&
+		service.ShouldChatCompletionsUseResponsesGlobal(info.ChannelId, info.ChannelType, info.OriginModelName) {
+		applySystemPromptIfNeeded(c, info, request)
+		usage, newApiErr := chatCompletionsViaResponses(c, info, adaptor, request)
+		if newApiErr != nil {
+			return newApiErr
+		}
+
+		var containAudioTokens = usage.CompletionTokenDetails.AudioTokens > 0 || usage.PromptTokensDetails.AudioTokens > 0
+		var containsAudioRatios = ratio_setting.ContainsAudioRatio(info.OriginModelName) || ratio_setting.ContainsAudioCompletionRatio(info.OriginModelName)
+
+		if containAudioTokens && containsAudioRatios {
+			service.PostAudioConsumeQuota(c, info, usage, "")
+		} else {
+			service.PostTextConsumeQuota(c, info, usage, nil)
+		}
+		return nil
+	}
 
 	var requestBody io.Reader
 
@@ -86,12 +106,58 @@ func TextHelper(c *gin.Context, info *relaycommon.RelayInfo) (newAPIError *types
 		}
 		requestBody = common.NewReplayableBodyReader(storage)
 	} else {
-		applySystemPromptIfNeeded(c, info, request)
-		convertedRequest, err := convertRequestToChannelNative(c, info, adaptor, request)
+		convertedRequest, err := adaptor.ConvertOpenAIRequest(c, info, request)
 		if err != nil {
-			return newConvertRequestError(err)
+			return types.NewError(err, types.ErrorCodeConvertRequestFailed, types.ErrOptionWithSkipRetry())
 		}
 		relaycommon.AppendRequestConversionFromRequest(info, convertedRequest)
+
+		if info.ChannelSetting.SystemPrompt != "" {
+			// 如果有系统提示，则将其添加到请求中
+			request, ok := convertedRequest.(*dto.GeneralOpenAIRequest)
+			if ok {
+				containSystemPrompt := false
+				for _, message := range request.Messages {
+					if message.Role == request.GetSystemRoleName() {
+						containSystemPrompt = true
+						break
+					}
+				}
+				if !containSystemPrompt {
+					// 如果没有系统提示，则添加系统提示
+					systemMessage := dto.Message{
+						Role:    request.GetSystemRoleName(),
+						Content: info.ChannelSetting.SystemPrompt,
+					}
+					request.Messages = append([]dto.Message{systemMessage}, request.Messages...)
+				} else if info.ChannelSetting.SystemPromptOverride {
+					common.SetContextKey(c, constant.ContextKeySystemPromptOverride, true)
+					// 如果有系统提示，且允许覆盖，则拼接到前面
+					for i, message := range request.Messages {
+						if message.Role == request.GetSystemRoleName() {
+							if message.IsStringContent() {
+								request.Messages[i].SetStringContent(info.ChannelSetting.SystemPrompt + "\n" + message.StringContent())
+							} else {
+								contents := message.ParseContent()
+								contents = append([]dto.MediaContent{
+									{
+										Type: dto.ContentTypeText,
+										Text: info.ChannelSetting.SystemPrompt,
+									},
+								}, contents...)
+								request.Messages[i].Content = contents
+							}
+							break
+						}
+					}
+				}
+			}
+		}
+		if moderationRequest, ok := convertedRequest.(dto.Request); ok {
+			service.SetModerationRequestContent(c, moderationRequest)
+		} else {
+			service.SetModerationRequestContent(c, request)
+		}
 
 		jsonData, err := common.Marshal(convertedRequest)
 		if err != nil {

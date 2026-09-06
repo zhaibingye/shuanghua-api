@@ -12,6 +12,14 @@ import (
 	kitutil "github.com/QuantumNous/new-api/relaykit/relayconvert/kitutil"
 )
 
+func convertOpenAIResponsesRequestToClaudeMessages(c context.Context, info convmeta.Meta, request any) (any, error) {
+	responsesRequest, err := OpenAIResponsesRequestFromAny(request)
+	if err != nil {
+		return nil, err
+	}
+	return OpenAIResponsesRequestToClaudeMessages(c, info, responsesRequest)
+}
+
 func OpenAIResponsesRequestToClaudeMessages(c context.Context, info convmeta.Meta, req *dto.OpenAIResponsesRequest) (*dto.ClaudeRequest, error) {
 	if req == nil {
 		return nil, fmt.Errorf("request is nil")
@@ -134,11 +142,23 @@ func responsesFunctionDeclarationsToClaudeTools(functions []dto.FunctionRequest)
 
 func applyResponsesReasoningToClaude(req *dto.OpenAIResponsesRequest, claudeRequest *dto.ClaudeRequest) {
 	effort := ReasoningEffort(req)
-	if effort == "" {
-		return
+	switch effort {
+	case "low":
+		claudeRequest.Thinking = &dto.Thinking{
+			Type:         "enabled",
+			BudgetTokens: kitutil.GetPointer(1280),
+		}
+	case "medium":
+		claudeRequest.Thinking = &dto.Thinking{
+			Type:         "enabled",
+			BudgetTokens: kitutil.GetPointer(2048),
+		}
+	case "high":
+		claudeRequest.Thinking = &dto.Thinking{
+			Type:         "enabled",
+			BudgetTokens: kitutil.GetPointer(4096),
+		}
 	}
-	sharedclaude.ApplyThinkingLevel(claudeRequest, req.Model, effort)
-	sharedclaude.EnsureMaxTokensForThinking(claudeRequest)
 }
 
 func responsesInputContentToClaudeMediaMessages(c context.Context, content any) ([]dto.ClaudeMediaMessage, error) {

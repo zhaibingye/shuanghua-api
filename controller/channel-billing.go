@@ -67,11 +67,18 @@ type OpenAIUsageResponse struct {
 }
 
 type OpenAICreditsResponse struct {
-	Data OpenAICreditsData `json:"data"`
+	Object         string            `json:"object,omitempty"`
+	TotalGranted   float64           `json:"total_granted,omitempty"`
+	TotalUsed      float64           `json:"total_used,omitempty"`
+	TotalAvailable float64           `json:"total_available,omitempty"`
+	Data           OpenAICreditsData `json:"data"`
 }
 
 type OpenAICreditsData struct {
-	TotalUsage float64 `json:"total_usage"` // unit: dollar
+	TotalGranted   float64 `json:"total_granted,omitempty"`
+	TotalUsed      float64 `json:"total_used,omitempty"`
+	TotalAvailable float64 `json:"total_available,omitempty"`
+	TotalUsage     float64 `json:"total_usage"` // unit: dollar
 }
 
 type OpenAISBUsageResponse struct {

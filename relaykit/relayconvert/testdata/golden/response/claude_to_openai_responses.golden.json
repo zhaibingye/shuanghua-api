@@ -9,14 +9,14 @@
   "output": [
     {
       "type": "message",
-      "id": "msg_msg_fixed_0",
+      "id": "msg_fixed_msg_0",
       "status": "completed",
       "role": "assistant",
       "content": [
         {
           "type": "output_text",
           "text": "The answer is 42.",
-          "annotations": null
+          "annotations": []
         }
       ],
       "quality": "",
@@ -24,7 +24,7 @@
     },
     {
       "type": "function_call",
-      "id": "fc_toolu_abc",
+      "id": "toolu_abc",
       "status": "completed",
       "role": "",
       "content": null,
@@ -63,9 +63,7 @@
       }
     },
     "prompt_tokens_details": {
-      "cached_tokens": 3,
-      "cached_creation_tokens": 2,
-      "cache_write_tokens": 2,
+      "cached_tokens": 0,
       "text_tokens": 0,
       "audio_tokens": 0,
       "image_tokens": 0
@@ -77,8 +75,15 @@
       "reasoning_tokens": 0
     },
     "input_tokens": 15,
-    "output_tokens": 0,
-    "input_tokens_details": null,
+    "output_tokens": 5,
+    "input_tokens_details": {
+      "cached_tokens": 3,
+      "cached_creation_tokens": 2,
+      "cache_write_tokens": 2,
+      "text_tokens": 0,
+      "audio_tokens": 0,
+      "image_tokens": 0
+    },
     "claude_cache_creation_5_m_tokens": 2,
     "claude_cache_creation_1_h_tokens": 0
   },

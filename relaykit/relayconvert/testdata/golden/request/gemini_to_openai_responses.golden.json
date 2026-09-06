@@ -12,24 +12,27 @@
           "type": "input_image"
         }
       ],
-      "role": "user",
-      "type": "message"
+      "role": "user"
+    },
+    {
+      "content": "",
+      "role": "assistant"
     },
     {
       "arguments": "{\"city\":\"Paris\"}",
-      "call_id": "call_5a6a196ff6f5_0",
-      "id": "fc_call_5a6a196ff6f5_0",
+      "call_id": "call_1",
       "name": "get_weather",
       "type": "function_call"
     },
     {
-      "call_id": "call_5a6a196ff6f5_0",
+      "call_id": "call_0",
       "output": "{\"result\":\"15 degrees\"}",
       "type": "function_call_output"
     }
   ],
   "instructions": "You are a helpful assistant.",
   "max_output_tokens": 1024,
+  "stream": false,
   "temperature": 0.7,
   "tools": [
     {

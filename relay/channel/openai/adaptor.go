@@ -28,6 +28,7 @@ import (
 	"github.com/QuantumNous/new-api/relay/common_handler"
 	relayconstant "github.com/QuantumNous/new-api/relay/constant"
 	"github.com/QuantumNous/new-api/relaykit/types"
+	"github.com/QuantumNous/new-api/service"
 	"github.com/QuantumNous/new-api/setting/model_setting"
 	"github.com/QuantumNous/new-api/setting/reasoning"
 	"github.com/samber/lo"
@@ -40,12 +41,52 @@ type Adaptor struct {
 	ResponseFormat string
 }
 
-func (a *Adaptor) ConvertGeminiRequest(*gin.Context, *relaycommon.RelayInfo, *dto.GeminiChatRequest) (any, error) {
-	return channel.ForeignTextRequest("openai.ConvertGeminiRequest")
+func (a *Adaptor) ConvertGeminiRequest(c *gin.Context, info *relaycommon.RelayInfo, request *dto.GeminiChatRequest) (any, error) {
+	result, err := service.ConvertRequest(c, info, types.RelayFormatOpenAI, request)
+	if err != nil {
+		return nil, err
+	}
+	openaiRequest, ok := result.Value.(*dto.GeneralOpenAIRequest)
+	if !ok {
+		return nil, fmt.Errorf("expected OpenAI chat completions request, got %T", result.Value)
+	}
+	return a.ConvertOpenAIRequest(c, info, openaiRequest)
 }
 
-func (a *Adaptor) ConvertClaudeRequest(*gin.Context, *relaycommon.RelayInfo, *dto.ClaudeRequest) (any, error) {
-	return channel.ForeignTextRequest("openai.ConvertClaudeRequest")
+func (a *Adaptor) ConvertClaudeRequest(c *gin.Context, info *relaycommon.RelayInfo, request *dto.ClaudeRequest) (any, error) {
+	//if !strings.Contains(request.Model, "claude") {
+	//	return nil, fmt.Errorf("you are using openai channel type with path /v1/messages, only claude model supported convert, but got %s", request.Model)
+	//}
+	//if common.DebugEnabled {
+	//	bodyBytes := []byte(common.GetJsonString(request))
+	//	err := os.WriteFile(fmt.Sprintf("claude_request_%s.txt", c.GetString(common.RequestIdKey)), bodyBytes, 0644)
+	//	if err != nil {
+	//		println(fmt.Sprintf("failed to save request body to file: %v", err))
+	//	}
+	//}
+	result, err := service.ConvertRequest(c, info, types.RelayFormatOpenAI, request)
+	if err != nil {
+		return nil, err
+	}
+	aiRequest, ok := result.Value.(*dto.GeneralOpenAIRequest)
+	if !ok {
+		return nil, fmt.Errorf("expected OpenAI chat completions request, got %T", result.Value)
+	}
+	//if common.DebugEnabled {
+	//	println(fmt.Sprintf("convert claude to openai request result: %s", common.GetJsonString(aiRequest)))
+	//	// Save request body to file for debugging
+	//	bodyBytes := []byte(common.GetJsonString(aiRequest))
+	//	err = os.WriteFile(fmt.Sprintf("claude_to_openai_request_%s.txt", c.GetString(common.RequestIdKey)), bodyBytes, 0644)
+	//	if err != nil {
+	//		println(fmt.Sprintf("failed to save request body to file: %v", err))
+	//	}
+	//}
+	if info.SupportStreamOptions && info.IsStream {
+		aiRequest.StreamOptions = &dto.StreamOptions{
+			IncludeUsage: true,
+		}
+	}
+	return a.ConvertOpenAIRequest(c, info, aiRequest)
 }
 
 func (a *Adaptor) Init(info *relaycommon.RelayInfo) {
@@ -84,19 +125,13 @@ func (a *Adaptor) GetRequestURL(info *relaycommon.RelayInfo) (string, error) {
 		requestURL = fmt.Sprintf("%s?api-version=%s", requestURL, apiVersion)
 		task := strings.TrimPrefix(requestURL, "/v1/")
 
-		if info.TextPlanApplies() {
-			if info.TextNative() == types.RelayFormatOpenAI {
-				task = "chat/completions"
-			}
-		} else if info.RelayFormat == types.RelayFormatClaude {
+		if info.RelayFormat == types.RelayFormatClaude {
 			task = strings.TrimPrefix(task, "messages")
 			task = "chat/completions" + task
 		}
 
-		// Responses API (including compact). TextPlan.Native drives this so
-		// Chat→Responses no longer rewrites RelayMode.
-		if info.RelayMode == relayconstant.RelayModeResponses || info.RelayMode == relayconstant.RelayModeResponsesCompact ||
-			(info.TextPlanApplies() && info.TextNative() == types.RelayFormatOpenAIResponses) {
+		// 特殊处理 responses API（包含 compact）
+		if info.RelayMode == relayconstant.RelayModeResponses || info.RelayMode == relayconstant.RelayModeResponsesCompact {
 			responsesApiVersion := "preview"
 
 			subUrl := "/openai/v1/responses"
@@ -136,9 +171,6 @@ func (a *Adaptor) GetRequestURL(info *relaycommon.RelayInfo) (string, error) {
 		url = strings.Replace(url, "{model}", info.UpstreamModelName, -1)
 		return url, nil
 	default:
-		if path, ok := info.OpenAICompatibleRequestPath(); ok {
-			return relaycommon.GetFullRequestURL(info.ChannelBaseUrl, path, info.ChannelType), nil
-		}
 		if (info.RelayFormat == types.RelayFormatClaude || info.RelayFormat == types.RelayFormatGemini) &&
 			info.RelayMode != relayconstant.RelayModeResponses &&
 			info.RelayMode != relayconstant.RelayModeResponsesCompact {
@@ -213,17 +245,8 @@ func (a *Adaptor) ConvertOpenAIRequest(c *gin.Context, info *relaycommon.RelayIn
 	if request == nil {
 		return nil, errors.New("request is nil")
 	}
-	streaming := info.IsStream || (request.Stream != nil && *request.Stream)
-	if info.ChannelType != constant.ChannelTypeOpenAI && info.ChannelType != constant.ChannelTypeAzure || !streaming {
+	if info.ChannelType != constant.ChannelTypeOpenAI && info.ChannelType != constant.ChannelTypeAzure {
 		request.StreamOptions = nil
-	} else {
-		if request.Stream == nil || !*request.Stream {
-			stream := true
-			request.Stream = &stream
-		}
-		if info.SupportStreamOptions && request.StreamOptions == nil {
-			request.StreamOptions = &dto.StreamOptions{IncludeUsage: true}
-		}
 	}
 	if info.ChannelType == constant.ChannelTypeOpenRouter {
 		if len(request.Usage) == 0 {
@@ -613,42 +636,28 @@ func (a *Adaptor) DoResponse(c *gin.Context, resp *http.Response, info *relaycom
 	switch info.RelayMode {
 	case relayconstant.RelayModeRealtime:
 		err, usage = OpenaiRealtimeHandler(c, info)
-		return
 	case relayconstant.RelayModeAudioSpeech:
 		usage = OpenaiTTSHandler(c, resp, info)
-		return
 	case relayconstant.RelayModeAudioTranslation:
 		fallthrough
 	case relayconstant.RelayModeAudioTranscription:
 		err, usage = OpenaiSTTHandler(c, resp, info, a.ResponseFormat)
-		return
 	case relayconstant.RelayModeImagesGenerations, relayconstant.RelayModeImagesEdits:
 		if info.IsStream {
 			usage, err = OpenaiImageStreamHandler(c, info, resp)
 		} else {
 			usage, err = OpenaiImageHandler(c, info, resp)
 		}
-		return
 	case relayconstant.RelayModeRerank:
 		usage, err = common_handler.RerankHandler(c, info, resp)
-		return
-	case relayconstant.RelayModeResponsesCompact:
-		usage, err = OaiResponsesCompactionHandler(c, resp)
-		return
-	}
-	if info.TextPlanApplies() {
-		return DoPlannedTextResponse(c, info, resp)
-	}
-	if info.IsStream && IsLegacyCompletionsEndpoint(info) {
-		return OaiCompletionsStreamHandler(c, info, resp)
-	}
-	switch info.RelayMode {
 	case relayconstant.RelayModeResponses:
 		if info.IsStream {
 			usage, err = OaiResponsesStreamHandler(c, info, resp)
 		} else {
 			usage, err = OaiResponsesHandler(c, info, resp)
 		}
+	case relayconstant.RelayModeResponsesCompact:
+		usage, err = OaiResponsesCompactionHandler(c, resp)
 	default:
 		if info.IsStream {
 			usage, err = OaiStreamHandler(c, info, resp)

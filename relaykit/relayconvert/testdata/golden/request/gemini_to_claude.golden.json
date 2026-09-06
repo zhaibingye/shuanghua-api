@@ -1,34 +1,30 @@
 {
   "model": "upstream-model",
-  "system": "You are a helpful assistant.",
+  "system": [
+    {
+      "type": "text",
+      "text": "You are a helpful assistant."
+    }
+  ],
   "messages": [
     {
       "role": "user",
-      "content": [
-        {
-          "text": "What is in this image?",
-          "type": "text"
-        },
-        {
-          "source": {
-            "data": "aGVsbG8=",
-            "media_type": "image/png",
-            "type": "base64"
-          },
-          "type": "image"
-        }
-      ]
+      "content": []
     },
     {
       "role": "assistant",
       "content": [
         {
-          "id": "call_5a6a196ff6f5_0",
+          "type": "text",
+          "text": "..."
+        },
+        {
+          "type": "tool_use",
+          "id": "call_1",
+          "name": "get_weather",
           "input": {
             "city": "Paris"
-          },
-          "name": "get_weather",
-          "type": "tool_use"
+          }
         }
       ]
     },
@@ -36,10 +32,9 @@
       "role": "user",
       "content": [
         {
+          "type": "tool_result",
           "content": "{\"result\":\"15 degrees\"}",
-          "name": "get_weather",
-          "tool_use_id": "call_5a6a196ff6f5_0",
-          "type": "tool_result"
+          "tool_use_id": "call_0"
         }
       ]
     }
@@ -48,6 +43,7 @@
   "temperature": 0.7,
   "tools": [
     {
+      "name": "get_weather",
       "description": "Get weather by city",
       "input_schema": {
         "properties": {
@@ -59,8 +55,7 @@
           "city"
         ],
         "type": "object"
-      },
-      "name": "get_weather"
+      }
     }
   ]
 }

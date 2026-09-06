@@ -111,8 +111,8 @@ func GetCredits(c *gin.Context) {
 	var quota int
 	var err error
 	var token *model.Token
-	if common.DisplayTokenStatEnabled {
-		tokenId := c.GetInt("token_id")
+	tokenId := c.GetInt("token_id")
+	if common.DisplayTokenStatEnabled && tokenId > 0 {
 		token, err = model.GetTokenById(tokenId)
 		if err == nil {
 			quota = token.RemainQuota
@@ -140,11 +140,40 @@ func GetCredits(c *gin.Context) {
 	default:
 		amount = amount / common.QuotaPerUnit
 	}
-	if token != nil && token.UnlimitedQuota {
-		amount = 100000000
+
+	var usedQuota int
+	if common.DisplayTokenStatEnabled && token != nil {
+		usedQuota = token.UsedQuota
+	} else if userId := c.GetInt("id"); userId > 0 {
+		usedQuota, _ = model.GetUserUsedQuota(userId)
 	}
-	credits := OpenAICreditsResponse{}
-	credits.Data.TotalUsage = amount
+	usedAmount := float64(usedQuota)
+	switch operation_setting.GetQuotaDisplayType() {
+	case operation_setting.QuotaDisplayTypeCNY:
+		usedAmount = usedAmount / common.QuotaPerUnit * operation_setting.USDExchangeRate
+	case operation_setting.QuotaDisplayTypeTokens:
+		// tokens 保持原值
+	default:
+		usedAmount = usedAmount / common.QuotaPerUnit
+	}
+
+	totalGranted := amount + usedAmount
+	if (token != nil && token.UnlimitedQuota) || common.GetContextKeyBool(c, "token_unlimited_quota") {
+		amount = 100000000
+		totalGranted = 100000000
+	}
+	credits := OpenAICreditsResponse{
+		Object:         "credit_summary",
+		TotalGranted:   totalGranted,
+		TotalUsed:      usedAmount,
+		TotalAvailable: amount,
+		Data: OpenAICreditsData{
+			TotalGranted:   totalGranted,
+			TotalUsed:      usedAmount,
+			TotalAvailable: amount,
+			TotalUsage:     amount,
+		},
+	}
 	c.JSON(200, credits)
 	return
 }

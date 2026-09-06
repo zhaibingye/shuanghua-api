@@ -1,0 +1,664 @@
+package controller
+
+import (
+	"errors"
+	"fmt"
+	"io"
+	"net/http"
+	"net/url"
+	"slices"
+	"strconv"
+	"strings"
+
+	"github.com/QuantumNous/new-api/common"
+	"github.com/QuantumNous/new-api/model"
+	"github.com/QuantumNous/new-api/service"
+	"github.com/QuantumNous/new-api/setting"
+	"github.com/gin-gonic/gin"
+	"gorm.io/gorm"
+)
+
+type contentModerationSettingsResponse struct {
+	Enabled                bool   `json:"enabled"`
+	Channels               string `json:"channels"`
+	ChannelIDs             []int  `json:"channel_ids"`
+	UserWhitelist          string `json:"user_whitelist"`
+	UserWhitelistIDs       []int  `json:"user_whitelist_ids"`
+	ViolationRetentionDays int    `json:"violation_retention_days"`
+	BaseURL                string `json:"base_url"`
+	Model                  string `json:"model"`
+	PreflightEnabled       bool   `json:"preflight_enabled"`
+	FailureMode            string `json:"failure_mode"`
+	TimeoutSeconds         int    `json:"timeout_seconds"`
+	MaxRetries             int    `json:"max_retries"`
+	APIKeyConfigured       bool   `json:"api_key_configured"`
+}
+
+type contentModerationSettingsRequest struct {
+	Enabled                bool   `json:"enabled"`
+	Channels               string `json:"channels"`
+	UserWhitelist          string `json:"user_whitelist"`
+	ViolationRetentionDays int    `json:"violation_retention_days"`
+	BaseURL                string `json:"base_url"`
+	APIKey                 string `json:"api_key"`
+	Model                  string `json:"model"`
+	PreflightEnabled       *bool  `json:"preflight_enabled"`
+	FailureMode            string `json:"failure_mode"`
+	TimeoutSeconds         int    `json:"timeout_seconds"`
+	MaxRetries             int    `json:"max_retries"`
+}
+
+func GetContentModerationSettings(c *gin.Context) {
+	recordManageAudit(c, "moderation.settings_view", nil)
+	config := setting.GetContentModerationSetting()
+	channelIDs := config.ChannelIDs
+	if channelIDs == nil {
+		channelIDs = []int{}
+	}
+	userWhitelistIDs := config.UserWhitelistIDs
+	if userWhitelistIDs == nil {
+		userWhitelistIDs = []int{}
+	}
+	c.JSON(http.StatusOK, gin.H{
+		"success": true,
+		"data": contentModerationSettingsResponse{
+			Enabled:                config.Enabled,
+			Channels:               config.Channels,
+			ChannelIDs:             channelIDs,
+			UserWhitelist:          config.UserWhitelist,
+			UserWhitelistIDs:       userWhitelistIDs,
+			ViolationRetentionDays: config.ViolationRetentionDays,
+			BaseURL:                config.BaseURL,
+			Model:                  config.Model,
+			PreflightEnabled:       config.PreflightEnabled,
+			FailureMode:            config.FailureMode,
+			TimeoutSeconds:         config.TimeoutSeconds,
+			MaxRetries:             config.MaxRetries,
+			APIKeyConfigured:       strings.TrimSpace(config.APIKey) != "",
+		},
+	})
+}
+
+func UpdateContentModerationSettings(c *gin.Context) {
+	var request contentModerationSettingsRequest
+	if err := common.DecodeJson(c.Request.Body, &request); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"success": false, "message": "invalid content moderation settings"})
+		return
+	}
+	modelName := strings.TrimSpace(request.Model)
+	if modelName == "" {
+		modelName = setting.DefaultContentModerationModel
+	}
+	apiKey := strings.TrimSpace(request.APIKey)
+	baseURL := strings.TrimSpace(request.BaseURL)
+	if request.PreflightEnabled == nil {
+		defaultPreflight := true
+		request.PreflightEnabled = &defaultPreflight
+	}
+	failureMode := strings.ToLower(strings.TrimSpace(request.FailureMode))
+	if failureMode == "" {
+		failureMode = setting.DefaultContentModerationFailureMode
+	}
+	if failureMode != "open" && failureMode != "closed" {
+		c.JSON(http.StatusBadRequest, gin.H{"success": false, "message": "failure mode must be open or closed"})
+		return
+	}
+	parsedChannelIDs, err := setting.ValidateChannelIDsString(request.Channels)
+	if err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"success": false, "message": "channel IDs must be positive integers separated by commas or spaces"})
+		return
+	}
+	normalizedChannels := setting.FormatChannelIDs(parsedChannelIDs)
+	parsedUserWhitelistIDs, err := setting.ValidateUserIDsString(request.UserWhitelist)
+	if err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"success": false, "message": "user whitelist IDs must be positive integers separated by commas or spaces"})
+		return
+	}
+	if !slices.Contains(parsedUserWhitelistIDs, setting.RootAdminUserID) {
+		parsedUserWhitelistIDs = append([]int{setting.RootAdminUserID}, parsedUserWhitelistIDs...)
+		slices.Sort(parsedUserWhitelistIDs)
+	}
+	normalizedUserWhitelist := setting.FormatUserIDs(parsedUserWhitelistIDs)
+	if request.ViolationRetentionDays == 0 {
+		request.ViolationRetentionDays = setting.DefaultContentModerationViolationRetentionDays
+	}
+	if request.ViolationRetentionDays < 1 || request.ViolationRetentionDays > 365 {
+		c.JSON(http.StatusBadRequest, gin.H{"success": false, "message": "violation retention days must be between 1 and 365"})
+		return
+	}
+	if len(modelName) > 128 || len(apiKey) > 4096 || len(baseURL) > 2048 || len(normalizedChannels) > 2048 || len(normalizedUserWhitelist) > 2048 {
+		c.JSON(http.StatusBadRequest, gin.H{"success": false, "message": "content moderation setting is too long"})
+		return
+	}
+	if strings.IndexFunc(apiKey, func(r rune) bool { return r < 0x20 || r == 0x7f }) >= 0 {
+		c.JSON(http.StatusBadRequest, gin.H{"success": false, "message": "content moderation API key contains invalid control characters"})
+		return
+	}
+	if baseURL != "" {
+		parsed, err := url.Parse(baseURL)
+		if err != nil || parsed.Host == "" || parsed.User != nil || (parsed.Scheme != "http" && parsed.Scheme != "https") {
+			c.JSON(http.StatusBadRequest, gin.H{"success": false, "message": "base URL must be an absolute HTTP(S) URL without credentials"})
+			return
+		}
+		if err := service.ValidateContentModerationURL(baseURL); err != nil {
+			c.JSON(http.StatusBadRequest, gin.H{"success": false, "message": err.Error()})
+			return
+		}
+	}
+	currentConfig := setting.GetContentModerationSetting()
+	if request.Enabled && (modelName == "" || (apiKey == "" && strings.TrimSpace(currentConfig.APIKey) == "")) {
+		c.JSON(http.StatusBadRequest, gin.H{"success": false, "message": "model and API key are required when content moderation is enabled"})
+		return
+	}
+	if request.TimeoutSeconds < 1 || request.TimeoutSeconds > 120 || request.MaxRetries < 1 || request.MaxRetries > 5 {
+		c.JSON(http.StatusBadRequest, gin.H{"success": false, "message": "content moderation limits are out of range"})
+		return
+	}
+
+	values := map[string]string{
+		setting.ContentModerationEnabledOption:                strconv.FormatBool(request.Enabled),
+		setting.ContentModerationChannelsOption:               normalizedChannels,
+		setting.ContentModerationUserWhitelistOption:          normalizedUserWhitelist,
+		setting.ContentModerationViolationRetentionDaysOption: strconv.Itoa(request.ViolationRetentionDays),
+		setting.ContentModerationBaseURLOption:                baseURL,
+		setting.ContentModerationModelOption:                  modelName,
+		setting.ContentModerationPreflightOption:              strconv.FormatBool(*request.PreflightEnabled),
+		setting.ContentModerationFailureModeOption:            failureMode,
+		setting.ContentModerationTimeoutSecondsOption:         strconv.Itoa(request.TimeoutSeconds),
+		setting.ContentModerationMaxRetriesOption:             strconv.Itoa(request.MaxRetries),
+	}
+	effectiveAPIKey := apiKey
+	if effectiveAPIKey == "" {
+		effectiveAPIKey = strings.TrimSpace(currentConfig.APIKey)
+	}
+	if effectiveAPIKey != "" {
+		values[setting.ContentModerationAPIKeyOption] = effectiveAPIKey
+	}
+	if err := model.UpdateOptionsBulk(values); err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"success": false, "message": err.Error()})
+		return
+	}
+	recordManageAudit(c, "moderation.settings_update", map[string]interface{}{
+		"model":                    modelName,
+		"enabled":                  request.Enabled,
+		"channels":                 normalizedChannels,
+		"user_whitelist":           normalizedUserWhitelist,
+		"violation_retention_days": request.ViolationRetentionDays,
+	})
+	c.JSON(http.StatusOK, gin.H{"success": true})
+}
+
+// GetContentModerationKey returns the configured content moderation API key.
+// Protected by SecureVerificationRequired middleware to match channel key security.
+func GetContentModerationKey(c *gin.Context) {
+	recordManageAudit(c, "moderation.key_view", nil)
+	config := setting.GetContentModerationSetting()
+	c.JSON(http.StatusOK, gin.H{
+		"success": true,
+		"message": "",
+		"data": gin.H{
+			"key": config.APIKey,
+		},
+	})
+}
+
+func ListContentModerationConversations(c *gin.Context) {
+	recordManageAudit(c, "moderation.conversations_list", map[string]interface{}{
+		"user_id":         c.Query("user_id"),
+		"status":          c.Query("status"),
+		"conversation_id": c.Query("conversation_id"),
+	})
+	limit := parseModerationLimit(c.Query("limit"))
+	offset := parseModerationOffset(c.Query("offset"))
+	now := common.GetTimestamp()
+	cutoff := now - int64(setting.GetContentModerationSetting().GetViolationRetentionDuration().Seconds())
+	query := model.DB.Model(&model.ModerationConversation{}).
+		Where("expires_at > ? AND last_activity_at >= ?", now, cutoff)
+	if userID := parsePositiveInt(c.Query("user_id")); userID > 0 {
+		query = query.Where("user_id = ?", userID)
+	}
+	if status := strings.TrimSpace(c.Query("status")); status != "" && status != "all" {
+		query = query.Where("status = ?", status)
+	}
+	if conversationID := strings.TrimSpace(c.Query("conversation_id")); conversationID != "" {
+		query = query.Where("conversation_id LIKE ?", "%"+conversationID+"%")
+	}
+	if start := parsePositiveInt64(c.Query("start_timestamp")); start > 0 {
+		query = query.Where("last_activity_at >= ?", start)
+	}
+	if end := parsePositiveInt64(c.Query("end_timestamp")); end > 0 {
+		query = query.Where("last_activity_at <= ?", end)
+	}
+	var total int64
+	if err := query.Count(&total).Error; err != nil {
+		writeModerationDatabaseError(c, err)
+		return
+	}
+	conversations := make([]model.ModerationConversation, 0)
+	if err := query.Order("last_activity_at desc").Limit(limit).Offset(offset).Find(&conversations).Error; err != nil {
+		writeModerationDatabaseError(c, err)
+		return
+	}
+	c.JSON(http.StatusOK, gin.H{"success": true, "data": conversations, "total": total})
+}
+
+func decryptModerationTurnForDisplay(turn *model.ModerationTurn) error {
+	if turn == nil {
+		return errors.New("invalid moderation turn")
+	}
+	// Content moderation records are stored directly without encryption.
+	// Legacy encrypted content is purged automatically.
+	if strings.HasPrefix(string(turn.SystemPrompt), "enc:v1:") ||
+		strings.HasPrefix(string(turn.UserPrompt), "enc:v1:") ||
+		strings.HasPrefix(string(turn.AssistantReply), "enc:v1:") {
+		turn.ContentUnavailable = true
+		turn.SystemPrompt = ""
+		turn.UserPrompt = ""
+		turn.AssistantReply = ""
+		return errors.New("encrypted legacy content unavailable")
+	}
+	return nil
+}
+
+func GetContentModerationConversation(c *gin.Context) {
+	recordManageAudit(c, "moderation.conversation_view", map[string]interface{}{"id": c.Param("id")})
+	conversationID, err := strconv.ParseInt(c.Param("id"), 10, 64)
+	if err != nil || conversationID <= 0 {
+		c.JSON(http.StatusBadRequest, gin.H{"success": false, "message": "invalid conversation id"})
+		return
+	}
+	var conversation model.ModerationConversation
+	now := common.GetTimestamp()
+	cutoff := now - int64(setting.GetContentModerationSetting().GetViolationRetentionDuration().Seconds())
+	if err := model.DB.Where("id = ? AND expires_at > ? AND last_activity_at >= ?", conversationID, now, cutoff).First(&conversation).Error; err != nil {
+		writeModerationDatabaseError(c, err)
+		return
+	}
+	turns := make([]model.ModerationTurn, 0)
+	jobs := make([]model.ModerationJob, 0)
+	violations := make([]model.ModerationViolation, 0)
+	actions := make([]model.ModerationAction, 0)
+	notifications := make([]model.ModerationNotification, 0)
+	if err := model.DB.Where("conversation_id = ? AND created_at >= ? AND expires_at > ?", conversationID, cutoff, now).Order("round_number asc").Find(&turns).Error; err != nil {
+		writeModerationDatabaseError(c, err)
+		return
+	}
+	if err := model.DB.Where("conversation_id = ? AND created_at >= ? AND expires_at > ?", conversationID, cutoff, now).Order("id asc").Find(&jobs).Error; err != nil {
+		writeModerationDatabaseError(c, err)
+		return
+	}
+	if err := model.DB.Where("user_id = ? AND conversation_id = ? AND created_at >= ? AND expires_at > ?", conversation.UserID, conversation.ConversationID, cutoff, now).Order("id asc").Find(&violations).Error; err != nil {
+		writeModerationDatabaseError(c, err)
+		return
+	}
+	if err := model.DB.Where("user_id = ? AND conversation_id = ? AND created_at >= ?", conversation.UserID, conversation.ConversationID, cutoff).Order("id asc").Find(&actions).Error; err != nil {
+		writeModerationDatabaseError(c, err)
+		return
+	}
+	if len(violations) > 0 {
+		violationIDs := make([]int64, 0, len(violations))
+		for _, violation := range violations {
+			violationIDs = append(violationIDs, violation.ID)
+		}
+		if err := model.DB.Where("violation_id IN ?", violationIDs).Order("id asc").Find(&notifications).Error; err != nil {
+			writeModerationDatabaseError(c, err)
+			return
+		}
+	}
+	hasEncrypted := false
+	for _, turn := range turns {
+		if strings.HasPrefix(string(turn.SystemPrompt), "enc:v1:") ||
+			strings.HasPrefix(string(turn.UserPrompt), "enc:v1:") ||
+			strings.HasPrefix(string(turn.AssistantReply), "enc:v1:") {
+			hasEncrypted = true
+			break
+		}
+	}
+	if !hasEncrypted {
+		for _, job := range jobs {
+			if strings.HasPrefix(string(job.RequestPayload), "enc:v1:") ||
+				strings.HasPrefix(string(job.ResponsePayload), "enc:v1:") {
+				hasEncrypted = true
+				break
+			}
+		}
+	}
+	if hasEncrypted {
+		_ = model.DeleteEncryptedModerationRecords(model.DB)
+		c.JSON(http.StatusNotFound, gin.H{"success": false, "message": "content moderation record not found"})
+		return
+	}
+
+	for i := range turns {
+		if err := decryptModerationTurnForDisplay(&turns[i]); err != nil {
+			common.SysError(fmt.Sprintf("failed to decrypt moderation turn %d: %v", turns[i].ID, err))
+		}
+	}
+	for i := range jobs {
+		requestPayload, decryptErr := service.DecryptModerationStoredText(string(jobs[i].RequestPayload))
+		if decryptErr != nil {
+			common.SysError(fmt.Sprintf("failed to decrypt moderation job %d request payload: %v", jobs[i].ID, decryptErr))
+			jobs[i].RequestPayload = ""
+			jobs[i].RequestPayloadUnavailable = true
+		} else {
+			jobs[i].RequestPayload = model.ModerationText(requestPayload)
+		}
+		responsePayload, decryptErr := service.DecryptModerationStoredText(string(jobs[i].ResponsePayload))
+		if decryptErr != nil {
+			common.SysError(fmt.Sprintf("failed to decrypt moderation job %d response payload: %v", jobs[i].ID, decryptErr))
+			jobs[i].ResponsePayload = ""
+			jobs[i].ResponsePayloadUnavailable = true
+		} else {
+			jobs[i].ResponsePayload = model.ModerationText(responsePayload)
+		}
+	}
+	c.JSON(http.StatusOK, gin.H{"success": true, "data": gin.H{
+		"conversation":  conversation,
+		"turns":         turns,
+		"jobs":          jobs,
+		"violations":    violations,
+		"actions":       actions,
+		"notifications": notifications,
+	}})
+}
+
+type moderationActionRequest struct {
+	Reason string `json:"reason"`
+}
+
+func validateModerationActionRequest(c *gin.Context, reason string) bool {
+	if len(reason) <= 4096 {
+		return true
+	}
+	c.JSON(http.StatusBadRequest, gin.H{"success": false, "message": "moderation action reason is too long"})
+	return false
+}
+
+func UnblockContentModerationConversation(c *gin.Context) {
+	conversationID, err := strconv.ParseInt(c.Param("id"), 10, 64)
+	if err != nil || conversationID <= 0 {
+		c.JSON(http.StatusBadRequest, gin.H{"success": false, "message": "invalid conversation id"})
+		return
+	}
+	var request moderationActionRequest
+	if err := common.DecodeJson(c.Request.Body, &request); err != nil && !errors.Is(err, io.EOF) {
+		c.JSON(http.StatusBadRequest, gin.H{"success": false, "message": "invalid action request"})
+		return
+	}
+	if !validateModerationActionRequest(c, request.Reason) {
+		return
+	}
+	if err := service.UnblockModerationConversation(conversationID, c.GetInt("id"), request.Reason); err != nil {
+		writeModerationDatabaseError(c, err)
+		return
+	}
+	recordManageAudit(c, "moderation.conversation_unblock", map[string]interface{}{"id": conversationID})
+	c.JSON(http.StatusOK, gin.H{"success": true})
+}
+
+func ResolveContentModerationViolation(c *gin.Context) {
+	violationID, err := strconv.ParseInt(c.Param("id"), 10, 64)
+	if err != nil || violationID <= 0 {
+		c.JSON(http.StatusBadRequest, gin.H{"success": false, "message": "invalid violation id"})
+		return
+	}
+	var request struct {
+		Status string `json:"status"`
+		Reason string `json:"reason"`
+	}
+	if err := common.DecodeJson(c.Request.Body, &request); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"success": false, "message": "invalid resolution request"})
+		return
+	}
+	if request.Status != model.ModerationViolationFalsePositive && request.Status != model.ModerationViolationReversed {
+		c.JSON(http.StatusBadRequest, gin.H{"success": false, "message": "invalid moderation resolution"})
+		return
+	}
+	if !validateModerationActionRequest(c, request.Reason) {
+		return
+	}
+	if err := service.ResolveModerationViolation(violationID, int64(c.GetInt("id")), request.Status, request.Reason); err != nil {
+		writeModerationDatabaseError(c, err)
+		return
+	}
+	recordManageAudit(c, "moderation.violation_resolve", map[string]interface{}{"id": violationID})
+	c.JSON(http.StatusOK, gin.H{"success": true})
+}
+
+func RestoreContentModerationUser(c *gin.Context) {
+	userID, err := strconv.Atoi(c.Param("id"))
+	if err != nil || userID <= 0 {
+		c.JSON(http.StatusBadRequest, gin.H{"success": false, "message": "invalid user id"})
+		return
+	}
+	var request moderationActionRequest
+	if err := common.DecodeJson(c.Request.Body, &request); err != nil && !errors.Is(err, io.EOF) {
+		c.JSON(http.StatusBadRequest, gin.H{"success": false, "message": "invalid action request"})
+		return
+	}
+	if !validateModerationActionRequest(c, request.Reason) {
+		return
+	}
+	if err := service.RestoreUserAfterModeration(userID, c.GetInt("id"), request.Reason); err != nil {
+		writeModerationDatabaseError(c, err)
+		return
+	}
+	recordManageAudit(c, "moderation.user_restore", map[string]interface{}{"id": userID})
+	c.JSON(http.StatusOK, gin.H{"success": true})
+}
+
+func ListContentModerationViolations(c *gin.Context) {
+	recordManageAudit(c, "moderation.violations_list", map[string]interface{}{
+		"user_id":         c.Query("user_id"),
+		"status":          c.Query("status"),
+		"conversation_id": c.Query("conversation_id"),
+	})
+	limit := parseModerationLimit(c.Query("limit"))
+	offset := parseModerationOffset(c.Query("offset"))
+	now := common.GetTimestamp()
+	cutoff := now - int64(setting.GetContentModerationSetting().GetViolationRetentionDuration().Seconds())
+	query := model.DB.Model(&model.ModerationViolation{}).
+		Where("expires_at > ? AND created_at >= ?", now, cutoff)
+	if userID := parsePositiveInt(c.Query("user_id")); userID > 0 {
+		query = query.Where("user_id = ?", userID)
+	}
+	if status := strings.TrimSpace(c.Query("status")); status != "" && status != "all" {
+		query = query.Where("status = ?", status)
+	}
+	if conversationID := strings.TrimSpace(c.Query("conversation_id")); conversationID != "" {
+		query = query.Where("conversation_id LIKE ?", "%"+conversationID+"%")
+	}
+	if start := parsePositiveInt64(c.Query("start_timestamp")); start > 0 {
+		query = query.Where("created_at >= ?", start)
+	}
+	if end := parsePositiveInt64(c.Query("end_timestamp")); end > 0 {
+		query = query.Where("created_at <= ?", end)
+	}
+	var total int64
+	if err := query.Count(&total).Error; err != nil {
+		writeModerationDatabaseError(c, err)
+		return
+	}
+	violations := make([]model.ModerationViolation, 0)
+	if err := query.Order("created_at desc").Limit(limit).Offset(offset).Find(&violations).Error; err != nil {
+		writeModerationDatabaseError(c, err)
+		return
+	}
+	c.JSON(http.StatusOK, gin.H{"success": true, "data": violations, "total": total})
+}
+
+func ListContentModerationUsers(c *gin.Context) {
+	recordManageAudit(c, "moderation.users_list", map[string]interface{}{
+		"user_id": c.Query("user_id"),
+		"status":  c.Query("status"),
+	})
+	users, total, err := service.ListModerationUsers(
+		strings.TrimSpace(c.Query("status")),
+		parsePositiveInt(c.Query("user_id")),
+		parseModerationLimit(c.Query("limit")),
+		parseModerationOffset(c.Query("offset")),
+	)
+	if err != nil {
+		writeModerationDatabaseError(c, err)
+		return
+	}
+	c.JSON(http.StatusOK, gin.H{"success": true, "data": users, "total": total})
+}
+
+func GetContentModerationUser(c *gin.Context) {
+	userID := parsePositiveInt(c.Param("id"))
+	if userID <= 0 {
+		c.JSON(http.StatusBadRequest, gin.H{"success": false, "message": "invalid user id"})
+		return
+	}
+	recordManageAudit(c, "moderation.user_view", map[string]interface{}{"id": userID})
+	detail, err := service.GetModerationUserDetail(userID, strings.TrimSpace(c.Query("conversation_mode")))
+	if err != nil {
+		writeModerationDatabaseError(c, err)
+		return
+	}
+	c.JSON(http.StatusOK, gin.H{"success": true, "data": detail})
+}
+
+func UpdateContentModerationUser(c *gin.Context) {
+	userID := parsePositiveInt(c.Param("id"))
+	if userID <= 0 {
+		c.JSON(http.StatusBadRequest, gin.H{"success": false, "message": "invalid user id"})
+		return
+	}
+	if err := validateModerationTargetRole(c, userID); err != nil {
+		writeModerationDatabaseError(c, err)
+		return
+	}
+	var request struct {
+		ViolationCount *int   `json:"violation_count"`
+		Note           string `json:"note"`
+	}
+	if err := common.DecodeJson(c.Request.Body, &request); err != nil || request.ViolationCount == nil {
+		c.JSON(http.StatusBadRequest, gin.H{"success": false, "message": "invalid moderation user record"})
+		return
+	}
+	if err := service.UpdateModerationUserRecord(userID, c.GetInt("id"), c.GetInt("role"), *request.ViolationCount, request.Note); err != nil {
+		writeModerationDatabaseError(c, err)
+		return
+	}
+	recordManageAudit(c, "moderation.user_update", map[string]interface{}{
+		"id":              userID,
+		"violation_count": *request.ViolationCount,
+	})
+	c.JSON(http.StatusOK, gin.H{"success": true})
+}
+
+func UpdateContentModerationUserStatus(c *gin.Context) {
+	userID := parsePositiveInt(c.Param("id"))
+	if userID <= 0 {
+		c.JSON(http.StatusBadRequest, gin.H{"success": false, "message": "invalid user id"})
+		return
+	}
+	if err := validateModerationTargetRole(c, userID); err != nil {
+		writeModerationDatabaseError(c, err)
+		return
+	}
+	var request struct {
+		Enabled *bool  `json:"enabled"`
+		Reason  string `json:"reason"`
+	}
+	if err := common.DecodeJson(c.Request.Body, &request); err != nil || request.Enabled == nil {
+		c.JSON(http.StatusBadRequest, gin.H{"success": false, "message": "invalid account status request"})
+		return
+	}
+	if err := service.SetModerationUserAccountStatus(userID, c.GetInt("id"), c.GetInt("role"), *request.Enabled, request.Reason); err != nil {
+		writeModerationDatabaseError(c, err)
+		return
+	}
+	action := "disabled"
+	if *request.Enabled {
+		action = "enabled"
+	}
+	recordManageAudit(c, "moderation.user_status", map[string]interface{}{"id": userID, "status": action})
+	c.JSON(http.StatusOK, gin.H{"success": true})
+}
+
+func DeleteContentModerationUserHistory(c *gin.Context) {
+	userID := parsePositiveInt(c.Param("id"))
+	if userID <= 0 {
+		c.JSON(http.StatusBadRequest, gin.H{"success": false, "message": "invalid user id"})
+		return
+	}
+	if err := validateModerationTargetRole(c, userID); err != nil {
+		writeModerationDatabaseError(c, err)
+		return
+	}
+	if err := service.DeleteModerationUserHistory(userID, c.GetInt("id"), c.GetInt("role")); err != nil {
+		writeModerationDatabaseError(c, err)
+		return
+	}
+	recordManageAudit(c, "moderation.user_history_delete", map[string]interface{}{"id": userID})
+	c.JSON(http.StatusOK, gin.H{"success": true})
+}
+
+func validateModerationTargetRole(c *gin.Context, userID int) error {
+	var target model.User
+	if err := model.DB.Unscoped().Select("role").First(&target, userID).Error; err != nil {
+		return err
+	}
+	if !canManageTargetRole(c.GetInt("role"), target.Role) {
+		return service.ErrModerationUserPermissionDenied
+	}
+	return nil
+}
+
+func parseModerationLimit(value string) int {
+	limit, _ := strconv.Atoi(value)
+	if limit < 1 {
+		return 20
+	}
+	if limit > 100 {
+		return 100
+	}
+	return limit
+}
+
+func parseModerationOffset(value string) int {
+	offset, _ := strconv.Atoi(value)
+	if offset < 0 {
+		return 0
+	}
+	return offset
+}
+
+func parsePositiveInt(value string) int {
+	parsed, _ := strconv.Atoi(strings.TrimSpace(value))
+	if parsed < 1 {
+		return 0
+	}
+	return parsed
+}
+
+func parsePositiveInt64(value string) int64 {
+	parsed, _ := strconv.ParseInt(strings.TrimSpace(value), 10, 64)
+	if parsed < 1 {
+		return 0
+	}
+	return parsed
+}
+
+func writeModerationDatabaseError(c *gin.Context, err error) {
+	if errors.Is(err, service.ErrModerationUserPermissionDenied) {
+		c.JSON(http.StatusForbidden, gin.H{"success": false, "message": err.Error()})
+		return
+	}
+	if errors.Is(err, service.ErrInvalidModerationUserRequest) {
+		c.JSON(http.StatusBadRequest, gin.H{"success": false, "message": err.Error()})
+		return
+	}
+	if errors.Is(err, gorm.ErrRecordNotFound) {
+		c.JSON(http.StatusNotFound, gin.H{"success": false, "message": "content moderation record not found"})
+		return
+	}
+	if errors.Is(err, model.ErrModerationAccountNotDisabled) || errors.Is(err, model.ErrModerationUserHistoryOnly) {
+		c.JSON(http.StatusConflict, gin.H{"success": false, "message": err.Error()})
+		return
+	}
+	c.JSON(http.StatusInternalServerError, gin.H{"success": false, "message": err.Error()})
+}

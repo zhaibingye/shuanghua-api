@@ -18,10 +18,6 @@
       "role": "model",
       "parts": [
         {
-          "text": "Let me look.",
-          "thought": true
-        },
-        {
           "functionCall": {
             "name": "get_weather",
             "args": {
@@ -39,7 +35,7 @@
           "functionResponse": {
             "name": "get_weather",
             "response": {
-              "result": "15 degrees"
+              "content": "15 degrees"
             }
           }
         }
@@ -65,11 +61,7 @@
     }
   ],
   "generationConfig": {
-    "maxOutputTokens": 1024,
-    "thinkingConfig": {
-      "includeThoughts": true,
-      "thinkingBudget": 512
-    }
+    "maxOutputTokens": 1024
   },
   "tools": [
     {

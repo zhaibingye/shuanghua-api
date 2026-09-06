@@ -38,9 +38,12 @@ const (
 type ErrorCode string
 
 const (
-	ErrorCodeInvalidRequest         ErrorCode = "invalid_request"
-	ErrorCodeSensitiveWordsDetected ErrorCode = "sensitive_words_detected"
-	ErrorCodeViolationFeeGrokCSAM   ErrorCode = "violation_fee.grok.csam"
+	ErrorCodeInvalidRequest                        ErrorCode = "invalid_request"
+	ErrorCodeSensitiveWordsDetected                ErrorCode = "sensitive_words_detected"
+	ErrorCodeContentModerationBlocked              ErrorCode = "content_moderation_blocked"
+	ErrorCodeContentModerationConversationRequired ErrorCode = "content_moderation_conversation_required"
+	ErrorCodeContentModerationUnavailable          ErrorCode = "content_moderation_unavailable"
+	ErrorCodeViolationFeeGrokCSAM                  ErrorCode = "violation_fee.grok.csam"
 
 	// new api error
 	ErrorCodeCountTokenFailed   ErrorCode = "count_token_failed"
@@ -63,7 +66,6 @@ const (
 	// client request error
 	ErrorCodeReadRequestBodyFailed ErrorCode = "read_request_body_failed"
 	ErrorCodeConvertRequestFailed  ErrorCode = "convert_request_failed"
-	ErrorCodeCapabilityUnsupported ErrorCode = "capability_unsupported"
 	ErrorCodeAccessDenied          ErrorCode = "access_denied"
 
 	// request error

@@ -126,6 +126,86 @@ func Relay(c *gin.Context, relayFormat types.RelayFormat) {
 		return
 	}
 
+	moderationConfig := setting.GetContentModerationSetting()
+	moderationEnabled := moderationConfig.Enabled
+	isGeminiCountTokens := relayFormat == types.RelayFormatGemini && strings.Contains(c.Request.URL.Path, ":countTokens")
+	isResponsesCompaction := relayInfo.RelayMode == relayconstant.RelayModeResponsesCompact
+	isUserWhitelisted := relayInfo.UserId > 0 && moderationConfig.IsUserWhitelisted(relayInfo.UserId)
+	if moderationEnabled && !isGeminiCountTokens && !isResponsesCompaction && !isUserWhitelisted && service.IsModerationRequestSupported(request) {
+		conversationID := service.ResolveModerationConversationIDForUser(c, relayInfo.UserId)
+		common.SetContextKey(c, constant.ContextKeyModerationConversationID, conversationID)
+		c.Header("X-Conversation-ID", conversationID)
+		if relayInfo.UserId > 0 {
+			blocked, moderationErr := model.IsModerationConversationBlocked(relayInfo.UserId, conversationID)
+			if moderationErr != nil {
+				logger.LogWarn(c, fmt.Sprintf("content moderation block lookup failed: %v", moderationErr))
+				newAPIError = types.NewErrorWithStatusCode(
+					errors.New("content moderation state is unavailable"),
+					types.ErrorCodeContentModerationUnavailable,
+					http.StatusServiceUnavailable,
+					types.ErrOptionWithSkipRetry(),
+				)
+				return
+			}
+			if blocked {
+				newAPIError = types.NewErrorWithStatusCode(
+					model.ErrModerationConversationBlocked,
+					types.ErrorCodeContentModerationBlocked,
+					http.StatusForbidden,
+					types.ErrOptionWithSkipRetry(),
+				)
+				return
+			}
+		}
+		channelID := relayInfo.GetChannelID()
+		if channelID <= 0 && relayInfo.ChannelMeta != nil {
+			channelID = relayInfo.ChannelMeta.ChannelId
+		}
+		if channelID <= 0 {
+			channelID = common.GetContextKeyInt(c, constant.ContextKeyChannelId)
+		}
+		if moderationConfig.HasModeratedChannels() && (channelID <= 0 || moderationConfig.ShouldModerateChannel(channelID)) {
+			moderationURLInvalid := service.ValidateContentModerationURL(moderationConfig.BaseURL) != nil
+			if strings.TrimSpace(moderationConfig.APIKey) == "" || strings.TrimSpace(moderationConfig.Model) == "" || moderationURLInvalid {
+				newAPIError = types.NewErrorWithStatusCode(
+					errors.New("content moderation is enabled but not configured"),
+					types.ErrorCodeContentModerationUnavailable,
+					http.StatusServiceUnavailable,
+					types.ErrOptionWithSkipRetry(),
+				)
+				return
+			}
+			if relayInfo.UserId <= 0 {
+				newAPIError = types.NewErrorWithStatusCode(
+					errors.New("content moderation requires an authenticated user"),
+					types.ErrorCodeContentModerationConversationRequired,
+					http.StatusBadRequest,
+					types.ErrOptionWithSkipRetry(),
+				)
+				return
+			}
+			if channelID > 0 {
+				common.SetContextKey(c, constant.ContextKeyChannelId, channelID)
+			}
+			common.SetContextKey(c, constant.ContextKeyModerationEnabledAtStart, true)
+			service.BeginModerationCapture(c, request)
+			// Save the parsed request even when channel selection, billing, or
+			// upstream processing fails before a relay handler can enrich it with
+			// the effective system prompt.
+			service.SetModerationRequestContent(c, request)
+			if moderationConfig.PreflightEnabled {
+				content, _ := service.GetModerationRequestContent(c)
+				if moderationErr := service.PreflightModerationRequest(c, content, moderationConfig); moderationErr != nil {
+					newAPIError = types.NewErrorWithStatusCode(moderationErr, types.ErrorCodeContentModerationBlocked, http.StatusForbidden, types.ErrOptionWithSkipRetry())
+					return
+				}
+			}
+			defer func() {
+				service.FinalizeModeration(c, relayInfo, newAPIError)
+			}()
+		}
+	}
+
 	needSensitiveCheck := setting.ShouldCheckPromptSensitive()
 	needCountToken := constant.CountToken
 	// Avoid building huge CombineText (strings.Join) when token counting and sensitive check are both disabled.

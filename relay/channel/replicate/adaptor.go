@@ -523,9 +523,9 @@ func (a *Adaptor) ConvertOpenAIResponsesRequest(*gin.Context, *relaycommon.Relay
 }
 
 func (a *Adaptor) ConvertClaudeRequest(*gin.Context, *relaycommon.RelayInfo, *dto.ClaudeRequest) (any, error) {
-	return channel.ForeignTextRequest("replicate.ConvertClaudeRequest")
+	return nil, errors.New("replicate adaptor: ConvertClaudeRequest is not implemented")
 }
 
 func (a *Adaptor) ConvertGeminiRequest(*gin.Context, *relaycommon.RelayInfo, *dto.GeminiChatRequest) (any, error) {
-	return channel.ForeignTextRequest("replicate.ConvertGeminiRequest")
+	return nil, errors.New("replicate adaptor: ConvertGeminiRequest is not implemented")
 }

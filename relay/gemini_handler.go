@@ -12,6 +12,7 @@ import (
 	relaycommon "github.com/QuantumNous/new-api/relay/common"
 	"github.com/QuantumNous/new-api/relay/helper"
 	"github.com/QuantumNous/new-api/relaykit/dto"
+	"github.com/QuantumNous/new-api/relaykit/relayconvert"
 	"github.com/QuantumNous/new-api/relaykit/types"
 	"github.com/QuantumNous/new-api/service"
 	"github.com/QuantumNous/new-api/setting/model_setting"
@@ -52,7 +53,6 @@ func trimModelThinking(modelName string) string {
 
 func GeminiHelper(c *gin.Context, info *relaycommon.RelayInfo) (newAPIError *types.NewAPIError) {
 	info.InitChannelMeta(c)
-	isCountTokensRequest := strings.Contains(info.RequestURLPath, ":countTokens")
 
 	geminiReq, ok := info.Request.(*dto.GeminiChatRequest)
 	if !ok {
@@ -70,7 +70,7 @@ func GeminiHelper(c *gin.Context, info *relaycommon.RelayInfo) (newAPIError *typ
 		return types.NewError(err, types.ErrorCodeChannelModelMappedError, types.ErrOptionWithSkipRetry())
 	}
 
-	if !isCountTokensRequest && model_setting.GetGeminiSettings().ThinkingAdapterEnabled {
+	if model_setting.GetGeminiSettings().ThinkingAdapterEnabled {
 		if isNoThinkingRequest(request) {
 			// check is thinking
 			if !strings.Contains(info.OriginModelName, "-nothinking") {
@@ -83,16 +83,19 @@ func GeminiHelper(c *gin.Context, info *relaycommon.RelayInfo) (newAPIError *typ
 				}
 			}
 		}
+		if request.GenerationConfig.ThinkingConfig == nil {
+			relayconvert.ApplyGeminiThinkingConfig(request, info)
+		}
 	}
+
 	adaptor := GetAdaptor(info.ApiType)
 	if adaptor == nil {
 		return types.NewError(fmt.Errorf("invalid api type: %d", info.ApiType), types.ErrorCodeInvalidApiType, types.ErrOptionWithSkipRetry())
 	}
-	applyTextPlan(info)
-	applyInboundDefaults(info, request)
+
 	adaptor.Init(info)
 
-	if !isCountTokensRequest && info.ChannelSetting.SystemPrompt != "" {
+	if info.ChannelSetting.SystemPrompt != "" {
 		if request.SystemInstructions == nil {
 			request.SystemInstructions = &dto.GeminiChatContent{
 				Parts: []dto.GeminiPart{
@@ -140,9 +143,10 @@ func GeminiHelper(c *gin.Context, info *relaycommon.RelayInfo) (newAPIError *typ
 		}
 		requestBody = common.NewReplayableBodyReader(storage)
 	} else {
-		convertedRequest, err := convertRequestToChannelNative(c, info, adaptor, request)
+		// 使用 ConvertGeminiRequest 转换请求格式
+		convertedRequest, err := adaptor.ConvertGeminiRequest(c, info, request)
 		if err != nil {
-			return newConvertRequestError(err)
+			return types.NewError(err, types.ErrorCodeConvertRequestFailed, types.ErrOptionWithSkipRetry())
 		}
 		relaycommon.AppendRequestConversionFromRequest(info, convertedRequest)
 		jsonData, err := common.Marshal(convertedRequest)

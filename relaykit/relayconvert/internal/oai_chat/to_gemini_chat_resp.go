@@ -8,10 +8,22 @@ import (
 
 // ResponseOpenAI2Gemini 将 OpenAI 响应转换为 Gemini 格式
 func ResponseOpenAI2Gemini(openAIResponse *dto.OpenAITextResponse, info convmeta.Meta) *dto.GeminiChatResponse {
+	totalTokens := openAIResponse.TotalTokens
+	if totalTokens == 0 {
+		totalTokens = openAIResponse.PromptTokens + openAIResponse.CompletionTokens
+	}
 	geminiResponse := &dto.GeminiChatResponse{
 		Candidates:       make([]dto.GeminiChatCandidate, 0, len(openAIResponse.Choices)),
 		HasUsageMetadata: true,
-		UsageMetadata:    geminiUsageFromOpenAIChatUsage(&openAIResponse.Usage),
+		UsageMetadata: dto.GeminiUsageMetadata{
+			PromptTokenCount:     openAIResponse.PromptTokens,
+			CandidatesTokenCount: openAIResponse.CompletionTokens,
+			TotalTokenCount:      totalTokens,
+			BillingUsage:         openAIBillingUsageFromUsage(&openAIResponse.Usage),
+		},
+	}
+	if metadata, ok := geminiBillingMetadataFromOpenAIUsage(&openAIResponse.Usage); ok {
+		geminiResponse.UsageMetadata = metadata
 	}
 
 	for _, choice := range openAIResponse.Choices {
@@ -42,12 +54,6 @@ func ResponseOpenAI2Gemini(openAIResponse *dto.OpenAITextResponse, info convmeta
 			Parts: make([]dto.GeminiPart, 0),
 		}
 
-		if reasoningText := choice.Message.GetReasoningContent(); reasoningText != "" {
-			content.Parts = append(content.Parts, dto.GeminiPart{
-				Text:    reasoningText,
-				Thought: true,
-			})
-		}
 		textContent := choice.Message.StringContent()
 		if textContent != "" {
 			part := dto.GeminiPart{
@@ -89,9 +95,7 @@ func StreamResponseOpenAI2Gemini(openAIResponse *dto.ChatCompletionsStreamRespon
 	hasContent := false
 	hasFinishReason := false
 	for _, choice := range openAIResponse.Choices {
-		if len(choice.Delta.GetContentString()) > 0 ||
-			choice.Delta.GetReasoningContent() != "" ||
-			len(choice.Delta.ToolCalls) > 0 {
+		if len(choice.Delta.GetContentString()) > 0 || (choice.Delta.ToolCalls != nil && len(choice.Delta.ToolCalls) > 0) {
 			hasContent = true
 		}
 		if choice.FinishReason != nil {
@@ -119,7 +123,13 @@ func StreamResponseOpenAI2Gemini(openAIResponse *dto.ChatCompletionsStreamRespon
 	}
 
 	if openAIResponse.Usage != nil {
-		geminiResponse.UsageMetadata = geminiUsageFromOpenAIChatUsage(openAIResponse.Usage)
+		geminiResponse.UsageMetadata.PromptTokenCount = openAIResponse.Usage.PromptTokens
+		geminiResponse.UsageMetadata.CandidatesTokenCount = openAIResponse.Usage.CompletionTokens
+		geminiResponse.UsageMetadata.TotalTokenCount = openAIResponse.Usage.TotalTokens
+		geminiResponse.UsageMetadata.BillingUsage = openAIBillingUsageFromUsage(openAIResponse.Usage)
+		if metadata, ok := geminiBillingMetadataFromOpenAIUsage(openAIResponse.Usage); ok {
+			geminiResponse.UsageMetadata = metadata
+		}
 	}
 
 	for _, choice := range openAIResponse.Choices {
@@ -150,13 +160,6 @@ func StreamResponseOpenAI2Gemini(openAIResponse *dto.ChatCompletionsStreamRespon
 		content := dto.GeminiChatContent{
 			Role:  "model",
 			Parts: make([]dto.GeminiPart, 0),
-		}
-
-		if reasoningText := choice.Delta.GetReasoningContent(); reasoningText != "" {
-			content.Parts = append(content.Parts, dto.GeminiPart{
-				Text:    reasoningText,
-				Thought: true,
-			})
 		}
 
 		// 处理工具调用
@@ -196,35 +199,6 @@ func StreamResponseOpenAI2Gemini(openAIResponse *dto.ChatCompletionsStreamRespon
 	}
 
 	return geminiResponse
-}
-
-func GeminiUsageFromOpenAIChatUsage(usage *dto.Usage) dto.GeminiUsageMetadata {
-	return geminiUsageFromOpenAIChatUsage(usage)
-}
-
-func geminiUsageFromOpenAIChatUsage(usage *dto.Usage) dto.GeminiUsageMetadata {
-	if usage == nil {
-		return dto.GeminiUsageMetadata{}
-	}
-	if metadata, ok := geminiBillingMetadataFromOpenAIUsage(usage); ok {
-		return metadata
-	}
-	thoughts := usage.CompletionTokenDetails.ReasoningTokens
-	candidates := usage.CompletionTokens - thoughts
-	if candidates < 0 {
-		candidates = 0
-	}
-	total := usage.TotalTokens
-	if total == 0 {
-		total = usage.PromptTokens + usage.CompletionTokens
-	}
-	return dto.GeminiUsageMetadata{
-		PromptTokenCount:     usage.PromptTokens,
-		CandidatesTokenCount: candidates,
-		ThoughtsTokenCount:   thoughts,
-		TotalTokenCount:      total,
-		BillingUsage:         openAIBillingUsageFromUsage(usage),
-	}
 }
 
 func geminiBillingMetadataFromOpenAIUsage(usage *dto.Usage) (dto.GeminiUsageMetadata, bool) {
