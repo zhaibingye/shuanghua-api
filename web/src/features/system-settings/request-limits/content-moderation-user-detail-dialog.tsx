@@ -17,16 +17,7 @@ along with this program. If not, see <https://www.gnu.org/licenses/>.
 For commercial licensing, please contact support@quantumnous.com
 */
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
-import {
-  ArrowLeft,
-  Eye,
-  EyeOff,
-  FileText,
-  Power,
-  PowerOff,
-  Save,
-  Trash2,
-} from 'lucide-react'
+import { ArrowLeft, Power, PowerOff, Save, Trash2 } from 'lucide-react'
 import { useEffect, useState } from 'react'
 import { useTranslation } from 'react-i18next'
 import { toast } from 'sonner'
@@ -41,13 +32,12 @@ import { formatTimestampToDate } from '@/lib/format'
 
 import {
   deleteContentModerationUserHistory,
-  getContentModerationConversation,
   getContentModerationUser,
   updateContentModerationUser,
   updateContentModerationUserStatus,
 } from '../api'
 import type { ModerationUser } from '../types'
-import { ConversationDetail } from './content-moderation-records-section'
+import { EventDetail } from './content-moderation-records-section'
 
 const ENABLED_USER_STATUS = 1
 
@@ -58,8 +48,8 @@ function displayTime(timestamp: number) {
 function statusLabel(status: string, t: (key: string) => string) {
   const labels: Record<string, string> = {
     active: 'Active',
-    blocked: 'Blocked',
-    resolved: 'Resolved',
+    false_positive: 'False positive',
+    reversed: 'Reversed',
   }
   return t(labels[status] ?? status)
 }
@@ -74,12 +64,7 @@ type Props = {
 export function ContentModerationUserDetailDialog(props: Props) {
   const { t } = useTranslation()
   const queryClient = useQueryClient()
-  const [conversationMode, setConversationMode] = useState<
-    'violations' | 'all'
-  >('violations')
-  const [selectedConversationID, setSelectedConversationID] = useState<
-    number | null
-  >(null)
+  const [selectedEventID, setSelectedEventID] = useState<number | null>(null)
   const [violationCount, setViolationCount] = useState(0)
   const [note, setNote] = useState('')
   const [statusDialogOpen, setStatusDialogOpen] = useState(false)
@@ -87,22 +72,18 @@ export function ContentModerationUserDetailDialog(props: Props) {
   const [deleteDialogOpen, setDeleteDialogOpen] = useState(false)
 
   const detailQuery = useQuery({
-    queryKey: ['moderation-user', props.user?.user_id, conversationMode],
-    queryFn: () =>
-      getContentModerationUser(props.user?.user_id ?? 0, conversationMode),
+    queryKey: ['moderation-user', props.user?.user_id],
+    queryFn: () => getContentModerationUser(props.user?.user_id ?? 0),
     enabled: props.open && props.user !== null,
-  })
-  const conversationQuery = useQuery({
-    queryKey: ['moderation-conversation', selectedConversationID],
-    queryFn: () =>
-      getContentModerationConversation(selectedConversationID as number),
-    enabled: selectedConversationID !== null,
   })
 
   const detail = detailQuery.data?.data
   const currentUser = detail?.user ?? props.user
   const isHistory = currentUser?.record_status === 'history'
   const isEnabled = currentUser?.account_status === ENABLED_USER_STATUS
+  const selectedEvent = detail?.events.find(
+    (event) => event.id === selectedEventID
+  )
 
   useEffect(() => {
     if (!currentUser) return
@@ -112,8 +93,7 @@ export function ContentModerationUserDetailDialog(props: Props) {
 
   useEffect(() => {
     if (!props.open) {
-      setSelectedConversationID(null)
-      setConversationMode('violations')
+      setSelectedEventID(null)
       setStatusDialogOpen(false)
       setDeleteDialogOpen(false)
       setStatusReason('')
@@ -126,7 +106,7 @@ export function ContentModerationUserDetailDialog(props: Props) {
       queryClient.invalidateQueries({
         queryKey: ['moderation-user', props.user?.user_id],
       }),
-      queryClient.invalidateQueries({ queryKey: ['moderation-conversations'] }),
+      queryClient.invalidateQueries({ queryKey: ['moderation-events'] }),
     ])
     props.onChanged()
   }
@@ -172,31 +152,19 @@ export function ContentModerationUserDetailDialog(props: Props) {
     onError: () => toast.error(t('Failed to delete history note')),
   })
 
-  const closeConversation = () => setSelectedConversationID(null)
-  const refreshConversation = () => {
-    if (selectedConversationID !== null) {
-      void queryClient.invalidateQueries({
-        queryKey: ['moderation-conversation', selectedConversationID],
-      })
-    }
-    void invalidateUserQueries()
-  }
-
   return (
     <>
       <Dialog
         open={props.open}
         onOpenChange={props.onOpenChange}
         title={
-          selectedConversationID !== null
-            ? t('Conversation details')
+          selectedEvent
+            ? t('Violation event details')
             : t('Violating user details')
         }
         description={
-          selectedConversationID !== null
-            ? t(
-                'Review the complete moderation timeline for this conversation.'
-              )
+          selectedEvent
+            ? t('Review the truncated evidence saved for this flagged request.')
             : t(
                 'Review the user record, recent violations and moderation notes.'
               )
@@ -205,21 +173,23 @@ export function ContentModerationUserDetailDialog(props: Props) {
         contentClassName='sm:max-w-5xl'
         showCloseButton
       >
-        {selectedConversationID !== null && conversationQuery.data?.data ? (
+        {selectedEvent ? (
           <div className='space-y-3'>
             <Button
               type='button'
               variant='outline'
               size='sm'
-              onClick={closeConversation}
+              onClick={() => setSelectedEventID(null)}
             >
               <ArrowLeft data-icon='inline-start' />
               {t('Back to user record')}
             </Button>
-            <ConversationDetail
-              detail={conversationQuery.data.data}
-              onRefresh={refreshConversation}
-              onClose={closeConversation}
+            <EventDetail
+              event={selectedEvent}
+              onRefresh={() => {
+                void invalidateUserQueries()
+              }}
+              onClose={() => setSelectedEventID(null)}
             />
           </div>
         ) : (
@@ -359,119 +329,56 @@ export function ContentModerationUserDetailDialog(props: Props) {
                 </div>
 
                 <div className='space-y-3'>
-                  <div className='flex flex-wrap items-center justify-between gap-2'>
-                    <div>
-                      <h4 className='font-semibold'>
-                        {t('Related conversations')}
-                      </h4>
-                      <p className='text-muted-foreground text-xs'>
-                        {conversationMode === 'all'
-                          ? t(
-                              'Showing all retained conversations for this user.'
-                            )
-                          : t(
-                              'Showing conversations that have a violation record.'
-                            )}
-                      </p>
-                    </div>
-                    <Button
-                      type='button'
-                      variant='outline'
-                      size='sm'
-                      onClick={() =>
-                        setConversationMode((mode) =>
-                          mode === 'all' ? 'violations' : 'all'
-                        )
-                      }
-                    >
-                      {conversationMode === 'all' ? (
-                        <EyeOff data-icon='inline-start' />
-                      ) : (
-                        <Eye data-icon='inline-start' />
+                  <div>
+                    <h4 className='font-semibold'>
+                      {t('Recent flagged events')}
+                    </h4>
+                    <p className='text-muted-foreground text-xs'>
+                      {t(
+                        'Only retained violation excerpts are listed. Clean traffic is not stored.'
                       )}
-                      {conversationMode === 'all'
-                        ? t('Show violating conversations only')
-                        : t('View all retained conversations')}
-                    </Button>
-                  </div>
-                  {detail?.conversations.length === 0 && (
-                    <p className='text-muted-foreground rounded-lg border p-4 text-sm'>
-                      {t('No retained conversations found.')}
                     </p>
-                  )}
-                  <div className='grid gap-2'>
-                    {detail?.conversations.map((conversation) => (
-                      <button
-                        key={conversation.id}
-                        type='button'
-                        className='hover:bg-muted/50 flex w-full items-center justify-between gap-3 rounded-lg border p-3 text-left transition-colors'
-                        onClick={() =>
-                          setSelectedConversationID(conversation.id)
-                        }
-                      >
-                        <span className='min-w-0'>
-                          <span className='flex flex-wrap items-center gap-2'>
-                            <FileText className='size-4 shrink-0' />
-                            <span className='font-medium'>
-                              {t('Conversation')} #{conversation.id}
-                            </span>
-                            <Badge
-                              variant={
-                                conversation.status === 'blocked'
-                                  ? 'destructive'
-                                  : 'secondary'
-                              }
-                            >
-                              {statusLabel(conversation.status, t)}
-                            </Badge>
-                          </span>
-                          <span className='text-muted-foreground mt-1 block truncate text-xs'>
-                            {conversation.conversation_id}
-                          </span>
-                        </span>
-                        <span className='text-muted-foreground shrink-0 text-xs'>
-                          {displayTime(conversation.last_activity_at)}
-                        </span>
-                      </button>
-                    ))}
                   </div>
-                </div>
-
-                <div className='space-y-2'>
-                  <h4 className='font-semibold'>{t('User violations')}</h4>
-                  {detail?.violations.length === 0 && (
+                  {detail?.events.length === 0 && (
                     <p className='text-muted-foreground rounded-lg border p-4 text-sm'>
                       {t('No retained violations found.')}
                     </p>
                   )}
-                  {detail?.violations.map((violation) => (
-                    <div
-                      key={violation.id}
-                      className='flex flex-wrap items-center justify-between gap-2 rounded-lg border p-3 text-sm'
-                    >
-                      <div>
-                        <p className='font-medium'>
-                          {violation.severity} · {violation.reason_code}
-                        </p>
-                        <p className='text-muted-foreground text-xs'>
-                          {violation.categories} ·{' '}
-                          {Math.round(violation.confidence * 100)}% ·{' '}
-                          {displayTime(violation.created_at)}
-                        </p>
-                      </div>
-                      <Badge
-                        variant={
-                          violation.status === 'active'
-                            ? 'destructive'
-                            : 'secondary'
-                        }
+                  <div className='grid gap-2'>
+                    {detail?.events.map((event) => (
+                      <button
+                        key={event.id}
+                        type='button'
+                        className='hover:bg-muted/50 flex w-full items-center justify-between gap-3 rounded-lg border p-3 text-left transition-colors'
+                        onClick={() => setSelectedEventID(event.id)}
                       >
-                        {violation.status === 'active'
-                          ? t('Active')
-                          : t('Resolved')}
-                      </Badge>
-                    </div>
-                  ))}
+                        <span className='min-w-0'>
+                          <span className='flex flex-wrap items-center gap-2'>
+                            <span className='font-medium'>
+                              {event.severity ||
+                                event.reason_code ||
+                                t('Violation event')}
+                            </span>
+                            <Badge
+                              variant={
+                                event.status === 'active'
+                                  ? 'destructive'
+                                  : 'secondary'
+                              }
+                            >
+                              {statusLabel(event.status, t)}
+                            </Badge>
+                          </span>
+                          <span className='text-muted-foreground mt-1 block truncate text-xs'>
+                            {event.user_excerpt || event.assistant_excerpt}
+                          </span>
+                        </span>
+                        <span className='text-muted-foreground shrink-0 text-xs'>
+                          {displayTime(event.created_at)}
+                        </span>
+                      </button>
+                    ))}
+                  </div>
                 </div>
               </>
             )}
@@ -506,7 +413,7 @@ export function ContentModerationUserDetailDialog(props: Props) {
         onOpenChange={setDeleteDialogOpen}
         title={t('Delete history note')}
         desc={t(
-          'Delete this moderation history note? Original conversations and violation records will not be deleted.'
+          'Delete this moderation history note? Original violation events will not be deleted.'
         )}
         confirmText={t('Delete')}
         handleConfirm={() => deleteMutation.mutate()}

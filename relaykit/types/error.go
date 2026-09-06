@@ -38,12 +38,11 @@ const (
 type ErrorCode string
 
 const (
-	ErrorCodeInvalidRequest                        ErrorCode = "invalid_request"
-	ErrorCodeSensitiveWordsDetected                ErrorCode = "sensitive_words_detected"
-	ErrorCodeContentModerationBlocked              ErrorCode = "content_moderation_blocked"
-	ErrorCodeContentModerationConversationRequired ErrorCode = "content_moderation_conversation_required"
-	ErrorCodeContentModerationUnavailable          ErrorCode = "content_moderation_unavailable"
-	ErrorCodeViolationFeeGrokCSAM                  ErrorCode = "violation_fee.grok.csam"
+	ErrorCodeInvalidRequest               ErrorCode = "invalid_request"
+	ErrorCodeSensitiveWordsDetected       ErrorCode = "sensitive_words_detected"
+	ErrorCodeContentModerationBlocked     ErrorCode = "content_moderation_blocked"
+	ErrorCodeContentModerationUnavailable ErrorCode = "content_moderation_unavailable"
+	ErrorCodeViolationFeeGrokCSAM         ErrorCode = "violation_fee.grok.csam"
 
 	// new api error
 	ErrorCodeCountTokenFailed   ErrorCode = "count_token_failed"

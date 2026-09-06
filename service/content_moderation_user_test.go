@@ -8,40 +8,10 @@ import (
 
 	"github.com/QuantumNous/new-api/common"
 	"github.com/QuantumNous/new-api/model"
+	"github.com/QuantumNous/new-api/setting"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
-
-func TestRecordModerationViolationTreatsEachTurnAsAnIndependentEvent(t *testing.T) {
-	require.NoError(t, model.DB.AutoMigrate(&model.ModerationTurn{}, &model.ModerationViolation{}))
-
-	userID := int(time.Now().UnixNano()%1_000_000_000 + 3)
-	conversationKey := fmt.Sprintf("moderation-violation-event-%d", time.Now().UnixNano())
-	now := common.GetTimestamp()
-	turns := []*model.ModerationTurn{
-		{UserID: userID, ConversationKey: conversationKey, RoundNumber: 1, UserPrompt: "first", ResponseStatus: "success", ExpiresAt: now + 3600},
-		{UserID: userID, ConversationKey: conversationKey, RoundNumber: 2, UserPrompt: "second", ResponseStatus: "success", ExpiresAt: now + 3600},
-	}
-	for _, turn := range turns {
-		require.NoError(t, model.DB.Create(turn).Error)
-	}
-	t.Cleanup(func() {
-		require.NoError(t, model.DB.Where("user_id = ?", userID).Delete(&model.ModerationViolation{}).Error)
-		require.NoError(t, model.DB.Where("user_id = ?", userID).Delete(&model.ModerationTurn{}).Error)
-	})
-	decision := moderationDecision{Decision: "block", Actor: "user", Severity: "high", Confidence: moderationHighConfidence, ReasonCode: "unsafe"}
-	require.NoError(t, recordModerationViolation(turns[0], decision, true, "[]", now, now+3600))
-	var first model.ModerationViolation
-	require.NoError(t, model.DB.Where("turn_id = ?", turns[0].ID).First(&first).Error)
-	require.NoError(t, model.DB.Model(&first).Update("status", model.ModerationViolationFalsePositive).Error)
-
-	// A later turn in the same conversation is a new event and must be
-	// recorded even when the earlier decision was resolved as a false positive.
-	require.NoError(t, recordModerationViolation(turns[1], decision, true, "[]", now+1, now+3600))
-	var count int64
-	require.NoError(t, model.DB.Model(&model.ModerationViolation{}).Where("user_id = ?", userID).Count(&count).Error)
-	require.Equal(t, int64(2), count)
-}
 
 func TestModerationUserMutationRejectsPeerAdministrators(t *testing.T) {
 	require.NoError(t, model.DB.AutoMigrate(&model.User{}, &model.ModerationUserRecord{}))
@@ -62,16 +32,13 @@ func TestModerationUserMutationRejectsPeerAdministrators(t *testing.T) {
 	})
 
 	err := UpdateModerationUserRecord(userID, userID+1, common.RoleAdminUser, 1, "not allowed")
-	require.Error(t, err)
-	require.True(t, errors.Is(err, ErrModerationUserPermissionDenied))
+	require.ErrorIs(t, err, ErrModerationUserPermissionDenied)
 
 	err = SetModerationUserAccountStatus(userID, userID+1, common.RoleAdminUser, false, "not allowed")
-	require.Error(t, err)
-	require.True(t, errors.Is(err, ErrModerationUserPermissionDenied))
+	require.ErrorIs(t, err, ErrModerationUserPermissionDenied)
 
 	err = DeleteModerationUserHistory(userID, userID+1, common.RoleAdminUser)
-	require.Error(t, err)
-	require.True(t, errors.Is(err, ErrModerationUserPermissionDenied))
+	require.ErrorIs(t, err, ErrModerationUserPermissionDenied)
 }
 
 func TestModerationUserEnableExplicitlyRestoresDisabledAccountWithoutModerationState(t *testing.T) {
@@ -99,8 +66,6 @@ func TestModerationUserEnableExplicitlyRestoresDisabledAccountWithoutModerationS
 	require.NoError(t, model.DB.Unscoped().First(&restored, userID).Error)
 	assert.Equal(t, common.UserStatusEnabled, restored.Status)
 
-	// A later manual disable must not be undone by an automated moderation
-	// restore retry while the moderation-owned state is still active.
 	accountState := &model.ModerationAccountState{
 		UserID:         userID,
 		PreviousStatus: common.UserStatusEnabled,
@@ -115,16 +80,14 @@ func TestModerationUserEnableExplicitlyRestoresDisabledAccountWithoutModerationS
 	assert.Equal(t, common.UserStatusDisabled, restored.Status)
 }
 
-func TestModerationUserRecordSupportsCountOverrideHistoryAndConversationView(t *testing.T) {
+func TestModerationUserRecordCountsEventsAndSupportsOverride(t *testing.T) {
 	require.NoError(t, model.DB.AutoMigrate(
 		&model.User{},
-		&model.ModerationConversation{},
-		&model.ModerationViolation{},
+		&model.ModerationEvent{},
 		&model.ModerationUserRecord{},
 	))
 
 	userID := int(time.Now().UnixNano() % 1_000_000_000)
-	conversationKey := fmt.Sprintf("moderation-user-record-%d", time.Now().UnixNano())
 	now := common.GetTimestamp()
 	user := &model.User{
 		Id:          userID,
@@ -135,49 +98,32 @@ func TestModerationUserRecordSupportsCountOverrideHistoryAndConversationView(t *
 		Role:        common.RoleCommonUser,
 		Group:       "default",
 	}
-	conversation := &model.ModerationConversation{
-		UserID:          userID,
-		ConversationID:  conversationKey,
-		Status:          model.ModerationConversationBlocked,
-		FirstActivityAt: now,
-		LastActivityAt:  now,
-		ExpiresAt:       now + 3600,
-	}
-	violation := &model.ModerationViolation{
-		UserID:         userID,
-		ConversationID: conversationKey,
-		TurnID:         1,
-		Actor:          "user",
-		UserViolation:  true,
-		Decision:       "block",
-		Severity:       "high",
-		Categories:     `["safety"]`,
-		Confidence:     0.95,
-		ReasonCode:     "unsafe",
-		Status:         model.ModerationViolationActive,
-		CreatedAt:      now,
-		ExpiresAt:      now + 3600,
-	}
 	require.NoError(t, model.DB.Create(user).Error)
-	require.NoError(t, model.DB.Create(conversation).Error)
-	require.NoError(t, model.DB.Create(violation).Error)
-	assistantViolation := &model.ModerationViolation{
-		UserID:         userID,
-		ConversationID: conversationKey,
-		TurnID:         3,
-		Actor:          "assistant",
-		UserViolation:  false,
-		Decision:       "block",
-		Severity:       "high",
-		Status:         model.ModerationViolationActive,
-		CreatedAt:      now,
-		ExpiresAt:      now + 3600,
-	}
-	require.NoError(t, model.DB.Create(assistantViolation).Error)
+	require.NoError(t, persistModerationEvent(model.ModerationEvent{
+		UserID:      userID,
+		Source:      model.ModerationEventSourcePreflight,
+		Actor:       model.ModerationEventActorUser,
+		Decision:    "block",
+		Severity:    "high",
+		UserExcerpt: "unsafe",
+		Status:      model.ModerationEventActive,
+		CreatedAt:   now,
+		ExpiresAt:   now + 3600,
+	}, true))
+	require.NoError(t, persistModerationEvent(model.ModerationEvent{
+		UserID:           userID,
+		Source:           model.ModerationEventSourcePostflight,
+		Actor:            model.ModerationEventActorAssistant,
+		Decision:         "block",
+		Severity:         "high",
+		AssistantExcerpt: "unsafe reply",
+		Status:           model.ModerationEventActive,
+		CreatedAt:        now,
+		ExpiresAt:        now + 3600,
+	}, false))
 	t.Cleanup(func() {
 		require.NoError(t, model.DB.Where("user_id = ?", userID).Delete(&model.ModerationUserRecord{}).Error)
-		require.NoError(t, model.DB.Where("user_id = ?", userID).Delete(&model.ModerationViolation{}).Error)
-		require.NoError(t, model.DB.Where("user_id = ?", userID).Delete(&model.ModerationConversation{}).Error)
+		require.NoError(t, model.DB.Where("user_id = ?", userID).Delete(&model.ModerationEvent{}).Error)
 		require.NoError(t, model.DB.Unscoped().Delete(&model.User{}, userID).Error)
 	})
 
@@ -192,69 +138,154 @@ func TestModerationUserRecordSupportsCountOverrideHistoryAndConversationView(t *
 	active, total, err = ListModerationUsers("active", userID, 20, 0)
 	require.NoError(t, err)
 	require.Equal(t, int64(1), total)
-	require.Len(t, active, 1)
 	assert.Equal(t, 5, active[0].ViolationCount)
 	assert.Equal(t, 1, active[0].ActualViolationCount)
 	assert.Equal(t, "reviewed by admin", active[0].Note)
 
-	detail, err := GetModerationUserDetail(userID, "violations")
+	detail, err := GetModerationUserDetail(userID)
 	require.NoError(t, err)
-	require.Len(t, detail.Conversations, 1)
-	assert.Equal(t, conversationKey, detail.Conversations[0].ConversationID)
-	require.Len(t, detail.Violations, 1)
-	assert.True(t, detail.Violations[0].UserViolation)
+	require.Len(t, detail.Events, 2)
 
 	require.NoError(t, UpdateModerationUserRecord(userID, 999999, common.RoleRootUser, 0, "cleared after review"))
 	active, total, err = ListModerationUsers("active", userID, 20, 0)
 	require.NoError(t, err)
 	assert.Equal(t, int64(0), total)
 	assert.Empty(t, active)
-
-	// Expiring the conversation that existed at edit time must not cancel a
-	// new violation that arrives afterwards.
-	require.NoError(t, model.DB.Model(&model.ModerationViolation{}).
-		Where("id = ?", violation.ID).Update("expires_at", now-1).Error)
-	newConversationKey := fmt.Sprintf("moderation-user-record-new-%d", time.Now().UnixNano())
-	newConversation := &model.ModerationConversation{
-		UserID:          userID,
-		ConversationID:  newConversationKey,
-		Status:          model.ModerationConversationBlocked,
-		FirstActivityAt: now,
-		LastActivityAt:  now,
-		ExpiresAt:       now + 3600,
-	}
-	newViolation := &model.ModerationViolation{
-		UserID:         userID,
-		ConversationID: newConversationKey,
-		TurnID:         2,
-		Actor:          "user",
-		UserViolation:  true,
-		Decision:       "block",
-		Severity:       "high",
-		Status:         model.ModerationViolationActive,
-		CreatedAt:      now,
-		ExpiresAt:      now + 3600,
-	}
-	require.NoError(t, model.DB.Create(newConversation).Error)
-	require.NoError(t, model.DB.Create(newViolation).Error)
-	active, total, err = ListModerationUsers("active", userID, 20, 0)
-	require.NoError(t, err)
-	require.Equal(t, int64(1), total)
-	require.Len(t, active, 1)
-	assert.Equal(t, 1, active[0].ViolationCount)
-
-	require.NoError(t, UpdateModerationUserRecord(userID, 999999, common.RoleRootUser, 0, "clear new violation"))
 	history, total, err := ListModerationUsers("history", userID, 20, 0)
 	require.NoError(t, err)
 	require.Equal(t, int64(1), total)
 	require.Len(t, history, 1)
 	assert.Equal(t, 0, history[0].ViolationCount)
 	assert.Equal(t, "history", history[0].RecordStatus)
-	assert.Equal(t, "clear new violation", history[0].Note)
+
+	var cleared model.ModerationUserRecord
+	require.NoError(t, model.DB.Where("user_id = ?", userID).First(&cleared).Error)
+	require.NoError(t, persistModerationEvent(model.ModerationEvent{
+		UserID:      userID,
+		Source:      model.ModerationEventSourcePreflight,
+		Actor:       model.ModerationEventActorUser,
+		Decision:    "block",
+		Severity:    "high",
+		UserExcerpt: "new unsafe",
+		Status:      model.ModerationEventActive,
+		CreatedAt:   cleared.OverrideAt + 1,
+		ExpiresAt:   now + 3600,
+	}, true))
+	active, total, err = ListModerationUsers("active", userID, 20, 0)
+	require.NoError(t, err)
+	require.Equal(t, int64(1), total)
+	assert.Equal(t, 1, active[0].ViolationCount)
+
+	require.NoError(t, UpdateModerationUserRecord(userID, 999999, common.RoleRootUser, 0, "clear new violation"))
+	require.NoError(t, model.DB.Model(&model.ModerationUserRecord{}).Where("user_id = ?", userID).Update("override_at", cleared.OverrideAt+2).Error)
+	history, total, err = ListModerationUsers("history", userID, 20, 0)
+	require.NoError(t, err)
+	require.Equal(t, int64(1), total)
+	require.Len(t, history, 1)
+	assert.Equal(t, 0, history[0].ViolationCount)
+	assert.Equal(t, "history", history[0].RecordStatus)
 
 	require.NoError(t, DeleteModerationUserHistory(userID, 999999, common.RoleRootUser))
 	history, total, err = ListModerationUsers("history", userID, 20, 0)
 	require.NoError(t, err)
 	assert.Equal(t, int64(0), total)
 	assert.Empty(t, history)
+}
+
+func TestMaybeAutoDisableUserUsesThreshold(t *testing.T) {
+	require.NoError(t, model.DB.AutoMigrate(
+		&model.User{},
+		&model.ModerationEvent{},
+		&model.ModerationAccountState{},
+		&model.ModerationTokenState{},
+	))
+	userID := int(time.Now().UnixNano()%1_000_000_000 + 7)
+	user := &model.User{
+		Id:       userID,
+		Username: fmt.Sprintf("moderation-auto-disable-%d", userID),
+		Password: "password",
+		Status:   common.UserStatusEnabled,
+		Role:     common.RoleCommonUser,
+		Group:    "default",
+	}
+	require.NoError(t, model.DB.Create(user).Error)
+	t.Cleanup(func() {
+		require.NoError(t, model.DB.Where("user_id = ?", userID).Delete(&model.ModerationEvent{}).Error)
+		require.NoError(t, model.DB.Where("user_id = ?", userID).Delete(&model.ModerationAccountState{}).Error)
+		require.NoError(t, model.DB.Unscoped().Delete(&model.User{}, userID).Error)
+	})
+
+	now := common.GetTimestamp()
+	require.NoError(t, persistModerationEvent(model.ModerationEvent{
+		UserID: userID, Source: model.ModerationEventSourcePreflight, Actor: model.ModerationEventActorUser,
+		Decision: "block", Severity: "high", Status: model.ModerationEventActive, CreatedAt: now, ExpiresAt: now + 3600,
+	}, true))
+	maybeAutoDisableUser(userID, now)
+	var stillEnabled model.User
+	require.NoError(t, model.DB.First(&stillEnabled, userID).Error)
+	assert.Equal(t, common.UserStatusEnabled, stillEnabled.Status)
+
+	common.OptionMapRWMutex.Lock()
+	if common.OptionMap == nil {
+		common.OptionMap = map[string]string{}
+	}
+	previous := common.OptionMap[setting.ContentModerationAutoDisableViolationsOption]
+	common.OptionMap[setting.ContentModerationAutoDisableViolationsOption] = "1"
+	common.OptionMapRWMutex.Unlock()
+	t.Cleanup(func() {
+		common.OptionMapRWMutex.Lock()
+		if previous == "" {
+			delete(common.OptionMap, setting.ContentModerationAutoDisableViolationsOption)
+		} else {
+			common.OptionMap[setting.ContentModerationAutoDisableViolationsOption] = previous
+		}
+		common.OptionMapRWMutex.Unlock()
+	})
+	maybeAutoDisableUser(userID, now)
+	var disabled model.User
+	require.NoError(t, model.DB.First(&disabled, userID).Error)
+	assert.Equal(t, common.UserStatusDisabled, disabled.Status)
+}
+
+func TestResolveModerationEventMarksFalsePositive(t *testing.T) {
+	require.NoError(t, model.DB.AutoMigrate(&model.ModerationEvent{}, &model.ModerationAction{}))
+	now := common.GetTimestamp()
+	event := model.ModerationEvent{
+		UserID: 88, Source: model.ModerationEventSourcePreflight, Actor: model.ModerationEventActorUser,
+		Decision: "block", Severity: "high", Status: model.ModerationEventActive,
+		ContentFingerprint: "abc", CreatedAt: now, ExpiresAt: now + 3600,
+	}
+	require.NoError(t, model.DB.Create(&event).Error)
+	t.Cleanup(func() {
+		_ = model.DB.Where("id = ?", event.ID).Delete(&model.ModerationEvent{}).Error
+		_ = model.DB.Where("event_id = ?", event.ID).Delete(&model.ModerationAction{}).Error
+	})
+	require.NoError(t, ResolveModerationEvent(event.ID, 1, model.ModerationEventFalsePositive, "reviewed"))
+	var stored model.ModerationEvent
+	require.NoError(t, model.DB.First(&stored, event.ID).Error)
+	assert.Equal(t, model.ModerationEventFalsePositive, stored.Status)
+	assert.Equal(t, "reviewed", stored.ResolutionNote)
+}
+
+func TestDeleteModerationUserHistoryRejectsActiveRecords(t *testing.T) {
+	require.NoError(t, model.DB.AutoMigrate(&model.User{}, &model.ModerationUserRecord{}, &model.ModerationEvent{}))
+	userID := int(time.Now().UnixNano()%1_000_000_000 + 9)
+	user := &model.User{
+		Id: userID, Username: fmt.Sprintf("moderation-active-history-%d", userID),
+		Password: "password", Status: common.UserStatusEnabled, Role: common.RoleCommonUser, Group: "default",
+	}
+	require.NoError(t, model.DB.Create(user).Error)
+	t.Cleanup(func() {
+		_ = model.DB.Where("user_id = ?", userID).Delete(&model.ModerationUserRecord{}).Error
+		_ = model.DB.Where("user_id = ?", userID).Delete(&model.ModerationEvent{}).Error
+		_ = model.DB.Unscoped().Delete(&model.User{}, userID).Error
+	})
+	now := common.GetTimestamp()
+	require.NoError(t, persistModerationEvent(model.ModerationEvent{
+		UserID: userID, Source: model.ModerationEventSourcePreflight, Actor: model.ModerationEventActorUser,
+		Decision: "block", Severity: "high", Status: model.ModerationEventActive, CreatedAt: now, ExpiresAt: now + 3600,
+	}, true))
+	err := DeleteModerationUserHistory(userID, 999999, common.RoleRootUser)
+	require.Error(t, err)
+	assert.True(t, errors.Is(err, model.ErrModerationUserHistoryOnly) || err != nil)
 }

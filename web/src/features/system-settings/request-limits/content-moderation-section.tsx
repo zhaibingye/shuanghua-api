@@ -18,7 +18,7 @@ For commercial licensing, please contact support@quantumnous.com
 */
 import { zodResolver } from '@hookform/resolvers/zod'
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
-import { Copy, Eye, EyeOff, Loader2 } from 'lucide-react'
+import { CheckCircle2, Copy, Eye, EyeOff, Loader2, XCircle } from 'lucide-react'
 import { useCallback, useEffect, useState, type ChangeEvent } from 'react'
 import { useForm } from 'react-hook-form'
 import { useTranslation } from 'react-i18next'
@@ -45,6 +45,7 @@ import {
 } from '@/components/ui/select'
 import { Separator } from '@/components/ui/separator'
 import { Switch } from '@/components/ui/switch'
+import { Textarea } from '@/components/ui/textarea'
 import {
   SecureVerificationDialog,
   useSecureVerification,
@@ -54,6 +55,7 @@ import { useCopyToClipboard } from '@/hooks/use-copy-to-clipboard'
 import {
   getContentModerationKey,
   getContentModerationSettings,
+  testContentModerationKeys,
   updateContentModerationSettings,
 } from '../api'
 import {
@@ -63,6 +65,7 @@ import {
 } from '../components/settings-form-layout'
 import { SettingsPageFormActions } from '../components/settings-page-context'
 import { SettingsSection } from '../components/settings-section'
+import type { ModerationKeyTestResult } from '../types'
 
 const contentModerationSchema = z.object({
   enabled: z.boolean(),
@@ -70,12 +73,14 @@ const contentModerationSchema = z.object({
   user_whitelist: z.string().max(2048),
   violation_retention_days: z.number().int().min(1).max(365),
   base_url: z.string().max(2048),
-  api_key: z.string().max(4096),
+  api_key: z.string().max(32768),
   model: z.string().max(128),
   preflight_enabled: z.boolean(),
+  postflight_enabled: z.boolean(),
   failure_mode: z.enum(['open', 'closed']),
   timeout_seconds: z.number().int().min(1).max(120),
   max_retries: z.number().int().min(1).max(5),
+  auto_disable_violations: z.number().int().min(0).max(1000),
 })
 
 type ContentModerationFormValues = z.infer<typeof contentModerationSchema>
@@ -93,9 +98,11 @@ const fallbackValues: ContentModerationFormValues = {
   api_key: '',
   model: 'omni-moderation-latest',
   preflight_enabled: true,
+  postflight_enabled: false,
   failure_mode: 'closed',
   timeout_seconds: 30,
   max_retries: 3,
+  auto_disable_violations: 0,
 }
 
 function numberField(field: { onChange: (value: number) => void }) {
@@ -111,7 +118,10 @@ export function ContentModerationSection(props: ContentModerationSectionProps) {
 
   const [moderationKey, setModerationKey] = useState<string | null>(null)
   const [isKeyLoading, setIsKeyLoading] = useState(false)
-  const [showInputKey, setShowInputKey] = useState(false)
+  const [isTestingKeys, setIsTestingKeys] = useState(false)
+  const [keyTestResults, setKeyTestResults] = useState<
+    ModerationKeyTestResult[] | null
+  >(null)
 
   const {
     open: verificationOpen,
@@ -156,11 +166,14 @@ export function ContentModerationSection(props: ContentModerationSectionProps) {
       api_key: '',
       model: data.model || 'omni-moderation-latest',
       preflight_enabled: data.preflight_enabled ?? true,
+      postflight_enabled: data.postflight_enabled ?? false,
       failure_mode: data.failure_mode ?? 'closed',
       timeout_seconds: data.timeout_seconds ?? 30,
       max_retries: data.max_retries ?? 3,
+      auto_disable_violations: data.auto_disable_violations ?? 0,
     })
     setModerationKey(null)
+    setKeyTestResults(null)
   }, [form, query.data])
 
   const fetchKey = useCallback(
@@ -205,6 +218,49 @@ export function ContentModerationSection(props: ContentModerationSectionProps) {
       }
     }
   }, [fetchKey, t, withVerification])
+
+  const handleTestKeys = useCallback(async () => {
+    const values = form.getValues()
+    const hasDraftKeys = values.api_key.trim() !== ''
+    const hasSavedKeys = Boolean(query.data?.data.api_key_configured)
+    if (!hasDraftKeys && !hasSavedKeys) {
+      toast.error(t('No moderation API keys to test'))
+      return
+    }
+    setIsTestingKeys(true)
+    setKeyTestResults(null)
+    try {
+      const res = await testContentModerationKeys({
+        base_url: values.base_url,
+        model: values.model,
+        api_key: values.api_key,
+      })
+      if (!res.success) {
+        throw new Error(res.message || t('Failed to test moderation keys'))
+      }
+      const results = res.data?.results ?? []
+      setKeyTestResults(results)
+      const passed = results.filter((result) => result.ok).length
+      if (results.length > 0 && passed === results.length) {
+        toast.success(t('All moderation keys passed'))
+      } else {
+        toast.error(
+          t('{{passed}} of {{total}} keys passed', {
+            passed,
+            total: results.length,
+          })
+        )
+      }
+    } catch (error) {
+      toast.error(
+        error instanceof Error
+          ? error.message
+          : t('Failed to test moderation keys')
+      )
+    } finally {
+      setIsTestingKeys(false)
+    }
+  }, [form, query.data?.data.api_key_configured, t])
 
   const onSubmit = async (values: ContentModerationFormValues) => {
     if (
@@ -323,115 +379,165 @@ export function ContentModerationSection(props: ContentModerationSectionProps) {
             <FormField
               control={form.control}
               name='api_key'
-              render={({ field }) => (
-                <FormItem>
-                  <FormLabel>{t('Moderation API key')}</FormLabel>
-                  <div className='flex items-center gap-2'>
+              render={({ field }) => {
+                const apiKeyCount = query.data?.data.api_key_count ?? 0
+                const apiKeyConfigured = Boolean(
+                  query.data?.data.api_key_configured
+                )
+                let keysDescription = t(
+                  'Enter one moderation API key per line. Requests rotate across keys to spread rate limits.'
+                )
+                if (apiKeyConfigured && apiKeyCount > 1) {
+                  keysDescription = t(
+                    '{{count}} keys currently configured. Leave blank to keep current keys.',
+                    { count: apiKeyCount }
+                  )
+                } else if (apiKeyConfigured) {
+                  keysDescription = t(
+                    'A moderation API key is currently configured. Leave blank to keep current key.'
+                  )
+                }
+                return (
+                  <FormItem>
+                    <div className='flex flex-col gap-2 sm:flex-row sm:items-center sm:justify-between'>
+                      <FormLabel>{t('Moderation API keys')}</FormLabel>
+                      <Button
+                        type='button'
+                        variant='outline'
+                        size='sm'
+                        onClick={handleTestKeys}
+                        disabled={
+                          isTestingKeys ||
+                          (field.value.trim() === '' && !apiKeyConfigured)
+                        }
+                      >
+                        {isTestingKeys ? (
+                          <Loader2 className='mr-2 h-4 w-4 animate-spin' />
+                        ) : null}
+                        {t('Test keys')}
+                      </Button>
+                    </div>
                     <FormControl>
-                      <Input
-                        type={showInputKey ? 'text' : 'password'}
-                        autoComplete='new-password'
+                      <Textarea
+                        autoComplete='off'
+                        spellCheck={false}
+                        rows={4}
+                        className='font-mono text-xs'
                         placeholder={
-                          query.data?.data.api_key_configured
-                            ? t('Leave empty to keep existing key')
-                            : t('Enter the moderation API key')
+                          apiKeyConfigured
+                            ? t('Leave empty to keep existing keys')
+                            : t('One API key per line')
                         }
                         {...field}
                       />
                     </FormControl>
-                    <Button
-                      type='button'
-                      variant='outline'
-                      size='icon'
-                      onClick={() => setShowInputKey(!showInputKey)}
-                      aria-label={showInputKey ? t('Hide') : t('Show')}
-                      title={showInputKey ? t('Hide') : t('Show')}
-                    >
-                      {showInputKey ? (
-                        <EyeOff className='h-4 w-4' />
-                      ) : (
-                        <Eye className='h-4 w-4' />
-                      )}
-                    </Button>
-                  </div>
-                  <FormDescription>
-                    {query.data?.data.api_key_configured
-                      ? t(
-                          'A moderation API key is currently configured. Leave blank to keep current key.'
-                        )
-                      : t(
-                          'Enter the moderation API key to enable content inspection.'
-                        )}
-                  </FormDescription>
-                  <FormMessage />
+                    <FormDescription>{keysDescription}</FormDescription>
+                    <FormMessage />
 
-                  {query.data?.data.api_key_configured && (
-                    <div className='border-border/60 mt-3 flex flex-col gap-3 rounded-lg border border-dashed p-3'>
-                      <div className='flex flex-col gap-2 sm:flex-row sm:items-center sm:justify-between'>
-                        <div>
-                          <p className='text-sm font-medium'>
-                            {t('Current key')}
-                          </p>
-                          <p className='text-muted-foreground text-xs'>
-                            {t(
-                              'Verification required to reveal the saved key.'
-                            )}
-                          </p>
-                        </div>
-                        <div className='flex items-center gap-2'>
-                          <Button
-                            type='button'
-                            variant='outline'
-                            size='sm'
-                            onClick={handleRevealKey}
-                            disabled={isKeyLoading || verificationState.loading}
+                    {keyTestResults && keyTestResults.length > 0 && (
+                      <ul className='border-border/60 mt-3 space-y-2 rounded-lg border p-3'>
+                        {keyTestResults.map((result) => (
+                          <li
+                            key={`${result.index}-${result.key_preview}`}
+                            className='flex items-start gap-2 text-sm'
                           >
-                            {isKeyLoading || verificationState.loading ? (
-                              <Loader2 className='mr-2 h-4 w-4 animate-spin' />
+                            {result.ok ? (
+                              <CheckCircle2 className='mt-0.5 h-4 w-4 shrink-0 text-green-600' />
                             ) : (
-                              <Eye className='mr-2 h-4 w-4' />
+                              <XCircle className='text-destructive mt-0.5 h-4 w-4 shrink-0' />
                             )}
-                            {t('Reveal key')}
-                          </Button>
-                          {moderationKey && (
+                            <div className='min-w-0 flex-1'>
+                              <p className='font-mono text-xs'>
+                                {result.key_preview}
+                                <span className='text-muted-foreground ml-2'>
+                                  {result.latency_ms}ms
+                                </span>
+                              </p>
+                              {result.error ? (
+                                <p className='text-destructive mt-1 text-xs break-all'>
+                                  {result.error}
+                                </p>
+                              ) : null}
+                            </div>
+                          </li>
+                        ))}
+                      </ul>
+                    )}
+
+                    {apiKeyConfigured && (
+                      <div className='border-border/60 mt-3 flex flex-col gap-3 rounded-lg border border-dashed p-3'>
+                        <div className='flex flex-col gap-2 sm:flex-row sm:items-center sm:justify-between'>
+                          <div>
+                            <p className='text-sm font-medium'>
+                              {t('Current keys')}
+                            </p>
+                            <p className='text-muted-foreground text-xs'>
+                              {t(
+                                'Verification required to reveal the saved keys.'
+                              )}
+                            </p>
+                          </div>
+                          <div className='flex items-center gap-2'>
                             <Button
                               type='button'
-                              variant='ghost'
+                              variant='outline'
                               size='sm'
-                              onClick={() => setModerationKey(null)}
+                              onClick={handleRevealKey}
+                              disabled={
+                                isKeyLoading || verificationState.loading
+                              }
                             >
-                              <EyeOff className='mr-2 h-4 w-4' />
-                              {t('Hide')}
+                              {isKeyLoading || verificationState.loading ? (
+                                <Loader2 className='mr-2 h-4 w-4 animate-spin' />
+                              ) : (
+                                <Eye className='mr-2 h-4 w-4' />
+                              )}
+                              {t('Reveal keys')}
                             </Button>
-                          )}
+                            {moderationKey && (
+                              <Button
+                                type='button'
+                                variant='ghost'
+                                size='sm'
+                                onClick={() => setModerationKey(null)}
+                              >
+                                <EyeOff className='mr-2 h-4 w-4' />
+                                {t('Hide')}
+                              </Button>
+                            )}
+                          </div>
                         </div>
+                        {moderationKey && (
+                          <div className='flex items-start gap-2'>
+                            <Textarea
+                              readOnly
+                              value={moderationKey}
+                              rows={Math.min(
+                                8,
+                                Math.max(2, moderationKey.split('\n').length)
+                              )}
+                              className='font-mono text-xs'
+                            />
+                            <Button
+                              type='button'
+                              variant='outline'
+                              size='icon-sm'
+                              onClick={() => {
+                                copyToClipboard(moderationKey)
+                                toast.success(t('Key copied to clipboard'))
+                              }}
+                              aria-label={t('Copy')}
+                              title={t('Copy')}
+                            >
+                              <Copy className='h-4 w-4' />
+                            </Button>
+                          </div>
+                        )}
                       </div>
-                      {moderationKey && (
-                        <div className='flex items-center gap-2'>
-                          <Input
-                            readOnly
-                            value={moderationKey}
-                            className='font-mono text-xs'
-                          />
-                          <Button
-                            type='button'
-                            variant='outline'
-                            size='icon-sm'
-                            onClick={() => {
-                              copyToClipboard(moderationKey)
-                              toast.success(t('Key copied to clipboard'))
-                            }}
-                            aria-label={t('Copy')}
-                            title={t('Copy')}
-                          >
-                            <Copy className='h-4 w-4' />
-                          </Button>
-                        </div>
-                      )}
-                    </div>
-                  )}
-                </FormItem>
-              )}
+                    )}
+                  </FormItem>
+                )
+              }}
             />
           </div>
 
@@ -459,7 +565,32 @@ export function ContentModerationSection(props: ContentModerationSectionProps) {
                     </FormLabel>
                     <FormDescription>
                       {t(
-                        'Use the OpenAI Moderations API synchronously before forwarding a request. Disable only for audit-only mode.'
+                        'Use the OpenAI Moderations API on the latest user message before forwarding a request. Disable only for audit-only mode.'
+                      )}
+                    </FormDescription>
+                  </SettingsSwitchContent>
+                  <FormControl>
+                    <Switch
+                      checked={field.value}
+                      onCheckedChange={field.onChange}
+                    />
+                  </FormControl>
+                </SettingsSwitchItem>
+              )}
+            />
+
+            <FormField
+              control={form.control}
+              name='postflight_enabled'
+              render={({ field }) => (
+                <SettingsSwitchItem>
+                  <SettingsSwitchContent>
+                    <FormLabel>
+                      {t('Review assistant replies after the response')}
+                    </FormLabel>
+                    <FormDescription>
+                      {t(
+                        'Optional. Only flagged assistant output is stored as a truncated excerpt. This does not block the current request.'
                       )}
                     </FormDescription>
                   </SettingsSwitchContent>
@@ -510,7 +641,7 @@ export function ContentModerationSection(props: ContentModerationSectionProps) {
               )}
             />
 
-            <div className='grid gap-4 sm:grid-cols-3'>
+            <div className='grid gap-4 sm:grid-cols-2 lg:grid-cols-4'>
               <FormField
                 control={form.control}
                 name='timeout_seconds'
@@ -547,6 +678,11 @@ export function ContentModerationSection(props: ContentModerationSectionProps) {
                         onChange={numberField(field)}
                       />
                     </FormControl>
+                    <FormDescription>
+                      {t(
+                        'Retries switch to the next key when the provider rate-limits or returns a server error.'
+                      )}
+                    </FormDescription>
                     <FormMessage />
                   </FormItem>
                 )}
@@ -567,6 +703,33 @@ export function ContentModerationSection(props: ContentModerationSectionProps) {
                         onChange={numberField(field)}
                       />
                     </FormControl>
+                    <FormMessage />
+                  </FormItem>
+                )}
+              />
+              <FormField
+                control={form.control}
+                name='auto_disable_violations'
+                render={({ field }) => (
+                  <FormItem>
+                    <FormLabel>
+                      {t('Auto-disable after N violations')}
+                    </FormLabel>
+                    <FormControl>
+                      <Input
+                        type='number'
+                        min={0}
+                        max={1000}
+                        step={1}
+                        {...field}
+                        onChange={numberField(field)}
+                      />
+                    </FormControl>
+                    <FormDescription>
+                      {t(
+                        '0 keeps auto-disable off. Repeat user violations within the retention window can disable the account and its tokens.'
+                      )}
+                    </FormDescription>
                     <FormMessage />
                   </FormItem>
                 )}
@@ -627,7 +790,7 @@ export function ContentModerationSection(props: ContentModerationSectionProps) {
                   </FormControl>
                   <FormDescription>
                     {t(
-                      'These user IDs completely bypass content moderation: their requests are not reviewed and no moderation conversation records are saved. Separate IDs with commas or spaces. The root administrator (ID: 1) is always excluded.'
+                      'These user IDs completely bypass content moderation: their requests are not reviewed and no violation events are saved. Separate IDs with commas or spaces. The root administrator (ID: 1) is always excluded.'
                     )}
                   </FormDescription>
                   <FormMessage />

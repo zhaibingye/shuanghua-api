@@ -186,6 +186,10 @@ func InitOptionMap() {
 	common.OptionMap[setting.ContentModerationModelOption] = ""
 	common.OptionMap[setting.ContentModerationTimeoutSecondsOption] = strconv.Itoa(setting.DefaultContentModerationTimeoutSeconds)
 	common.OptionMap[setting.ContentModerationMaxRetriesOption] = strconv.Itoa(setting.DefaultContentModerationMaxRetries)
+	common.OptionMap[setting.ContentModerationPreflightOption] = strconv.FormatBool(setting.DefaultContentModerationPreflight)
+	common.OptionMap[setting.ContentModerationPostflightOption] = strconv.FormatBool(setting.DefaultContentModerationPostflight)
+	common.OptionMap[setting.ContentModerationFailureModeOption] = setting.DefaultContentModerationFailureMode
+	common.OptionMap[setting.ContentModerationAutoDisableViolationsOption] = strconv.Itoa(setting.DefaultContentModerationAutoDisableViolations)
 
 	// 自动添加所有注册的模型配置
 	modelConfigs := config.GlobalConfig.ExportAllConfigs()

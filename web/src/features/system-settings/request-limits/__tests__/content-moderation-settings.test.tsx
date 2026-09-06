@@ -27,6 +27,7 @@ import { ContentModerationSection } from '../content-moderation-section'
 const mocks = vi.hoisted(() => ({
   getContentModerationSettings: vi.fn(),
   getContentModerationKey: vi.fn(),
+  testContentModerationKeys: vi.fn(),
   updateContentModerationSettings: vi.fn(),
 }))
 
@@ -107,7 +108,7 @@ describe('content moderation settings', () => {
     }
     const { actionsContainer } = renderSettings(enabledResponse)
 
-    await screen.findByLabelText('Moderation API key')
+    await screen.findByLabelText('Moderation API keys')
     const saveButton = await screen.findByRole('button', {
       name: 'Save content moderation settings',
     })
@@ -125,7 +126,11 @@ describe('content moderation settings', () => {
   test('reveals the configured API key on click', async () => {
     const configuredResponse: ContentModerationSettingsResponse = {
       ...settingsResponse,
-      data: { ...settingsResponse.data, api_key_configured: true },
+      data: {
+        ...settingsResponse.data,
+        api_key_configured: true,
+        api_key_count: 2,
+      },
     }
     mocks.getContentModerationKey.mockResolvedValue({
       success: true,
@@ -135,13 +140,46 @@ describe('content moderation settings', () => {
     const { actionsContainer } = renderSettings(configuredResponse)
 
     const revealButton = await screen.findByRole('button', {
-      name: 'Reveal key',
+      name: 'Reveal keys',
     })
     fireEvent.click(revealButton)
 
     expect(
       await screen.findByDisplayValue('sk-revealed-moderation-key')
     ).toBeInTheDocument()
+    actionsContainer.remove()
+  })
+
+  test('tests configured moderation keys', async () => {
+    const configuredResponse: ContentModerationSettingsResponse = {
+      ...settingsResponse,
+      data: {
+        ...settingsResponse.data,
+        api_key_configured: true,
+        api_key_count: 1,
+      },
+    }
+    mocks.testContentModerationKeys.mockResolvedValue({
+      success: true,
+      data: {
+        results: [
+          {
+            index: 0,
+            key_preview: 'sk-t...lpha',
+            ok: true,
+            status: 200,
+            latency_ms: 42,
+          },
+        ],
+      },
+    })
+
+    const { actionsContainer } = renderSettings(configuredResponse)
+    const testButton = await screen.findByRole('button', { name: 'Test keys' })
+    fireEvent.click(testButton)
+
+    expect(await screen.findByText('sk-t...lpha')).toBeInTheDocument()
+    expect(mocks.testContentModerationKeys).toHaveBeenCalled()
     actionsContainer.remove()
   })
 })

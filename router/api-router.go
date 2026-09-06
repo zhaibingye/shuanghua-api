@@ -290,11 +290,13 @@ func SetApiRouter(router *gin.Engine) {
 				middleware.SecureVerificationRequired(),
 				controller.GetContentModerationKey,
 			)
-			moderationRoute.GET("/conversations", middleware.AdminAuth(), controller.ListContentModerationConversations)
-			moderationRoute.GET("/conversations/:id", middleware.AdminAuth(), controller.GetContentModerationConversation)
-			moderationRoute.POST("/conversations/:id/unblock", middleware.AdminAuth(), controller.UnblockContentModerationConversation)
-			moderationRoute.GET("/violations", middleware.AdminAuth(), controller.ListContentModerationViolations)
-			moderationRoute.POST("/violations/:id/resolve", middleware.AdminAuth(), controller.ResolveContentModerationViolation)
+			moderationRoute.POST("/keys/test",
+				middleware.RootAuth(),
+				middleware.CriticalRateLimit(),
+				controller.TestContentModerationKeys,
+			)
+			moderationRoute.GET("/events", middleware.AdminAuth(), controller.ListContentModerationEvents)
+			moderationRoute.POST("/events/:id/resolve", middleware.AdminAuth(), controller.ResolveContentModerationEvent)
 			moderationRoute.GET("/users", middleware.AdminAuth(), controller.ListContentModerationUsers)
 			moderationRoute.GET("/users/:id", middleware.AdminAuth(), controller.GetContentModerationUser)
 			moderationRoute.PUT("/users/:id", middleware.AdminAuth(), controller.UpdateContentModerationUser)

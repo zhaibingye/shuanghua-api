@@ -39,10 +39,13 @@ export type ContentModerationSettings = {
   base_url: string
   model: string
   preflight_enabled?: boolean
+  postflight_enabled?: boolean
   failure_mode?: 'open' | 'closed'
   timeout_seconds: number
   max_retries: number
+  auto_disable_violations?: number
   api_key_configured: boolean
+  api_key_count?: number
 }
 
 export type ContentModerationSettingsResponse = {
@@ -52,117 +55,66 @@ export type ContentModerationSettingsResponse = {
 
 export type ContentModerationSettingsUpdate = Omit<
   ContentModerationSettings,
-  'api_key_configured' | 'channel_ids' | 'user_whitelist_ids'
+  'api_key_configured' | 'api_key_count' | 'channel_ids' | 'user_whitelist_ids'
 > & {
   api_key: string
 }
 
-export type ModerationConversation = {
-  id: number
-  user_id: number
-  conversation_id: string
-  status: string
-  first_activity_at: number
-  last_activity_at: number
-  expires_at: number
-  blocked_at?: number
-  blocked_reason?: string
+export type ModerationKeyTestResult = {
+  index: number
+  key_preview: string
+  ok: boolean
+  status: number
+  latency_ms: number
+  error?: string
 }
 
-export type ModerationTurn = {
+export type ModerationKeyTestResponse = {
+  success: boolean
+  message?: string
+  data?: {
+    results: ModerationKeyTestResult[]
+  }
+}
+
+export type ModerationEvent = {
   id: number
-  round_number: number
-  channel_id?: number
+  user_id: number
   request_id: string
-  system_prompt: string
-  user_prompt: string
-  assistant_reply: string
-  response_status: string
+  channel_id?: number
+  model: string
   relay_format: string
-  model: string
-  review_required: boolean
-  review_trigger?: string
-  created_at: number
-  content_unavailable?: boolean
-}
-
-export type ModerationJob = {
-  id: number
-  turn_id: number
-  status: string
-  attempts: number
-  next_attempt_at: number
-  provider: string
-  model: string
-  prompt_version: string
-  expires_at: number
-  request_payload?: string
-  response_payload?: string
-  request_payload_unavailable?: boolean
-  response_payload_unavailable?: boolean
-  last_error?: string
-}
-
-export type ModerationViolation = {
-  id: number
-  user_id: number
-  conversation_id: string
-  turn_id: number
+  source: string
   actor: string
-  user_violation: boolean
   decision: string
   severity: string
   categories: string
   confidence: number
   reason_code: string
+  user_excerpt: string
+  assistant_excerpt: string
+  image_count: number
   status: string
+  resolved_at?: number
+  resolved_by?: number
+  resolution_note?: string
   created_at: number
+  expires_at: number
 }
 
 export type ModerationAction = {
   id: number
   admin_id: number
   user_id?: number
-  conversation_id?: string
-  violation_id?: number
+  event_id?: number
   action: string
   reason?: string
   created_at: number
 }
 
-export type ModerationNotification = {
-  id: number
-  alert_type: string
-  recipient: string
-  status: string
-  attempts: number
-  next_attempt_at?: number
-  last_error?: string
-}
-
-export type ModerationConversationDetail = {
-  conversation: ModerationConversation
-  turns: ModerationTurn[]
-  jobs: ModerationJob[]
-  violations: ModerationViolation[]
-  actions: ModerationAction[]
-  notifications: ModerationNotification[]
-}
-
-export type ModerationConversationListResponse = {
+export type ModerationEventListResponse = {
   success: boolean
-  data: ModerationConversation[]
-  total: number
-}
-
-export type ModerationConversationDetailResponse = {
-  success: boolean
-  data: ModerationConversationDetail
-}
-
-export type ModerationViolationListResponse = {
-  success: boolean
-  data: ModerationViolation[]
+  data: ModerationEvent[]
   total: number
 }
 
@@ -186,8 +138,7 @@ export type ModerationUser = {
 
 export type ModerationUserDetail = {
   user: ModerationUser
-  conversations: ModerationConversation[]
-  violations: ModerationViolation[]
+  events: ModerationEvent[]
 }
 
 export type ModerationUserListResponse = {

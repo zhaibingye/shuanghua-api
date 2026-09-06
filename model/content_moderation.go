@@ -2,94 +2,56 @@ package model
 
 import (
 	"errors"
-	"slices"
-	"time"
+	"fmt"
 
 	"github.com/QuantumNous/new-api/common"
 	"gorm.io/gorm"
-	"gorm.io/gorm/schema"
 )
 
 const (
-	ModerationConversationActive   = "active"
-	ModerationConversationBlocked  = "blocked"
-	ModerationConversationResolved = "resolved"
+	ModerationEventActive        = "active"
+	ModerationEventFalsePositive = "false_positive"
+	ModerationEventReversed      = "reversed"
 
-	ModerationJobPending = "pending"
-	ModerationJobRunning = "running"
-	ModerationJobSuccess = "succeeded"
-	ModerationJobFailed  = "failed"
+	ModerationEventSourcePreflight  = "preflight"
+	ModerationEventSourcePostflight = "postflight"
 
-	ModerationViolationActive        = "active"
-	ModerationViolationFalsePositive = "false_positive"
-	ModerationViolationReversed      = "reversed"
-
-	ModerationNotificationPending = "pending"
-	ModerationNotificationSent    = "sent"
-	ModerationNotificationFailed  = "failed"
+	ModerationEventActorUser      = "user"
+	ModerationEventActorAssistant = "assistant"
 )
 
 var (
-	ErrModerationConversationBlocked = errors.New("content moderation blocked this conversation")
-	ErrModerationAccountNotDisabled  = errors.New("user was not disabled by content moderation")
-	ErrModerationJobLeaseLost        = errors.New("content moderation job lease lost")
-	ErrModerationUserHistoryOnly     = errors.New("moderation user record is not historical")
+	ErrModerationBlocked            = errors.New("request blocked by content moderation")
+	ErrModerationAccountNotDisabled = errors.New("user was not disabled by content moderation")
+	ErrModerationUserHistoryOnly    = errors.New("moderation user record is not historical")
 )
 
-type ModerationText string
-
-func (ModerationText) GormDataType() string { return "text" }
-
-func (ModerationText) GormDBDataType(db *gorm.DB, _ *schema.Field) string {
-	if db != nil && db.Name() == "mysql" {
-		return "longtext"
-	}
-	return "text"
-}
-
-// ModerationConversation keeps conversation-level state. The text and
-// metadata expire according to the configured content-moderation retention
-// window; service-layer writes refresh the expiry after activity or an admin
-// decision.
-type ModerationConversation struct {
-	ID              int64  `json:"id" gorm:"primaryKey"`
-	UserID          int    `json:"user_id" gorm:"not null;index:idx_moderation_conversations_user_activity,priority:1;uniqueIndex:idx_moderation_conversations_user_key,priority:1"`
-	ConversationID  string `json:"conversation_id" gorm:"type:varchar(128);not null;uniqueIndex:idx_moderation_conversations_user_key,priority:2"`
-	Status          string `json:"status" gorm:"type:varchar(16);not null;index"`
-	FirstActivityAt int64  `json:"first_activity_at" gorm:"not null;index"`
-	LastActivityAt  int64  `json:"last_activity_at" gorm:"not null;index:idx_moderation_conversations_user_activity,priority:2"`
-	ExpiresAt       int64  `json:"expires_at" gorm:"not null;index"`
-	BlockedAt       int64  `json:"blocked_at,omitempty" gorm:"not null;default:0"`
-	BlockedReason   string `json:"blocked_reason,omitempty" gorm:"type:varchar(255)"`
-	CreatedAt       int64  `json:"created_at" gorm:"autoCreateTime;not null"`
-	UpdatedAt       int64  `json:"updated_at" gorm:"autoUpdateTime;not null"`
-}
-
-// ModerationTurn is the auditable request/response timeline. File and media
-// bodies are deliberately reduced to placeholders before this record is
-// written; binary data never enters this table.
-type ModerationTurn struct {
-	ID                        int64          `json:"id" gorm:"primaryKey"`
-	ConversationID            int64          `json:"conversation_row_id" gorm:"not null;index"`
-	UserID                    int            `json:"user_id" gorm:"not null;index;uniqueIndex:idx_moderation_turns_conversation_round,priority:1"`
-	ConversationKey           string         `json:"conversation_id" gorm:"type:varchar(128);not null;uniqueIndex:idx_moderation_turns_conversation_round,priority:2"`
-	RoundNumber               int            `json:"round_number" gorm:"not null;uniqueIndex:idx_moderation_turns_conversation_round,priority:3"`
-	ChannelID                 int            `json:"channel_id,omitempty" gorm:"index"`
-	RequestID                 string         `json:"request_id" gorm:"type:varchar(128);index"`
-	SystemPrompt              ModerationText `json:"system_prompt" gorm:"type:text"`
-	UserPrompt                ModerationText `json:"user_prompt" gorm:"type:text"`
-	AssistantReply            ModerationText `json:"assistant_reply" gorm:"type:text"`
-	UserPromptFingerprint     string         `json:"-" gorm:"type:char(64);index"`
-	AssistantReplyFingerprint string         `json:"-" gorm:"type:char(64);index"`
-	ResponseStatus            string         `json:"response_status" gorm:"type:varchar(24);not null"`
-	RelayFormat               string         `json:"relay_format" gorm:"type:varchar(32)"`
-	Model                     string         `json:"model" gorm:"type:varchar(128)"`
-	ReviewRequired            bool           `json:"review_required"`
-	ReviewTrigger             string         `json:"review_trigger,omitempty" gorm:"type:varchar(64)"`
-	CreatedAt                 int64          `json:"created_at" gorm:"autoCreateTime;not null;index"`
-	UpdatedAt                 int64          `json:"updated_at" gorm:"autoUpdateTime;not null"`
-	ExpiresAt                 int64          `json:"expires_at" gorm:"not null;index"`
-	ContentUnavailable        bool           `json:"content_unavailable,omitempty" gorm:"-"`
+// ModerationEvent is a single flagged request or assistant output. Clean
+// traffic is never written here.
+type ModerationEvent struct {
+	ID                 int64   `json:"id" gorm:"primaryKey"`
+	UserID             int     `json:"user_id" gorm:"not null;index:idx_moderation_events_user_created,priority:1"`
+	RequestID          string  `json:"request_id" gorm:"type:varchar(128);index"`
+	ChannelID          int     `json:"channel_id,omitempty" gorm:"index"`
+	Model              string  `json:"model" gorm:"type:varchar(128)"`
+	RelayFormat        string  `json:"relay_format" gorm:"type:varchar(32)"`
+	Source             string  `json:"source" gorm:"type:varchar(16);not null;index"`
+	Actor              string  `json:"actor" gorm:"type:varchar(16);not null"`
+	Decision           string  `json:"decision" gorm:"type:varchar(16);not null"`
+	Severity           string  `json:"severity" gorm:"type:varchar(16);not null"`
+	Categories         string  `json:"categories" gorm:"type:text"`
+	Confidence         float64 `json:"confidence"`
+	ReasonCode         string  `json:"reason_code" gorm:"type:varchar(128)"`
+	UserExcerpt        string  `json:"user_excerpt" gorm:"type:text"`
+	AssistantExcerpt   string  `json:"assistant_excerpt" gorm:"type:text"`
+	ContentFingerprint string  `json:"-" gorm:"type:char(64);index"`
+	ImageCount         int     `json:"image_count"`
+	Status             string  `json:"status" gorm:"type:varchar(24);not null;index"`
+	ResolvedAt         int64   `json:"resolved_at,omitempty" gorm:"not null;default:0"`
+	ResolvedBy         int     `json:"resolved_by,omitempty" gorm:"not null;default:0"`
+	ResolutionNote     string  `json:"resolution_note,omitempty" gorm:"type:text"`
+	CreatedAt          int64   `json:"created_at" gorm:"autoCreateTime;not null;index:idx_moderation_events_user_created,priority:2"`
+	ExpiresAt          int64   `json:"expires_at" gorm:"not null;index"`
 }
 
 // ModerationTokenState remembers token statuses changed by moderation so an
@@ -116,186 +78,44 @@ type ModerationAccountState struct {
 }
 
 // ModerationUserRecord stores the operator-facing moderation note for a user.
-// The count override is a manually chosen starting count. New active
-// conversations observed after the edit are added to it; the conversation
-// snapshot prevents an expired old conversation from cancelling a new one.
+// When OverrideActive is set, the displayed count is Override plus new user
+// events created after OverrideAt. Setting the count to 0 archives the note.
 type ModerationUserRecord struct {
-	ID                            int64          `json:"id" gorm:"primaryKey"`
-	UserID                        int            `json:"user_id" gorm:"not null;uniqueIndex"`
-	ViolationCountOverride        int            `json:"-" gorm:"not null"`
-	OverrideActive                bool           `json:"-" gorm:"not null"`
-	RawViolationCountAtEdit       int            `json:"-" gorm:"not null"`
-	ViolationConversationSnapshot ModerationText `json:"-" gorm:"type:text"`
-	MaxViolationCount             int            `json:"max_violation_count" gorm:"not null"`
-	LastViolationAt               int64          `json:"last_violation_at" gorm:"not null;index"`
-	UsernameSnapshot              string         `json:"username" gorm:"type:varchar(128)"`
-	DisplayNameSnapshot           string         `json:"display_name" gorm:"type:varchar(128)"`
-	EmailSnapshot                 string         `json:"email" gorm:"type:varchar(255)"`
-	Note                          string         `json:"note" gorm:"type:text"`
-	ArchivedAt                    int64          `json:"archived_at,omitempty" gorm:"not null;index"`
-	LastSyncedAt                  int64          `json:"-" gorm:"not null;default:0;index"`
-	CreatedAt                     int64          `json:"created_at" gorm:"autoCreateTime;not null"`
-	UpdatedAt                     int64          `json:"updated_at" gorm:"autoUpdateTime;not null"`
-}
-
-type ModerationJob struct {
-	ID                         int64          `json:"id" gorm:"primaryKey"`
-	TurnID                     int64          `json:"turn_id" gorm:"not null;uniqueIndex"`
-	ConversationID             int64          `json:"conversation_row_id" gorm:"not null;index"`
-	UserID                     int            `json:"user_id" gorm:"not null;index"`
-	Status                     string         `json:"status" gorm:"type:varchar(16);not null;index"`
-	Attempts                   int            `json:"attempts" gorm:"not null;default:0"`
-	NextAttemptAt              int64          `json:"next_attempt_at" gorm:"not null;index"`
-	LockedAt                   int64          `json:"locked_at,omitempty" gorm:"not null;default:0"`
-	RequestPayload             ModerationText `json:"request_payload,omitempty" gorm:"type:text"`
-	ResponsePayload            ModerationText `json:"response_payload,omitempty" gorm:"type:text"`
-	LastError                  string         `json:"last_error,omitempty" gorm:"type:text"`
-	Provider                   string         `json:"provider" gorm:"type:varchar(32)"`
-	Model                      string         `json:"model" gorm:"type:varchar(128)"`
-	PromptVersion              string         `json:"prompt_version" gorm:"type:varchar(32)"`
-	ExpiresAt                  int64          `json:"expires_at" gorm:"not null;index"`
-	CreatedAt                  int64          `json:"created_at" gorm:"autoCreateTime;not null;index"`
-	UpdatedAt                  int64          `json:"updated_at" gorm:"autoUpdateTime;not null"`
-	RequestPayloadUnavailable  bool           `json:"request_payload_unavailable,omitempty" gorm:"-"`
-	ResponsePayloadUnavailable bool           `json:"response_payload_unavailable,omitempty" gorm:"-"`
-}
-
-type ModerationViolation struct {
-	ID             int64   `json:"id" gorm:"primaryKey"`
-	UserID         int     `json:"user_id" gorm:"not null;index:idx_moderation_violations_user_created,priority:1;uniqueIndex:idx_moderation_violations_user_conversation_actor,priority:1"`
-	ConversationID string  `json:"conversation_id" gorm:"type:varchar(128);not null;uniqueIndex:idx_moderation_violations_user_conversation_actor,priority:2"`
-	TurnID         int64   `json:"turn_id" gorm:"not null;index;uniqueIndex:idx_moderation_violations_user_conversation_actor,priority:3"`
-	Actor          string  `json:"actor" gorm:"type:varchar(16);not null"`
-	UserViolation  bool    `json:"user_violation" gorm:"uniqueIndex:idx_moderation_violations_user_conversation_actor,priority:4"`
-	Decision       string  `json:"decision" gorm:"type:varchar(16);not null"`
-	Severity       string  `json:"severity" gorm:"type:varchar(16);not null"`
-	Categories     string  `json:"categories" gorm:"type:text"`
-	Confidence     float64 `json:"confidence"`
-	ReasonCode     string  `json:"reason_code" gorm:"type:varchar(128)"`
-	Status         string  `json:"status" gorm:"type:varchar(24);not null;index"`
-	CreatedAt      int64   `json:"created_at" gorm:"autoCreateTime;not null;index:idx_moderation_violations_user_created,priority:2"`
-	ExpiresAt      int64   `json:"expires_at" gorm:"not null;index"`
-	ResolvedAt     int64   `json:"resolved_at,omitempty" gorm:"not null;default:0"`
-	ResolvedBy     int     `json:"resolved_by,omitempty" gorm:"not null;default:0"`
-	ResolutionNote string  `json:"resolution_note,omitempty" gorm:"type:text"`
-}
-
-type ModerationNotification struct {
-	ID            int64  `json:"id" gorm:"primaryKey"`
-	ViolationID   int64  `json:"violation_id" gorm:"not null;index"`
-	AlertType     string `json:"alert_type" gorm:"type:varchar(32);not null;index"`
-	Recipient     string `json:"recipient" gorm:"type:varchar(255);not null"`
-	DedupeKey     string `json:"-" gorm:"type:char(64);not null;uniqueIndex:idx_moderation_notifications_dedupe"`
-	Status        string `json:"status" gorm:"type:varchar(16);not null;index"`
-	Attempts      int    `json:"attempts" gorm:"not null;default:0"`
-	NextAttemptAt int64  `json:"next_attempt_at,omitempty" gorm:"not null;default:0;index"`
-	LastError     string `json:"last_error,omitempty" gorm:"type:text"`
-	CreatedAt     int64  `json:"created_at" gorm:"autoCreateTime;not null"`
-	UpdatedAt     int64  `json:"updated_at" gorm:"autoUpdateTime;not null"`
+	ID                     int64  `json:"id" gorm:"primaryKey"`
+	UserID                 int    `json:"user_id" gorm:"not null;uniqueIndex"`
+	ViolationCountOverride int    `json:"-" gorm:"not null"`
+	OverrideActive         bool   `json:"-" gorm:"not null"`
+	OverrideAt             int64  `json:"-" gorm:"not null;default:0"`
+	MaxViolationCount      int    `json:"max_violation_count" gorm:"not null"`
+	LastViolationAt        int64  `json:"last_violation_at" gorm:"not null;index"`
+	UsernameSnapshot       string `json:"username" gorm:"type:varchar(128)"`
+	DisplayNameSnapshot    string `json:"display_name" gorm:"type:varchar(128)"`
+	EmailSnapshot          string `json:"email" gorm:"type:varchar(255)"`
+	Note                   string `json:"note" gorm:"type:text"`
+	ArchivedAt             int64  `json:"archived_at,omitempty" gorm:"not null;index"`
+	CreatedAt              int64  `json:"created_at" gorm:"autoCreateTime;not null"`
+	UpdatedAt              int64  `json:"updated_at" gorm:"autoUpdateTime;not null"`
 }
 
 type ModerationAction struct {
-	ID             int64  `json:"id" gorm:"primaryKey"`
-	AdminID        int    `json:"admin_id" gorm:"not null;index"`
-	UserID         int    `json:"user_id,omitempty" gorm:"index"`
-	ConversationID string `json:"conversation_id,omitempty" gorm:"type:varchar(128);index"`
-	ViolationID    int64  `json:"violation_id,omitempty" gorm:"index"`
-	Action         string `json:"action" gorm:"type:varchar(32);not null"`
-	Reason         string `json:"reason,omitempty" gorm:"type:text"`
-	CreatedAt      int64  `json:"created_at" gorm:"autoCreateTime;not null;index"`
+	ID        int64  `json:"id" gorm:"primaryKey"`
+	AdminID   int    `json:"admin_id" gorm:"not null;index"`
+	UserID    int    `json:"user_id,omitempty" gorm:"index"`
+	EventID   int64  `json:"event_id,omitempty" gorm:"index"`
+	Action    string `json:"action" gorm:"type:varchar(32);not null"`
+	Reason    string `json:"reason,omitempty" gorm:"type:text"`
+	CreatedAt int64  `json:"created_at" gorm:"autoCreateTime;not null;index"`
 }
 
-func LockModerationConversation(tx *gorm.DB, userID int, conversationID string, conversation *ModerationConversation) error {
-	if tx == nil || userID <= 0 || conversationID == "" || conversation == nil {
-		return gorm.ErrRecordNotFound
-	}
-	return lockForUpdate(tx).Where("user_id = ? AND conversation_id = ?", userID, conversationID).First(conversation).Error
-}
-
-func GetModerationConversation(userID int, conversationID string) (*ModerationConversation, error) {
-	if userID <= 0 || conversationID == "" {
+func GetModerationEvent(id int64) (*ModerationEvent, error) {
+	if id <= 0 {
 		return nil, gorm.ErrRecordNotFound
 	}
-	var conversation ModerationConversation
-	result := DB.Where("user_id = ? AND conversation_id = ?", userID, conversationID).Limit(1).Find(&conversation)
-	if result.Error != nil {
-		return nil, result.Error
-	}
-	if result.RowsAffected == 0 {
-		return nil, nil
-	}
-	return &conversation, nil
-}
-
-func IsModerationConversationBlocked(userID int, conversationID string) (bool, error) {
-	conversation, err := GetModerationConversation(userID, conversationID)
-	if err != nil || conversation == nil {
-		return false, err
-	}
-	return conversation.Status == ModerationConversationBlocked, nil
-}
-
-func FindModerationTurnsByFingerprints(userID int, userFingerprints, assistantFingerprints []string, now int64, limit int) ([]ModerationTurn, error) {
-	if userID <= 0 {
-		return nil, errors.New("invalid moderation user")
-	}
-	if now <= 0 {
-		now = common.GetTimestamp()
-	}
-	if limit <= 0 {
-		limit = 50
-	}
-	query := DB.Where("user_id = ? AND expires_at > ?", userID, now)
-	if len(userFingerprints) == 0 && len(assistantFingerprints) == 0 {
-		return []ModerationTurn{}, nil
-	}
-	if len(userFingerprints) > 0 && len(assistantFingerprints) > 0 {
-		query = query.Where("user_prompt_fingerprint IN ? OR assistant_reply_fingerprint IN ?", userFingerprints, assistantFingerprints)
-	} else if len(userFingerprints) > 0 {
-		query = query.Where("user_prompt_fingerprint IN ?", userFingerprints)
-	} else {
-		query = query.Where("assistant_reply_fingerprint IN ?", assistantFingerprints)
-	}
-	var turns []ModerationTurn
-	if err := query.Order("created_at desc, id desc").Limit(limit).Find(&turns).Error; err != nil {
+	var event ModerationEvent
+	if err := DB.First(&event, id).Error; err != nil {
 		return nil, err
 	}
-	// Rows written before fingerprint columns were introduced must remain
-	// searchable, but they are kept in a separate bounded query so a recent
-	// fingerprint hit cannot hide an equally plausible legacy conversation.
-	var legacyTurns []ModerationTurn
-	if err := DB.Where("user_id = ? AND expires_at > ? AND (user_prompt_fingerprint IS NULL OR user_prompt_fingerprint = ?) AND (assistant_reply_fingerprint IS NULL OR assistant_reply_fingerprint = ?)", userID, now, "", "").
-		Order("created_at desc, id desc").Limit(limit).Find(&legacyTurns).Error; err != nil {
-		return nil, err
-	}
-	seen := make(map[int64]struct{}, len(turns)+len(legacyTurns))
-	for _, turn := range turns {
-		seen[turn.ID] = struct{}{}
-	}
-	for _, turn := range legacyTurns {
-		if _, exists := seen[turn.ID]; exists {
-			continue
-		}
-		turns = append(turns, turn)
-		seen[turn.ID] = struct{}{}
-	}
-	return turns, nil
-}
-
-func FindRecentModerationTurnsByUser(userID int, now int64, limit int) ([]ModerationTurn, error) {
-	if userID <= 0 {
-		return nil, errors.New("invalid moderation user")
-	}
-	if now <= 0 {
-		now = common.GetTimestamp()
-	}
-	if limit <= 0 {
-		limit = 200
-	}
-	var turns []ModerationTurn
-	err := DB.Where("user_id = ? AND expires_at > ?", userID, now).
-		Order("created_at desc, id desc").Limit(limit).Find(&turns).Error
-	return turns, err
+	return &event, nil
 }
 
 func GetModerationUserRecord(userID int) (*ModerationUserRecord, error) {
@@ -313,10 +133,51 @@ func GetModerationUserRecord(userID int) (*ModerationUserRecord, error) {
 	return &record, nil
 }
 
-// DeleteModerationUserHistoryIfArchived rechecks the current active violation
-// set under a row lock immediately before deleting a history record. This
-// prevents a delayed cleanup or concurrent moderation decision from deleting a
-// note that has become active again.
+func CountRecentUserModerationEvents(userID int, cutoff int64) (int64, error) {
+	return CountRecentUserModerationEventsWithTx(DB, userID, cutoff)
+}
+
+func CountRecentUserModerationEventsWithTx(tx *gorm.DB, userID int, cutoff int64) (int64, error) {
+	if tx == nil || userID <= 0 {
+		return 0, errors.New("invalid moderation user database or user")
+	}
+	now := common.GetTimestamp()
+	if cutoff <= 0 {
+		cutoff = now - 7*24*60*60
+	}
+	var count int64
+	err := tx.Model(&ModerationEvent{}).
+		Where("user_id = ? AND actor = ? AND status = ? AND created_at >= ? AND expires_at > ?", userID, ModerationEventActorUser, ModerationEventActive, cutoff, now).
+		Count(&count).Error
+	return count, err
+}
+
+func CountUserModerationEventsAfter(userID int, after, cutoff, now int64) (int64, error) {
+	return countUserModerationEventsAfterWithTx(DB, userID, after, cutoff, now)
+}
+
+func countUserModerationEventsAfterWithTx(tx *gorm.DB, userID int, after, cutoff, now int64) (int64, error) {
+	if tx == nil || userID <= 0 {
+		return 0, errors.New("invalid moderation user database or user")
+	}
+	if now <= 0 {
+		now = common.GetTimestamp()
+	}
+	query := tx.Model(&ModerationEvent{}).
+		Where("user_id = ? AND actor = ? AND status = ? AND expires_at > ?", userID, ModerationEventActorUser, ModerationEventActive, now)
+	if cutoff > 0 {
+		query = query.Where("created_at >= ?", cutoff)
+	}
+	if after > 0 {
+		query = query.Where("created_at > ?", after)
+	}
+	var count int64
+	err := query.Count(&count).Error
+	return count, err
+}
+
+// DeleteModerationUserHistoryIfArchived rechecks the current active event
+// set under a row lock immediately before deleting a history record.
 func DeleteModerationUserHistoryIfArchived(userID int, cutoff, now int64) error {
 	if userID <= 0 {
 		return errors.New("invalid moderation user")
@@ -335,29 +196,16 @@ func DeleteModerationUserHistoryIfArchived(userID int, cutoff, now int64) error 
 		if record.ArchivedAt == 0 {
 			return ErrModerationUserHistoryOnly
 		}
-		var activeConversationIDs []string
-		if err := tx.Model(&ModerationViolation{}).
-			Where("user_id = ? AND user_violation = ? AND status = ? AND created_at >= ? AND expires_at > ?", userID, true, ModerationViolationActive, cutoff, now).
-			Distinct().Pluck("conversation_id", &activeConversationIDs).Error; err != nil {
+		after := int64(0)
+		if record.OverrideActive {
+			after = record.OverrideAt
+		}
+		count, err := countUserModerationEventsAfterWithTx(tx, userID, after, cutoff, now)
+		if err != nil {
 			return err
 		}
-		if len(activeConversationIDs) > 0 {
-			if !record.OverrideActive || record.ViolationCountOverride > 0 {
-				return ErrModerationUserHistoryOnly
-			}
-			var snapshot []string
-			if err := common.Unmarshal([]byte(record.ViolationConversationSnapshot), &snapshot); err != nil {
-				return ErrModerationUserHistoryOnly
-			}
-			knownConversationIDs := make(map[string]struct{}, len(snapshot))
-			for _, conversationID := range snapshot {
-				knownConversationIDs[conversationID] = struct{}{}
-			}
-			for _, conversationID := range activeConversationIDs {
-				if _, known := knownConversationIDs[conversationID]; !known {
-					return ErrModerationUserHistoryOnly
-				}
-			}
+		if count > 0 {
+			return ErrModerationUserHistoryOnly
 		}
 		return tx.Delete(&record).Error
 	})
@@ -409,249 +257,6 @@ func SetUserAccountStatusForModeration(userID, status int, now int64) error {
 		}
 		return tx.Model(&User{}).Where("id = ?", userID).Update("status", status).Error
 	})
-}
-
-func CountRecentUserModerationViolations(userID int, cutoff int64) (int64, error) {
-	return CountRecentUserModerationViolationsWithTx(DB, userID, cutoff)
-}
-
-func CountRecentUserModerationViolationsWithTx(tx *gorm.DB, userID int, cutoff int64) (int64, error) {
-	if tx == nil || userID <= 0 {
-		return 0, errors.New("invalid moderation user database or user")
-	}
-	if cutoff <= 0 {
-		cutoff = time.Now().Add(-7 * 24 * time.Hour).Unix()
-	}
-	var count int64
-	err := tx.Model(&ModerationViolation{}).
-		Where("user_id = ? AND user_violation = ? AND status = ? AND created_at >= ? AND expires_at > ?", userID, true, ModerationViolationActive, cutoff, common.GetTimestamp()).
-		Distinct("conversation_id").Count(&count).Error
-	return count, err
-}
-
-func RequeueStaleModerationJobs(now, staleBefore int64) error {
-	if now <= 0 {
-		now = common.GetTimestamp()
-	}
-	if staleBefore <= 0 {
-		staleBefore = now - 5*60
-	}
-	return DB.Model(&ModerationJob{}).
-		Where("status = ? AND locked_at > 0 AND locked_at < ?", ModerationJobRunning, staleBefore).
-		Updates(map[string]interface{}{
-			"status":          ModerationJobPending,
-			"next_attempt_at": now,
-			"locked_at":       0,
-			"last_error":      "moderation job lease expired",
-			"updated_at":      now,
-		}).Error
-}
-
-func FindPendingModerationJobs(now int64, limit int) ([]ModerationJob, error) {
-	if limit <= 0 {
-		limit = 20
-	}
-	if now <= 0 {
-		now = common.GetTimestamp()
-	}
-	var jobs []ModerationJob
-	err := DB.Where("status = ? AND next_attempt_at <= ? AND expires_at > ?", ModerationJobPending, now, now).
-		Order("id asc").Limit(limit).Find(&jobs).Error
-	return jobs, err
-}
-
-func ClaimModerationJob(id int64, now int64) (*ModerationJob, bool, error) {
-	if id <= 0 {
-		return nil, false, errors.New("invalid moderation job")
-	}
-	if now <= 0 {
-		now = common.GetTimestamp()
-	}
-	result := DB.Model(&ModerationJob{}).Where("id = ? AND status = ?", id, ModerationJobPending).
-		Updates(map[string]interface{}{"status": ModerationJobRunning, "locked_at": now, "updated_at": now})
-	if result.Error != nil {
-		return nil, false, result.Error
-	}
-	if result.RowsAffected == 0 {
-		return nil, false, nil
-	}
-	var job ModerationJob
-	if err := DB.First(&job, id).Error; err != nil {
-		return nil, false, err
-	}
-	return &job, true, nil
-}
-
-func SaveModerationJobResult(id, lockedAt int64, status string, attempts int, nextAttemptAt int64, responsePayload, lastError string) error {
-	if id <= 0 || lockedAt <= 0 {
-		return errors.New("invalid moderation job lease")
-	}
-	var current ModerationJob
-	leaseResult := DB.Select("id").Where("id = ? AND status = ? AND locked_at = ?", id, ModerationJobRunning, lockedAt).Limit(1).Find(&current)
-	if leaseResult.Error != nil {
-		return leaseResult.Error
-	}
-	if leaseResult.RowsAffected == 0 {
-		return ErrModerationJobLeaseLost
-	}
-	encryptedResponsePayload, err := common.EncryptSecret(responsePayload)
-	if err != nil {
-		return err
-	}
-	result := DB.Model(&ModerationJob{}).Where("id = ? AND status = ? AND locked_at = ?", id, ModerationJobRunning, lockedAt).Updates(map[string]interface{}{
-		"status":           status,
-		"attempts":         attempts,
-		"next_attempt_at":  nextAttemptAt,
-		"response_payload": encryptedResponsePayload,
-		"last_error":       lastError,
-		"locked_at":        0,
-		"updated_at":       common.GetTimestamp(),
-	})
-	if result.Error != nil {
-		return result.Error
-	}
-	if result.RowsAffected != 1 {
-		return ErrModerationJobLeaseLost
-	}
-	return nil
-}
-
-func DeleteExpiredModerationContent(now int64, retentionSeconds ...int64) error {
-	if now <= 0 {
-		now = common.GetTimestamp()
-	}
-	retention := int64(7 * 24 * 60 * 60)
-	if len(retentionSeconds) > 0 && retentionSeconds[0] > 0 {
-		retention = retentionSeconds[0]
-	}
-	cutoff := now - retention
-	if err := DB.Where("expires_at <= ? OR created_at <= ?", now, cutoff).Delete(&ModerationJob{}).Error; err != nil {
-		return err
-	}
-	if err := DB.Where("expires_at <= ? OR created_at <= ?", now, cutoff).Delete(&ModerationTurn{}).Error; err != nil {
-		return err
-	}
-	return DB.Where("expires_at <= ? OR last_activity_at <= ?", now, cutoff).Delete(&ModerationConversation{}).Error
-}
-
-// DeleteEncryptedModerationRecords directly and automatically deletes any
-// historical moderation conversations, turns, jobs, and associated violations
-// that contain encrypted content (starting with "enc:v1:").
-func DeleteEncryptedModerationRecords(db *gorm.DB) error {
-	if db == nil {
-		db = DB
-	}
-	if db == nil {
-		return nil
-	}
-
-	var encryptedTurnRecords []struct {
-		ID              int64  `gorm:"column:id"`
-		ConversationKey string `gorm:"column:conversation_key"`
-		ConversationID  int64  `gorm:"column:conversation_id"`
-	}
-	err := db.Model(&ModerationTurn{}).
-		Select("id, conversation_key, conversation_id").
-		Where("system_prompt LIKE ? OR user_prompt LIKE ? OR assistant_reply LIKE ?", "enc:v1:%", "enc:v1:%", "enc:v1:%").
-		Find(&encryptedTurnRecords).Error
-	if err != nil {
-		return err
-	}
-
-	var encryptedJobRecords []struct {
-		ID             int64 `gorm:"column:id"`
-		TurnID         int64 `gorm:"column:turn_id"`
-		ConversationID int64 `gorm:"column:conversation_id"`
-	}
-	_ = db.Model(&ModerationJob{}).
-		Select("id, turn_id, conversation_id").
-		Where("request_payload LIKE ? OR response_payload LIKE ?", "enc:v1:%", "enc:v1:%").
-		Find(&encryptedJobRecords).Error
-
-	if len(encryptedTurnRecords) == 0 && len(encryptedJobRecords) == 0 {
-		return nil
-	}
-
-	turnIDs := make([]int64, 0, len(encryptedTurnRecords)+len(encryptedJobRecords))
-	convIDs := make([]int64, 0, len(encryptedTurnRecords)+len(encryptedJobRecords))
-	convKeys := make([]string, 0, len(encryptedTurnRecords))
-
-	for _, r := range encryptedTurnRecords {
-		turnIDs = append(turnIDs, r.ID)
-		if r.ConversationID > 0 {
-			convIDs = append(convIDs, r.ConversationID)
-		}
-		if r.ConversationKey != "" {
-			convKeys = append(convKeys, r.ConversationKey)
-		}
-	}
-	for _, j := range encryptedJobRecords {
-		if j.TurnID > 0 {
-			turnIDs = append(turnIDs, j.TurnID)
-		}
-		if j.ConversationID > 0 {
-			convIDs = append(convIDs, j.ConversationID)
-		}
-	}
-
-	slices.Sort(turnIDs)
-	turnIDs = slices.Compact(turnIDs)
-	slices.Sort(convIDs)
-	convIDs = slices.Compact(convIDs)
-	slices.Sort(convKeys)
-	convKeys = slices.Compact(convKeys)
-
-	return db.Transaction(func(tx *gorm.DB) error {
-		var violationIDs []int64
-		if len(turnIDs) > 0 {
-			_ = tx.Model(&ModerationViolation{}).Where("turn_id IN ?", turnIDs).Pluck("id", &violationIDs).Error
-		}
-		if len(convKeys) > 0 {
-			var moreIDs []int64
-			_ = tx.Model(&ModerationViolation{}).Where("conversation_id IN ?", convKeys).Pluck("id", &moreIDs).Error
-			violationIDs = append(violationIDs, moreIDs...)
-		}
-		if len(violationIDs) > 0 {
-			slices.Sort(violationIDs)
-			violationIDs = slices.Compact(violationIDs)
-			_ = tx.Where("violation_id IN ?", violationIDs).Delete(&ModerationNotification{}).Error
-			_ = tx.Where("violation_id IN ?", violationIDs).Delete(&ModerationAction{}).Error
-			_ = tx.Where("id IN ?", violationIDs).Delete(&ModerationViolation{}).Error
-		}
-
-		if len(convIDs) > 0 {
-			_ = tx.Where("id IN ?", convIDs).Delete(&ModerationConversation{}).Error
-			_ = tx.Where("conversation_id IN ?", convIDs).Delete(&ModerationJob{}).Error
-			_ = tx.Where("conversation_id IN ?", convIDs).Delete(&ModerationTurn{}).Error
-		}
-		if len(convKeys) > 0 {
-			_ = tx.Where("conversation_id IN ?", convKeys).Delete(&ModerationConversation{}).Error
-			_ = tx.Where("conversation_key IN ?", convKeys).Delete(&ModerationTurn{}).Error
-			_ = tx.Where("conversation_id IN ?", convKeys).Delete(&ModerationViolation{}).Error
-			_ = tx.Where("conversation_id IN ?", convKeys).Delete(&ModerationAction{}).Error
-		}
-		if len(turnIDs) > 0 {
-			_ = tx.Where("id IN ?", turnIDs).Delete(&ModerationTurn{}).Error
-			_ = tx.Where("turn_id IN ?", turnIDs).Delete(&ModerationJob{}).Error
-			_ = tx.Where("turn_id IN ?", turnIDs).Delete(&ModerationViolation{}).Error
-		}
-		_ = tx.Where("request_payload LIKE ? OR response_payload LIKE ?", "enc:v1:%", "enc:v1:%").Delete(&ModerationJob{}).Error
-		_ = tx.Where("system_prompt LIKE ? OR user_prompt LIKE ? OR assistant_reply LIKE ?", "enc:v1:%", "enc:v1:%", "enc:v1:%").Delete(&ModerationTurn{}).Error
-		return nil
-	})
-}
-
-func ListRetryableModerationNotifications(now int64, limit int) ([]ModerationNotification, error) {
-	if limit <= 0 {
-		limit = 50
-	}
-	if now <= 0 {
-		now = common.GetTimestamp()
-	}
-	var notifications []ModerationNotification
-	err := DB.Where("status IN ? AND attempts < ? AND (next_attempt_at = 0 OR next_attempt_at <= ?)", []string{ModerationNotificationPending, ModerationNotificationFailed}, 5, now).
-		Order("id asc").Limit(limit).Find(&notifications).Error
-	return notifications, err
 }
 
 func disableTokensForModeration(tx *gorm.DB, userID int, now int64) error {
@@ -794,9 +399,6 @@ func RestoreUserAndTokensAfterModeration(userID int, now int64) (bool, error) {
 			if !errors.Is(err, gorm.ErrRecordNotFound) {
 				return err
 			}
-			// A previous restore may have committed before cache/session
-			// invalidation failed. Treat that durable marker as an idempotent
-			// success so a retry can finish those side effects.
 			if err := tx.Where("user_id = ?", userID).First(&accountState).Error; err != nil {
 				if errors.Is(err, gorm.ErrRecordNotFound) {
 					return nil
@@ -817,7 +419,6 @@ func RestoreUserAndTokensAfterModeration(userID int, now int64) (bool, error) {
 			if err := tx.Model(&User{}).Where("id = ?", userID).Update("status", accountState.PreviousStatus).Error; err != nil {
 				return err
 			}
-			changed = true
 		}
 		if err := restoreTokensAfterModeration(tx, userID, now); err != nil {
 			return err
@@ -830,26 +431,60 @@ func RestoreUserAndTokensAfterModeration(userID int, now int64) (bool, error) {
 	return changed, err
 }
 
-func DeleteExpiredModerationMetadata(now int64, retentionSeconds ...int64) error {
+func DeleteExpiredModerationData(now, retentionSeconds int64) error {
 	if now <= 0 {
 		now = common.GetTimestamp()
 	}
-	retention := int64(7 * 24 * 60 * 60)
-	if len(retentionSeconds) > 0 && retentionSeconds[0] > 0 {
-		retention = retentionSeconds[0]
+	if retentionSeconds <= 0 {
+		retentionSeconds = 7 * 24 * 60 * 60
 	}
-	cutoff := now - retention
-	if err := DB.Where("expires_at <= ? OR created_at <= ?", now, cutoff).Delete(&ModerationViolation{}).Error; err != nil {
+	cutoff := now - retentionSeconds
+	if err := DB.Where("expires_at <= ? OR created_at <= ?", now, cutoff).Delete(&ModerationEvent{}).Error; err != nil {
 		return err
 	}
-	if err := DB.Where("created_at <= ?", cutoff).Delete(&ModerationNotification{}).Error; err != nil {
+	if err := DB.Where("created_at <= ?", cutoff).Delete(&ModerationAction{}).Error; err != nil {
 		return err
 	}
 	if err := DB.Where("restored_at > 0 AND created_at <= ?", cutoff).Delete(&ModerationTokenState{}).Error; err != nil {
 		return err
 	}
-	if err := DB.Where("restored_at > 0 AND created_at <= ?", cutoff).Delete(&ModerationAccountState{}).Error; err != nil {
-		return err
+	return DB.Where("restored_at > 0 AND created_at <= ?", cutoff).Delete(&ModerationAccountState{}).Error
+}
+
+var legacyModerationTables = []string{
+	"moderation_notifications",
+	"moderation_jobs",
+	"moderation_turns",
+	"moderation_violations",
+	"moderation_conversations",
+}
+
+// DropLegacyModerationTables removes the conversation-centric tables from the
+// previous moderation design. Existing rows are not migrated.
+func DropLegacyModerationTables(db *gorm.DB) error {
+	if db == nil {
+		return nil
 	}
-	return DB.Where("created_at <= ?", cutoff).Delete(&ModerationAction{}).Error
+	for _, table := range legacyModerationTables {
+		if !db.Migrator().HasTable(table) {
+			continue
+		}
+		if err := db.Migrator().DropTable(table); err != nil {
+			return fmt.Errorf("drop legacy moderation table %s: %w", table, err)
+		}
+	}
+	return nil
+}
+
+func migrateModerationUserRecordOverrideAt(db *gorm.DB) error {
+	if db == nil || !db.Migrator().HasTable(&ModerationUserRecord{}) {
+		return nil
+	}
+	if !db.Migrator().HasColumn(&ModerationUserRecord{}, "override_at") {
+		return nil
+	}
+	now := common.GetTimestamp()
+	return db.Model(&ModerationUserRecord{}).
+		Where("override_active = ? AND override_at = ?", true, 0).
+		Update("override_at", now).Error
 }

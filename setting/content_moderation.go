@@ -1,6 +1,8 @@
 package setting
 
 import (
+	"errors"
+	"fmt"
 	"slices"
 	"strconv"
 	"strings"
@@ -18,21 +20,29 @@ const (
 	ContentModerationAPIKeyOption                 = "ContentModerationAPIKey"
 	ContentModerationModelOption                  = "ContentModerationModel"
 	ContentModerationPreflightOption              = "ContentModerationPreflight"
+	ContentModerationPostflightOption             = "ContentModerationPostflight"
 	ContentModerationFailureModeOption            = "ContentModerationFailureMode"
 	ContentModerationTimeoutSecondsOption         = "ContentModerationTimeoutSeconds"
 	ContentModerationMaxRetriesOption             = "ContentModerationMaxRetries"
+	ContentModerationAutoDisableViolationsOption  = "ContentModerationAutoDisableViolations"
 )
 
 const (
 	DefaultContentModerationBaseURL                = "https://api.openai.com/v1"
 	DefaultContentModerationModel                  = "omni-moderation-latest"
 	DefaultContentModerationPreflight              = true
+	DefaultContentModerationPostflight             = false
 	DefaultContentModerationFailureMode            = "closed"
 	DefaultContentModerationTimeoutSeconds         = 30
 	DefaultContentModerationMaxRetries             = 3
 	DefaultContentModerationUserWhitelist          = "1"
 	DefaultContentModerationViolationRetentionDays = 7
+	DefaultContentModerationAutoDisableViolations  = 0
 	RootAdminUserID                                = 1
+
+	MaxContentModerationAPIKeys           = 50
+	MaxContentModerationAPIKeyBytes       = 32 * 1024
+	MaxContentModerationSingleAPIKeyBytes = 4096
 )
 
 type ContentModerationSetting struct {
@@ -44,11 +54,14 @@ type ContentModerationSetting struct {
 	ViolationRetentionDays int
 	BaseURL                string
 	APIKey                 string
+	APIKeys                []string
 	Model                  string
 	PreflightEnabled       bool
+	PostflightEnabled      bool
 	FailureMode            string
 	TimeoutSeconds         int
 	MaxRetries             int
+	AutoDisableViolations  int
 }
 
 func GetContentModerationSetting() ContentModerationSetting {
@@ -66,9 +79,16 @@ func GetContentModerationSetting() ContentModerationSetting {
 			apiKey = strings.TrimSpace(apiKey)
 		}
 	}
-	if len(apiKey) > 4096 {
-		common.SysError("content moderation API key exceeds the configured length limit")
-		apiKey = ""
+	var apiKeys []string
+	if apiKey != "" {
+		parsed, err := ParseModerationAPIKeys(apiKey)
+		if err != nil {
+			common.SysError("invalid content moderation API keys: " + err.Error())
+			apiKey = ""
+		} else {
+			apiKeys = parsed
+			apiKey = FormatModerationAPIKeys(parsed)
+		}
 	}
 	timeoutSeconds := optionInt(ContentModerationTimeoutSecondsOption, DefaultContentModerationTimeoutSeconds)
 	if timeoutSeconds < 1 || timeoutSeconds > 120 {
@@ -107,9 +127,14 @@ func GetContentModerationSetting() ContentModerationSetting {
 		slices.Sort(userWhitelistIDs)
 	}
 	preflightEnabled := optionBool(ContentModerationPreflightOption, DefaultContentModerationPreflight)
+	postflightEnabled := optionBool(ContentModerationPostflightOption, DefaultContentModerationPostflight)
 	failureMode := strings.ToLower(optionString(ContentModerationFailureModeOption, DefaultContentModerationFailureMode))
 	if failureMode != "open" && failureMode != "closed" {
 		failureMode = DefaultContentModerationFailureMode
+	}
+	autoDisable := optionInt(ContentModerationAutoDisableViolationsOption, DefaultContentModerationAutoDisableViolations)
+	if autoDisable < 0 || autoDisable > 1000 {
+		autoDisable = DefaultContentModerationAutoDisableViolations
 	}
 	return ContentModerationSetting{
 		Enabled:                optionBool(ContentModerationEnabledOption, false),
@@ -120,11 +145,14 @@ func GetContentModerationSetting() ContentModerationSetting {
 		ViolationRetentionDays: retentionDays,
 		BaseURL:                baseURL,
 		APIKey:                 apiKey,
+		APIKeys:                apiKeys,
 		Model:                  modelName,
 		PreflightEnabled:       preflightEnabled,
+		PostflightEnabled:      postflightEnabled,
 		FailureMode:            failureMode,
 		TimeoutSeconds:         timeoutSeconds,
 		MaxRetries:             maxRetries,
+		AutoDisableViolations:  autoDisable,
 	}
 }
 
@@ -215,8 +243,61 @@ func (s ContentModerationSetting) GetViolationRetentionDuration() time.Duration 
 	return time.Duration(days) * 24 * time.Hour
 }
 
+func (s ContentModerationSetting) HasAPIKey() bool {
+	return len(s.ResolvedAPIKeys()) > 0
+}
+
+func (s ContentModerationSetting) ResolvedAPIKeys() []string {
+	if len(s.APIKeys) > 0 {
+		return s.APIKeys
+	}
+	keys, err := ParseModerationAPIKeys(s.APIKey)
+	if err != nil {
+		return nil
+	}
+	return keys
+}
+
 func (s ContentModerationSetting) HasModeratedChannels() bool {
 	return s.Enabled && len(s.ChannelIDs) > 0
+}
+
+// ParseModerationAPIKeys splits a stored or submitted key blob into individual
+// keys. Keys are separated by newlines, matching channel multi-key input.
+func ParseModerationAPIKeys(input string) ([]string, error) {
+	if strings.TrimSpace(input) == "" {
+		return nil, nil
+	}
+	if len(input) > MaxContentModerationAPIKeyBytes {
+		return nil, errors.New("content moderation API keys exceed the configured length limit")
+	}
+	normalized := strings.ReplaceAll(input, "\r\n", "\n")
+	normalized = strings.ReplaceAll(normalized, "\r", "\n")
+	lines := strings.Split(normalized, "\n")
+	keys := make([]string, 0, len(lines))
+	for _, line := range lines {
+		key := strings.TrimSpace(line)
+		if key == "" {
+			continue
+		}
+		if len(key) > MaxContentModerationSingleAPIKeyBytes {
+			return nil, errors.New("content moderation API key is too long")
+		}
+		if strings.IndexFunc(key, func(r rune) bool {
+			return r < 0x20 || r == 0x7f
+		}) >= 0 {
+			return nil, errors.New("content moderation API key contains invalid control characters")
+		}
+		keys = append(keys, key)
+	}
+	if len(keys) > MaxContentModerationAPIKeys {
+		return nil, fmt.Errorf("at most %d content moderation API keys are allowed", MaxContentModerationAPIKeys)
+	}
+	return keys, nil
+}
+
+func FormatModerationAPIKeys(keys []string) string {
+	return strings.Join(keys, "\n")
 }
 
 func (s ContentModerationSetting) ShouldModerateChannel(channelID int) bool {

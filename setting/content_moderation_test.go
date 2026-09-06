@@ -1,6 +1,7 @@
 package setting
 
 import (
+	"strings"
 	"testing"
 	"time"
 
@@ -262,6 +263,48 @@ func TestIsUserWhitelisted(t *testing.T) {
 	}
 	assert.True(t, sEmpty.IsUserWhitelisted(1))
 	assert.False(t, sEmpty.IsUserWhitelisted(2))
+}
+
+func TestParseModerationAPIKeys(t *testing.T) {
+	keys, err := ParseModerationAPIKeys("")
+	require.NoError(t, err)
+	assert.Empty(t, keys)
+
+	keys, err = ParseModerationAPIKeys("  \n\t  ")
+	require.NoError(t, err)
+	assert.Empty(t, keys)
+
+	keys, err = ParseModerationAPIKeys("sk-one\r\nsk-two\nsk-three\n")
+	require.NoError(t, err)
+	assert.Equal(t, []string{"sk-one", "sk-two", "sk-three"}, keys)
+	assert.Equal(t, "sk-one\nsk-two\nsk-three", FormatModerationAPIKeys(keys))
+
+	_, err = ParseModerationAPIKeys("sk-one\nsk-two\x00bad")
+	require.Error(t, err)
+
+	tooMany := make([]string, MaxContentModerationAPIKeys+1)
+	for i := range tooMany {
+		tooMany[i] = "sk-key"
+	}
+	_, err = ParseModerationAPIKeys(strings.Join(tooMany, "\n"))
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "at most")
+}
+
+func TestContentModerationSettingResolvedAPIKeys(t *testing.T) {
+	single := ContentModerationSetting{APIKey: "sk-only"}
+	assert.True(t, single.HasAPIKey())
+	assert.Equal(t, []string{"sk-only"}, single.ResolvedAPIKeys())
+
+	multi := ContentModerationSetting{APIKey: "sk-a\nsk-b"}
+	assert.Equal(t, []string{"sk-a", "sk-b"}, multi.ResolvedAPIKeys())
+
+	preparsed := ContentModerationSetting{APIKeys: []string{"sk-cached"}, APIKey: "ignored"}
+	assert.Equal(t, []string{"sk-cached"}, preparsed.ResolvedAPIKeys())
+
+	empty := ContentModerationSetting{}
+	assert.False(t, empty.HasAPIKey())
+	assert.Empty(t, empty.ResolvedAPIKeys())
 }
 
 func TestGetViolationRetentionDuration(t *testing.T) {

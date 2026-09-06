@@ -35,79 +35,17 @@ func setupModerationTestDB(t *testing.T) {
 	})
 	model.DB = db
 	model.LOG_DB = db
-	require.NoError(t, db.AutoMigrate(&model.Option{}, &model.Log{}, &model.User{}, &model.ModerationConversation{}))
+	require.NoError(t, db.AutoMigrate(
+		&model.Option{},
+		&model.Log{},
+		&model.User{},
+		&model.ModerationEvent{},
+		&model.ModerationUserRecord{},
+		&model.ModerationAction{},
+		&model.ModerationAccountState{},
+	))
 	_ = db.Create(&model.User{Id: 1, Username: "admin"}).Error
 	model.InitOptionMap()
-}
-
-func TestGetContentModerationConversationDeletesEncryptedHistory(t *testing.T) {
-	gin.SetMode(gin.TestMode)
-	setupModerationTestDB(t)
-	require.NoError(t, model.DB.AutoMigrate(
-		&model.ModerationTurn{},
-		&model.ModerationJob{},
-		&model.ModerationViolation{},
-		&model.ModerationAction{},
-		&model.ModerationNotification{},
-	))
-
-	now := common.GetTimestamp()
-	conversation := &model.ModerationConversation{
-		UserID:          2,
-		ConversationID:  "history-conversation",
-		Status:          model.ModerationConversationActive,
-		FirstActivityAt: now,
-		LastActivityAt:  now,
-		ExpiresAt:       now + 3600,
-	}
-	require.NoError(t, model.DB.Create(conversation).Error)
-	turn := &model.ModerationTurn{
-		ConversationID:  conversation.ID,
-		UserID:          conversation.UserID,
-		ConversationKey: conversation.ConversationID,
-		RoundNumber:     1,
-		SystemPrompt:    "enc:v1:system",
-		UserPrompt:      "enc:v1:user",
-		AssistantReply:  "enc:v1:assistant",
-		ResponseStatus:  "success",
-		CreatedAt:       now,
-		UpdatedAt:       now,
-		ExpiresAt:       now + 3600,
-	}
-	require.NoError(t, model.DB.Create(turn).Error)
-	job := &model.ModerationJob{
-		TurnID:          turn.ID,
-		ConversationID:  conversation.ID,
-		UserID:          conversation.UserID,
-		Status:          model.ModerationJobSuccess,
-		RequestPayload:  "enc:v1:request",
-		ResponsePayload: "enc:v1:response",
-		Provider:        "responses",
-		Model:           "moderation-model",
-		PromptVersion:   "v1",
-		ExpiresAt:       now + 3600,
-		CreatedAt:       now,
-		UpdatedAt:       now,
-	}
-	require.NoError(t, model.DB.Create(job).Error)
-
-	recorder := httptest.NewRecorder()
-	c, _ := gin.CreateTestContext(recorder)
-	c.Request = httptest.NewRequest(http.MethodGet, "/api/moderation/conversations/"+fmt.Sprint(conversation.ID), nil)
-	c.Params = gin.Params{{Key: "id", Value: fmt.Sprint(conversation.ID)}}
-	c.Set("id", 1)
-	c.Set("role", common.RoleRootUser)
-
-	GetContentModerationConversation(c)
-	require.Equal(t, http.StatusNotFound, recorder.Code)
-
-	var convCount int64
-	require.NoError(t, model.DB.Model(&model.ModerationConversation{}).Where("id = ?", conversation.ID).Count(&convCount).Error)
-	assert.Zero(t, convCount, "encrypted conversation should be automatically deleted")
-
-	var turnCount int64
-	require.NoError(t, model.DB.Model(&model.ModerationTurn{}).Where("id = ?", turn.ID).Count(&turnCount).Error)
-	assert.Zero(t, turnCount, "encrypted turn should be automatically deleted")
 }
 
 func TestModerationUserStatusRejectsPeerAdministrator(t *testing.T) {
@@ -431,84 +369,43 @@ func TestUpdateContentModerationSettingsChannels(t *testing.T) {
 	assert.Equal(t, http.StatusBadRequest, badRecorder.Code)
 }
 
-func TestListContentModerationConversationsFiltering(t *testing.T) {
+func TestListContentModerationEventsFiltering(t *testing.T) {
 	gin.SetMode(gin.TestMode)
 	setupModerationTestDB(t)
 
 	now := time.Now().Unix()
-	c1 := model.ModerationConversation{
-		UserID:          101,
-		ConversationID:  "chat-project-alpha-001",
-		Status:          "active",
-		FirstActivityAt: now - 300,
-		LastActivityAt:  now - 200,
-		ExpiresAt:       now + 600000,
+	e1 := model.ModerationEvent{
+		UserID: 101, Source: model.ModerationEventSourcePreflight, Actor: model.ModerationEventActorUser,
+		Decision: "block", Severity: "high", Status: model.ModerationEventActive, UserExcerpt: "alpha",
+		CreatedAt: now - 200, ExpiresAt: now + 600000,
 	}
-	c2 := model.ModerationConversation{
-		UserID:          102,
-		ConversationID:  "chat-project-beta-002",
-		Status:          "blocked",
-		FirstActivityAt: now - 500,
-		LastActivityAt:  now - 100,
-		ExpiresAt:       now + 600000,
+	e2 := model.ModerationEvent{
+		UserID: 102, Source: model.ModerationEventSourcePostflight, Actor: model.ModerationEventActorAssistant,
+		Decision: "block", Severity: "medium", Status: model.ModerationEventFalsePositive, UserExcerpt: "beta",
+		CreatedAt: now - 100, ExpiresAt: now + 600000,
 	}
-	c3 := model.ModerationConversation{
-		UserID:          101,
-		ConversationID:  "chat-project-gamma-003",
-		Status:          "resolved",
-		FirstActivityAt: now - 800,
-		LastActivityAt:  now - 50,
-		ExpiresAt:       now + 600000,
+	e3 := model.ModerationEvent{
+		UserID: 101, Source: model.ModerationEventSourcePreflight, Actor: model.ModerationEventActorUser,
+		Decision: "block", Severity: "low", Status: model.ModerationEventReversed, UserExcerpt: "gamma",
+		CreatedAt: now - 50, ExpiresAt: now + 600000,
 	}
-	require.NoError(t, model.DB.Create(&c1).Error)
-	require.NoError(t, model.DB.Create(&c2).Error)
-	require.NoError(t, model.DB.Create(&c3).Error)
+	require.NoError(t, model.DB.Create(&e1).Error)
+	require.NoError(t, model.DB.Create(&e2).Error)
+	require.NoError(t, model.DB.Create(&e3).Error)
 
 	tests := []struct {
 		name          string
 		queryURL      string
 		expectedCount int
 	}{
-		{
-			name:          "all conversations",
-			queryURL:      "/api/moderation/conversations",
-			expectedCount: 3,
-		},
-		{
-			name:          "filter by status active",
-			queryURL:      "/api/moderation/conversations?status=active",
-			expectedCount: 1,
-		},
-		{
-			name:          "filter by status all returns all",
-			queryURL:      "/api/moderation/conversations?status=all",
-			expectedCount: 3,
-		},
-		{
-			name:          "filter by user_id 101",
-			queryURL:      "/api/moderation/conversations?user_id=101",
-			expectedCount: 2,
-		},
-		{
-			name:          "filter by conversation_id substring 'beta'",
-			queryURL:      "/api/moderation/conversations?conversation_id=beta",
-			expectedCount: 1,
-		},
-		{
-			name:          "filter by time range",
-			queryURL:      fmt.Sprintf("/api/moderation/conversations?start_timestamp=%d&end_timestamp=%d", now-150, now),
-			expectedCount: 2, // c2 (now-100) and c3 (now-50)
-		},
-		{
-			name:          "combined filter user_id and status",
-			queryURL:      "/api/moderation/conversations?user_id=101&status=resolved",
-			expectedCount: 1,
-		},
-		{
-			name:          "combined filter no match",
-			queryURL:      "/api/moderation/conversations?user_id=102&status=resolved",
-			expectedCount: 0,
-		},
+		{name: "all events", queryURL: "/api/moderation/events", expectedCount: 3},
+		{name: "filter by status active", queryURL: "/api/moderation/events?status=active", expectedCount: 1},
+		{name: "filter by status all returns all", queryURL: "/api/moderation/events?status=all", expectedCount: 3},
+		{name: "filter by user_id 101", queryURL: "/api/moderation/events?user_id=101", expectedCount: 2},
+		{name: "filter by source postflight", queryURL: "/api/moderation/events?source=postflight", expectedCount: 1},
+		{name: "filter by time range", queryURL: fmt.Sprintf("/api/moderation/events?start_timestamp=%d&end_timestamp=%d", now-150, now), expectedCount: 2},
+		{name: "combined filter user_id and status", queryURL: "/api/moderation/events?user_id=101&status=reversed", expectedCount: 1},
+		{name: "combined filter no match", queryURL: "/api/moderation/events?user_id=102&status=reversed", expectedCount: 0},
 	}
 
 	for _, tt := range tests {
@@ -519,13 +416,13 @@ func TestListContentModerationConversationsFiltering(t *testing.T) {
 			c.Set("id", 1)
 			c.Set("role", 100)
 
-			ListContentModerationConversations(c)
+			ListContentModerationEvents(c)
 			require.Equal(t, http.StatusOK, recorder.Code)
 
 			var resp struct {
-				Success bool                           `json:"success"`
-				Data    []model.ModerationConversation `json:"data"`
-				Total   int64                          `json:"total"`
+				Success bool                    `json:"success"`
+				Data    []model.ModerationEvent `json:"data"`
+				Total   int64                   `json:"total"`
 			}
 			require.NoError(t, common.Unmarshal(recorder.Body.Bytes(), &resp))
 			assert.True(t, resp.Success)
@@ -640,4 +537,106 @@ func TestUpdateContentModerationSettingsUserWhitelistAndRetentionDays(t *testing
 
 	UpdateContentModerationSettings(badC2)
 	assert.Equal(t, http.StatusBadRequest, badRecorder2.Code)
+}
+
+func TestUpdateContentModerationSettingsAcceptsMultipleAPIKeys(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	setupModerationTestDB(t)
+
+	body := `{
+		"enabled": true,
+		"base_url": "https://api.openai.com/v1",
+		"api_key": "sk-moderation-key-one\nsk-moderation-key-two\n\nsk-moderation-key-three",
+		"model": "omni-moderation-latest",
+		"timeout_seconds": 30,
+		"max_retries": 3
+	}`
+	recorder := httptest.NewRecorder()
+	c, _ := gin.CreateTestContext(recorder)
+	c.Request = httptest.NewRequest(http.MethodPut, "/api/moderation/settings", strings.NewReader(body))
+	c.Request.Header.Set("Content-Type", "application/json")
+	c.Set("id", 1)
+	c.Set("role", 100)
+	UpdateContentModerationSettings(c)
+	require.Equal(t, http.StatusOK, recorder.Code)
+
+	getRecorder := httptest.NewRecorder()
+	getC, _ := gin.CreateTestContext(getRecorder)
+	getC.Request = httptest.NewRequest(http.MethodGet, "/api/moderation/settings", nil)
+	getC.Set("id", 1)
+	getC.Set("role", 100)
+	GetContentModerationSettings(getC)
+	require.Equal(t, http.StatusOK, getRecorder.Code)
+
+	var getResp struct {
+		Success bool                              `json:"success"`
+		Data    contentModerationSettingsResponse `json:"data"`
+	}
+	require.NoError(t, common.Unmarshal(getRecorder.Body.Bytes(), &getResp))
+	assert.True(t, getResp.Data.APIKeyConfigured)
+	assert.Equal(t, 3, getResp.Data.APIKeyCount)
+
+	keyRecorder := httptest.NewRecorder()
+	keyC, _ := gin.CreateTestContext(keyRecorder)
+	keyC.Request = httptest.NewRequest(http.MethodPost, "/api/moderation/key", nil)
+	keyC.Set("id", 1)
+	keyC.Set("role", 100)
+	GetContentModerationKey(keyC)
+	require.Equal(t, http.StatusOK, keyRecorder.Code)
+	var keyResp struct {
+		Data struct {
+			Key string `json:"key"`
+		} `json:"data"`
+	}
+	require.NoError(t, common.Unmarshal(keyRecorder.Body.Bytes(), &keyResp))
+	assert.Equal(t, "sk-moderation-key-one\nsk-moderation-key-two\nsk-moderation-key-three", keyResp.Data.Key)
+}
+
+func TestUpdateContentModerationSettingsRejectsTooManyAPIKeys(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	setupModerationTestDB(t)
+
+	keys := make([]string, setting.MaxContentModerationAPIKeys+1)
+	for i := range keys {
+		keys[i] = fmt.Sprintf("sk-key-%d", i+1)
+	}
+	body := fmt.Sprintf(`{
+		"enabled": true,
+		"base_url": "https://api.openai.com/v1",
+		"api_key": %q,
+		"model": "omni-moderation-latest",
+		"timeout_seconds": 30,
+		"max_retries": 3
+	}`, strings.Join(keys, "\n"))
+	recorder := httptest.NewRecorder()
+	c, _ := gin.CreateTestContext(recorder)
+	c.Request = httptest.NewRequest(http.MethodPut, "/api/moderation/settings", strings.NewReader(body))
+	c.Request.Header.Set("Content-Type", "application/json")
+	c.Set("id", 1)
+	c.Set("role", 100)
+	UpdateContentModerationSettings(c)
+	require.Equal(t, http.StatusBadRequest, recorder.Code)
+}
+
+func TestTestContentModerationKeysRejectsEmptyKeys(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	setupModerationTestDB(t)
+
+	recorder := httptest.NewRecorder()
+	c, _ := gin.CreateTestContext(recorder)
+	c.Request = httptest.NewRequest(http.MethodPost, "/api/moderation/keys/test", strings.NewReader(`{
+		"base_url": "https://api.openai.com/v1",
+		"model": "omni-moderation-latest",
+		"api_key": ""
+	}`))
+	c.Request.Header.Set("Content-Type", "application/json")
+	c.Set("id", 1)
+	c.Set("role", 100)
+	TestContentModerationKeys(c)
+	require.Equal(t, http.StatusBadRequest, recorder.Code)
+	var response struct {
+		Message string `json:"message"`
+	}
+	require.NoError(t, common.Unmarshal(recorder.Body.Bytes(), &response))
+	assert.Contains(t, response.Message, "no moderation API keys")
 }

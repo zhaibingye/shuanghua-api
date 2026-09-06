@@ -22,11 +22,10 @@ import type {
   ConfirmPaymentComplianceResponse,
   ContentModerationSettingsResponse,
   ContentModerationSettingsUpdate,
-  ModerationConversationDetailResponse,
-  ModerationConversationListResponse,
+  ModerationKeyTestResponse,
+  ModerationEventListResponse,
   ModerationUserDetailResponse,
   ModerationUserListResponse,
-  ModerationViolationListResponse,
   FetchUpstreamRatiosRequest,
   LogCleanupTask,
   SystemOptionsResponse,
@@ -66,60 +65,41 @@ export async function updateContentModerationSettings(
   return res.data
 }
 
-export async function listContentModerationConversations(params?: {
+export async function testContentModerationKeys(request: {
+  base_url: string
+  model: string
+  api_key: string
+}) {
+  const res = await api.post<ModerationKeyTestResponse>(
+    '/api/moderation/keys/test',
+    request
+  )
+  return res.data
+}
+
+export async function listContentModerationEvents(params?: {
   user_id?: number
   status?: string
-  conversation_id?: string
+  source?: string
   start_timestamp?: number
   end_timestamp?: number
   limit?: number
   offset?: number
 }) {
-  const res = await api.get<ModerationConversationListResponse>(
-    '/api/moderation/conversations',
+  const res = await api.get<ModerationEventListResponse>(
+    '/api/moderation/events',
     { params }
   )
   return res.data
 }
 
-export async function getContentModerationConversation(id: number) {
-  const res = await api.get<ModerationConversationDetailResponse>(
-    `/api/moderation/conversations/${id}`
-  )
-  return res.data
-}
-
-export async function unblockContentModerationConversation(
-  id: number,
-  reason: string
-) {
-  const res = await api.post<{ success: boolean }>(
-    `/api/moderation/conversations/${id}/unblock`,
-    { reason }
-  )
-  return res.data
-}
-
-export async function listContentModerationViolations(params?: {
-  user_id?: number
-  status?: string
-  limit?: number
-  offset?: number
-}) {
-  const res = await api.get<ModerationViolationListResponse>(
-    '/api/moderation/violations',
-    { params }
-  )
-  return res.data
-}
-
-export async function resolveContentModerationViolation(
+export async function resolveContentModerationEvent(
   id: number,
   status: 'false_positive' | 'reversed',
   reason: string
 ) {
   const res = await api.post<{ success: boolean }>(
-    `/api/moderation/violations/${id}/resolve`,
+    `/api/moderation/events/${id}/resolve`,
     { status, reason }
   )
   return res.data
@@ -148,13 +128,9 @@ export async function listContentModerationUsers(params?: {
   return res.data
 }
 
-export async function getContentModerationUser(
-  id: number,
-  conversationMode: 'violations' | 'all' = 'violations'
-) {
+export async function getContentModerationUser(id: number) {
   const res = await api.get<ModerationUserDetailResponse>(
-    `/api/moderation/users/${id}`,
-    { params: { conversation_mode: conversationMode } }
+    `/api/moderation/users/${id}`
   )
   return res.data
 }

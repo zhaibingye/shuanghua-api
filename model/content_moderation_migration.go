@@ -22,11 +22,6 @@ type moderationUniqueConstraintTarget struct {
 
 var moderationUniqueConstraintTargets = []moderationUniqueConstraintTarget{
 	{
-		model:      &ModerationNotification{},
-		columnName: "dedupe_key",
-		indexName:  "idx_moderation_notifications_dedupe",
-	},
-	{
 		model:      &ModerationTokenState{},
 		columnName: "token_id",
 		indexName:  "idx_moderation_token_states_token_id",
@@ -40,11 +35,6 @@ var moderationUniqueConstraintTargets = []moderationUniqueConstraintTarget{
 		model:      &ModerationUserRecord{},
 		columnName: "user_id",
 		indexName:  "idx_moderation_user_records_user_id",
-	},
-	{
-		model:      &ModerationJob{},
-		columnName: "turn_id",
-		indexName:  "idx_moderation_jobs_turn_id",
 	},
 }
 

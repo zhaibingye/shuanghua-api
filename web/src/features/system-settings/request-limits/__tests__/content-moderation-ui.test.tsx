@@ -23,25 +23,23 @@ import type { ReactNode } from 'react'
 import { beforeEach, describe, expect, test, vi } from 'vitest'
 
 import type {
-  ModerationConversationDetail,
-  ModerationConversationListResponse,
+  ModerationEvent,
+  ModerationEventListResponse,
   ModerationUserListResponse,
 } from '../../types'
 import {
-  ConversationDetail,
   ContentModerationRecordsSection,
+  EventDetail,
 } from '../content-moderation-records-section'
 import { ContentModerationUsersSection } from '../content-moderation-users-section'
 
 const mocks = vi.hoisted(() => ({
   deleteContentModerationUserHistory: vi.fn(),
-  getContentModerationConversation: vi.fn(),
-  listContentModerationConversations: vi.fn(),
+  listContentModerationEvents: vi.fn(),
   getContentModerationUser: vi.fn(),
   listContentModerationUsers: vi.fn(),
-  resolveContentModerationViolation: vi.fn(),
+  resolveContentModerationEvent: vi.fn(),
   restoreContentModerationUser: vi.fn(),
-  unblockContentModerationConversation: vi.fn(),
   updateContentModerationUser: vi.fn(),
   updateContentModerationUserStatus: vi.fn(),
 }))
@@ -63,60 +61,48 @@ const emptyUsersResponse: ModerationUserListResponse = {
   total: 0,
 }
 
-const conversationListResponse: ModerationConversationListResponse = {
+const eventListResponse: ModerationEventListResponse = {
   success: true,
   data: [],
   total: 250,
 }
 
-const conversationDetail: ModerationConversationDetail = {
-  conversation: {
-    id: 1,
-    user_id: 2,
-    conversation_id: 'conversation-1',
-    status: 'active',
-    first_activity_at: 100,
-    last_activity_at: 200,
-    expires_at: 300,
-  },
-  turns: [
-    {
-      id: 1,
-      round_number: 1,
-      request_id: 'request-1',
-      system_prompt: 'system instructions',
-      user_prompt: 'user instructions',
-      assistant_reply: 'assistant response',
-      response_status: 'success',
-      relay_format: 'responses',
-      model: 'moderation-model',
-      review_required: true,
-      created_at: 200,
-    },
-  ],
-  jobs: [],
-  violations: [],
-  actions: [],
-  notifications: [],
+const eventDetail: ModerationEvent = {
+  id: 1,
+  user_id: 2,
+  request_id: 'request-1',
+  model: 'gpt-4o-mini',
+  relay_format: 'openai',
+  source: 'preflight',
+  actor: 'user',
+  decision: 'block',
+  severity: 'high',
+  categories: '["violence"]',
+  confidence: 0.91,
+  reason_code: 'violence',
+  user_excerpt: 'user instructions',
+  assistant_excerpt: '',
+  image_count: 0,
+  status: 'active',
+  created_at: 200,
+  expires_at: 300,
 }
 
 describe('content moderation UI', () => {
   beforeEach(() => {
     vi.clearAllMocks()
     mocks.listContentModerationUsers.mockResolvedValue(emptyUsersResponse)
-    mocks.listContentModerationConversations.mockResolvedValue(
-      conversationListResponse
-    )
+    mocks.listContentModerationEvents.mockResolvedValue(eventListResponse)
   })
 
   test('uses the usage-log filter and pagination controls for moderation records', async () => {
     renderWithQueryClient(<ContentModerationRecordsSection />)
 
     await vi.waitFor(() =>
-      expect(mocks.listContentModerationConversations).toHaveBeenCalled()
+      expect(mocks.listContentModerationEvents).toHaveBeenCalled()
     )
     expect(
-      await screen.findByText('No moderation conversations found.')
+      await screen.findByText('No moderation events found.')
     ).toBeInTheDocument()
     expect(screen.getAllByText('250')).not.toHaveLength(0)
     const user = userEvent.setup()
@@ -124,7 +110,7 @@ describe('content moderation UI', () => {
     expect(page2Button).toBeInTheDocument()
     await user.click(page2Button)
     await vi.waitFor(() =>
-      expect(mocks.listContentModerationConversations).toHaveBeenLastCalledWith(
+      expect(mocks.listContentModerationEvents).toHaveBeenLastCalledWith(
         expect.objectContaining({ limit: 20, offset: 20 })
       )
     )
@@ -138,7 +124,7 @@ describe('content moderation UI', () => {
     await user.click(screen.getByRole('option', { name: '100' }))
 
     await vi.waitFor(() =>
-      expect(mocks.listContentModerationConversations).toHaveBeenLastCalledWith(
+      expect(mocks.listContentModerationEvents).toHaveBeenLastCalledWith(
         expect.objectContaining({ limit: 100, offset: 0 })
       )
     )
@@ -156,44 +142,16 @@ describe('content moderation UI', () => {
     expect(screen.queryByText('Moderation user notes')).not.toBeInTheDocument()
   })
 
-  test('renders moderation turn content in a neutral project-style panel', () => {
+  test('renders moderation excerpts in a neutral project-style panel', () => {
     renderWithQueryClient(
-      <ConversationDetail
-        detail={conversationDetail}
-        onRefresh={vi.fn()}
-        onClose={vi.fn()}
-      />
+      <EventDetail event={eventDetail} onRefresh={vi.fn()} onClose={vi.fn()} />
     )
 
-    const systemPrompt = screen.getByText('system instructions')
-    const panel = systemPrompt.closest('.bg-card')
+    const userExcerpt = screen.getByText('user instructions')
+    const panel = userExcerpt.closest('.bg-card')
 
     expect(panel).not.toBeNull()
     expect(panel).toHaveClass('bg-card')
     expect(panel).not.toHaveClass('border-sky-500/25')
-    expect(screen.getByText('user instructions')).toBeInTheDocument()
-    expect(screen.getByText('assistant response')).toBeInTheDocument()
-  })
-
-  test('shows a safe marker when moderation content cannot be decrypted', () => {
-    const unavailableDetail: ModerationConversationDetail = {
-      ...conversationDetail,
-      turns: conversationDetail.turns.map((turn) => ({
-        ...turn,
-        system_prompt: '',
-        user_prompt: '',
-        assistant_reply: '',
-        content_unavailable: true,
-      })),
-    }
-    renderWithQueryClient(
-      <ConversationDetail
-        detail={unavailableDetail}
-        onRefresh={vi.fn()}
-        onClose={vi.fn()}
-      />
-    )
-
-    expect(screen.getAllByText('Content unavailable')).toHaveLength(3)
   })
 })
