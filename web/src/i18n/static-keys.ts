@@ -551,6 +551,17 @@ export const STATIC_I18N_KEYS = [
   'The model that was requested',
   'The upstream channel that served the requests',
 
+  // Custom OAuth auth styles
+  'Auto Detect',
+  'Params (in body)',
+  'Header (Basic Auth)',
+
+  // Content Moderation sections
+  'Content Moderation',
+  'Moderation Records',
+  'Violating Users',
+  'Save content moderation settings',
+
   // Misc
   'Cancel',
   'Status',

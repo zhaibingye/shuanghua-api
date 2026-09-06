@@ -1480,4 +1480,3 @@ func TestUpdateUserRecordOnViolationUnarchives(t *testing.T) {
 		_ = model.DB.Where("user_id = ?", userID).Delete(&model.ModerationUserRecord{}).Error
 	})
 }
-
