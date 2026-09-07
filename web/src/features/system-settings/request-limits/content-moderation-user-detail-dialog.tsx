@@ -145,7 +145,7 @@ export function ContentModerationUserDetailDialog(props: Props) {
       deleteContentModerationUserHistory(currentUser?.user_id ?? 0),
     onSuccess: async () => {
       setDeleteDialogOpen(false)
-      toast.success(t('History note deleted'))
+      toast.success(t('User moderation record deleted'))
       await invalidateUserQueries()
       props.onOpenChange(false)
     },
@@ -264,17 +264,15 @@ export function ContentModerationUserDetailDialog(props: Props) {
                     )}
                     {isEnabled ? t('Disable account') : t('Enable account')}
                   </Button>
-                  {isHistory && (
-                    <Button
-                      type='button'
-                      variant='outline'
-                      className='text-destructive hover:text-destructive'
-                      onClick={() => setDeleteDialogOpen(true)}
-                    >
-                      <Trash2 data-icon='inline-start' />
-                      {t('Delete history note')}
-                    </Button>
-                  )}
+                  <Button
+                    type='button'
+                    variant='outline'
+                    className='text-destructive hover:text-destructive'
+                    onClick={() => setDeleteDialogOpen(true)}
+                  >
+                    <Trash2 data-icon='inline-start' />
+                    {t('Delete user record')}
+                  </Button>
                 </div>
 
                 <div className='rounded-xl border p-4'>
@@ -411,9 +409,9 @@ export function ContentModerationUserDetailDialog(props: Props) {
       <ConfirmDialog
         open={deleteDialogOpen}
         onOpenChange={setDeleteDialogOpen}
-        title={t('Delete history note')}
+        title={t('Delete user record')}
         desc={t(
-          'Delete this moderation history note? Original violation events will not be deleted.'
+          'Are you sure you want to delete this user moderation record? Associated violation events and notes will be cleared.'
         )}
         confirmText={t('Delete')}
         handleConfirm={() => deleteMutation.mutate()}

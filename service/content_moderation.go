@@ -1624,9 +1624,16 @@ func DeleteModerationUserHistory(userID, adminID, adminRole int) error {
 			return err
 		}
 	}
-	now := common.GetTimestamp()
-	cutoff := now - int64(setting.GetContentModerationSetting().GetViolationRetentionDuration().Seconds())
-	return model.DeleteModerationUserHistoryIfArchived(userID, cutoff, now)
+	if err := model.DeleteModerationUserData(userID); err != nil {
+		return err
+	}
+	action := model.ModerationAction{
+		AdminID: adminID,
+		UserID:  userID,
+		Action:  "delete_user_moderation_record",
+	}
+	_ = model.DB.Create(&action).Error
+	return nil
 }
 
 func RestoreUserAfterModeration(userID, adminID int, reason string) error {

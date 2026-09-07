@@ -176,6 +176,22 @@ func countUserModerationEventsAfterWithTx(tx *gorm.DB, userID int, after, cutoff
 	return count, err
 }
 
+// DeleteModerationUserData completely removes all moderation events and user record for a user.
+func DeleteModerationUserData(userID int) error {
+	if userID <= 0 {
+		return errors.New("invalid moderation user")
+	}
+	return DB.Transaction(func(tx *gorm.DB) error {
+		if err := tx.Where("user_id = ?", userID).Delete(&ModerationEvent{}).Error; err != nil {
+			return err
+		}
+		if err := tx.Where("user_id = ?", userID).Delete(&ModerationUserRecord{}).Error; err != nil {
+			return err
+		}
+		return nil
+	})
+}
+
 // DeleteModerationUserHistoryIfArchived rechecks the current active event
 // set under a row lock immediately before deleting a history record.
 func DeleteModerationUserHistoryIfArchived(userID int, cutoff, now int64) error {

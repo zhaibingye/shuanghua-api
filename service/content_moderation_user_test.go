@@ -1,7 +1,6 @@
 package service
 
 import (
-	"errors"
 	"fmt"
 	"testing"
 	"time"
@@ -267,7 +266,7 @@ func TestResolveModerationEventMarksFalsePositive(t *testing.T) {
 	assert.Equal(t, "reviewed", stored.ResolutionNote)
 }
 
-func TestDeleteModerationUserHistoryRejectsActiveRecords(t *testing.T) {
+func TestDeleteModerationUserHistoryCleansRecordAndEvents(t *testing.T) {
 	require.NoError(t, model.DB.AutoMigrate(&model.User{}, &model.ModerationUserRecord{}, &model.ModerationEvent{}))
 	userID := int(time.Now().UnixNano()%1_000_000_000 + 9)
 	user := &model.User{
@@ -286,6 +285,14 @@ func TestDeleteModerationUserHistoryRejectsActiveRecords(t *testing.T) {
 		Decision: "block", Severity: "high", Status: model.ModerationEventActive, CreatedAt: now, ExpiresAt: now + 3600,
 	}, true))
 	err := DeleteModerationUserHistory(userID, 999999, common.RoleRootUser)
-	require.Error(t, err)
-	assert.True(t, errors.Is(err, model.ErrModerationUserHistoryOnly) || err != nil)
+	require.NoError(t, err)
+
+	// Verify both user record and moderation events are purged
+	var eventCount int64
+	require.NoError(t, model.DB.Model(&model.ModerationEvent{}).Where("user_id = ?", userID).Count(&eventCount).Error)
+	assert.Equal(t, int64(0), eventCount)
+
+	var recordCount int64
+	require.NoError(t, model.DB.Model(&model.ModerationUserRecord{}).Where("user_id = ?", userID).Count(&recordCount).Error)
+	assert.Equal(t, int64(0), recordCount)
 }
