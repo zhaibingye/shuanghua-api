@@ -18,6 +18,9 @@ const (
 
 	ModerationEventActorUser      = "user"
 	ModerationEventActorAssistant = "assistant"
+
+	ModerationEventDecisionBlock = "block"
+	ModerationEventDecisionAllow = "allow"
 )
 
 var (
@@ -147,7 +150,7 @@ func CountRecentUserModerationEventsWithTx(tx *gorm.DB, userID int, cutoff int64
 	}
 	var count int64
 	err := tx.Model(&ModerationEvent{}).
-		Where("user_id = ? AND actor = ? AND status = ? AND created_at >= ? AND expires_at > ?", userID, ModerationEventActorUser, ModerationEventActive, cutoff, now).
+		Where("user_id = ? AND actor = ? AND decision = ? AND status = ? AND created_at >= ? AND expires_at > ?", userID, ModerationEventActorUser, ModerationEventDecisionBlock, ModerationEventActive, cutoff, now).
 		Count(&count).Error
 	return count, err
 }
@@ -164,7 +167,7 @@ func countUserModerationEventsAfterWithTx(tx *gorm.DB, userID int, after, cutoff
 		now = common.GetTimestamp()
 	}
 	query := tx.Model(&ModerationEvent{}).
-		Where("user_id = ? AND actor = ? AND status = ? AND expires_at > ?", userID, ModerationEventActorUser, ModerationEventActive, now)
+		Where("user_id = ? AND actor = ? AND decision = ? AND status = ? AND expires_at > ?", userID, ModerationEventActorUser, ModerationEventDecisionBlock, ModerationEventActive, now)
 	if cutoff > 0 {
 		query = query.Where("created_at >= ?", cutoff)
 	}

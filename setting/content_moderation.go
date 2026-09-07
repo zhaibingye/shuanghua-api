@@ -22,6 +22,7 @@ const (
 	ContentModerationPreflightOption              = "ContentModerationPreflight"
 	ContentModerationPostflightOption             = "ContentModerationPostflight"
 	ContentModerationFailureModeOption            = "ContentModerationFailureMode"
+	ContentModerationBlockSeverityOption          = "ContentModerationBlockSeverity"
 	ContentModerationTimeoutSecondsOption         = "ContentModerationTimeoutSeconds"
 	ContentModerationMaxRetriesOption             = "ContentModerationMaxRetries"
 	ContentModerationAutoDisableViolationsOption  = "ContentModerationAutoDisableViolations"
@@ -33,6 +34,7 @@ const (
 	DefaultContentModerationPreflight              = true
 	DefaultContentModerationPostflight             = false
 	DefaultContentModerationFailureMode            = "closed"
+	DefaultContentModerationBlockSeverity          = "critical"
 	DefaultContentModerationTimeoutSeconds         = 30
 	DefaultContentModerationMaxRetries             = 3
 	DefaultContentModerationUserWhitelist          = "1"
@@ -43,6 +45,13 @@ const (
 	MaxContentModerationAPIKeys           = 50
 	MaxContentModerationAPIKeyBytes       = 32 * 1024
 	MaxContentModerationSingleAPIKeyBytes = 4096
+)
+
+const (
+	ModerationSeverityLow      = "low"
+	ModerationSeverityMedium   = "medium"
+	ModerationSeverityHigh     = "high"
+	ModerationSeverityCritical = "critical"
 )
 
 type ContentModerationSetting struct {
@@ -56,6 +65,7 @@ type ContentModerationSetting struct {
 	APIKey                 string
 	APIKeys                []string
 	Model                  string
+	BlockSeverity          string
 	PreflightEnabled       bool
 	PostflightEnabled      bool
 	FailureMode            string
@@ -132,6 +142,7 @@ func GetContentModerationSetting() ContentModerationSetting {
 	if failureMode != "open" && failureMode != "closed" {
 		failureMode = DefaultContentModerationFailureMode
 	}
+	blockSeverity := NormalizeBlockSeverity(optionString(ContentModerationBlockSeverityOption, DefaultContentModerationBlockSeverity))
 	autoDisable := optionInt(ContentModerationAutoDisableViolationsOption, DefaultContentModerationAutoDisableViolations)
 	if autoDisable < 0 || autoDisable > 1000 {
 		autoDisable = DefaultContentModerationAutoDisableViolations
@@ -147,6 +158,7 @@ func GetContentModerationSetting() ContentModerationSetting {
 		APIKey:                 apiKey,
 		APIKeys:                apiKeys,
 		Model:                  modelName,
+		BlockSeverity:          blockSeverity,
 		PreflightEnabled:       preflightEnabled,
 		PostflightEnabled:      postflightEnabled,
 		FailureMode:            failureMode,
@@ -305,6 +317,43 @@ func (s ContentModerationSetting) ShouldModerateChannel(channelID int) bool {
 		return false
 	}
 	return slices.Contains(s.ChannelIDs, channelID)
+}
+
+// SeverityRank maps severity strings to integer ranks for comparison.
+// Rank: critical (4) > high (3) > medium (2) > low (1) > none (0).
+func SeverityRank(severity string) int {
+	switch strings.ToLower(strings.TrimSpace(severity)) {
+	case ModerationSeverityCritical:
+		return 4
+	case ModerationSeverityHigh:
+		return 3
+	case ModerationSeverityMedium:
+		return 2
+	case ModerationSeverityLow:
+		return 1
+	default:
+		return 0
+	}
+}
+
+// NormalizeBlockSeverity normalizes a block severity string, falling back to DefaultContentModerationBlockSeverity if invalid.
+func NormalizeBlockSeverity(severity string) string {
+	switch strings.ToLower(strings.TrimSpace(severity)) {
+	case ModerationSeverityCritical, ModerationSeverityHigh, ModerationSeverityMedium, ModerationSeverityLow:
+		return strings.ToLower(strings.TrimSpace(severity))
+	default:
+		return DefaultContentModerationBlockSeverity
+	}
+}
+
+// ShouldBlockSeverity checks whether the given severity meets or exceeds the configured block threshold.
+func ShouldBlockSeverity(severity, threshold string) bool {
+	thresholdRank := SeverityRank(NormalizeBlockSeverity(threshold))
+	return SeverityRank(severity) >= thresholdRank
+}
+
+func (s ContentModerationSetting) ShouldBlock(severity string) bool {
+	return ShouldBlockSeverity(severity, s.BlockSeverity)
 }
 
 func optionString(key, fallback string) string {

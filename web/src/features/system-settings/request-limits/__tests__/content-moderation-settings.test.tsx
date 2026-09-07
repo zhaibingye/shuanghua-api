@@ -56,6 +56,7 @@ const settingsResponse: ContentModerationSettingsResponse = {
     violation_retention_days: 7,
     base_url: '',
     model: 'omni-moderation-latest',
+    block_severity: 'critical',
     timeout_seconds: 30,
     max_retries: 3,
     api_key_configured: false,
@@ -236,6 +237,22 @@ describe('content moderation settings', () => {
 
     const textarea = await screen.findByLabelText('Moderation API keys')
     expect(textarea).toHaveValue('sk-line-1\nsk-line-2')
+    actionsContainer.remove()
+  })
+
+  test('submits default block_severity as critical', async () => {
+    const { actionsContainer } = renderSettings()
+
+    const saveButton = await screen.findByRole('button', {
+      name: 'Save content moderation settings',
+    })
+    fireEvent.click(saveButton)
+
+    await waitFor(() => {
+      expect(mocks.updateContentModerationSettings.mock.calls[0]?.[0]).toMatchObject({
+        block_severity: 'critical',
+      })
+    })
     actionsContainer.remove()
   })
 })

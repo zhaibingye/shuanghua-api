@@ -82,7 +82,7 @@ func TestCallNativeModerationOpenAIFormat(t *testing.T) {
 	assert.True(t, result.Categories["hate"])
 	assert.Equal(t, 0.92, result.CategoryScores["hate"])
 
-	decision := moderationDecisionFromNativeResult(result)
+	decision := moderationDecisionFromNativeResult(result, "critical")
 	assert.Equal(t, "block", decision.Decision)
 	assert.Equal(t, "critical", decision.Severity)
 	assert.Contains(t, decision.Categories, "hate")
@@ -128,6 +128,7 @@ func TestPreflightModerationRequestBlocksFlaggedContent(t *testing.T) {
 		BaseURL:          server.URL + "/v1",
 		APIKey:           "test-key",
 		Model:            "omni-moderation-latest",
+		BlockSeverity:    "high",
 		FailureMode:      "closed",
 		TimeoutSeconds:   2,
 		MaxRetries:       1,
@@ -193,6 +194,79 @@ func TestPreflightModerationRequestCachesAllowAndBlock(t *testing.T) {
 	require.ErrorIs(t, PreflightModerationRequest(context.Background(), blocked, config), model.ErrModerationBlocked)
 	require.ErrorIs(t, PreflightModerationRequest(context.Background(), blocked, config), model.ErrModerationBlocked)
 	assert.Equal(t, 2, calls)
+}
+
+func TestPreflightModerationRequestSeverityThresholds(t *testing.T) {
+	resetModerationFingerprintCache()
+	t.Cleanup(resetModerationFingerprintCache)
+
+	server := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
+		body, err := io.ReadAll(request.Body)
+		require.NoError(t, err)
+		var reqPayload map[string]any
+		require.NoError(t, common.Unmarshal(body, &reqPayload))
+		inputStr, _ := reqPayload["input"].(string)
+
+		var score float64
+		switch {
+		case strings.Contains(inputStr, "critical"):
+			score = 0.95
+		case strings.Contains(inputStr, "high"):
+			score = 0.82
+		case strings.Contains(inputStr, "medium"):
+			score = 0.60
+		default:
+			score = 0.20
+		}
+
+		resp := map[string]any{
+			"id":    "modr-severity-test",
+			"model": "omni-moderation-latest",
+			"results": []any{
+				map[string]any{
+					"flagged":         true,
+					"categories":      map[string]bool{"harassment": true},
+					"category_scores": map[string]float64{"harassment": score},
+				},
+			},
+		}
+		respBytes, _ := common.Marshal(resp)
+		_, _ = writer.Write(respBytes)
+	}))
+	defer server.Close()
+
+	originalHTTPClient := httpClient
+	httpClient = server.Client()
+	t.Cleanup(func() { httpClient = originalHTTPClient })
+
+	// Case 1: Default configuration (BlockSeverity: "critical")
+	// Only critical (0.95) should be blocked, high (0.82) / medium (0.60) / low (0.20) should be allowed!
+	defaultConfig := setting.ContentModerationSetting{
+		Enabled:          true,
+		PreflightEnabled: true,
+		BaseURL:          server.URL + "/v1",
+		APIKey:           "test-key",
+		Model:            "omni-moderation-latest",
+		BlockSeverity:    "critical",
+		FailureMode:      "closed",
+		TimeoutSeconds:   2,
+		MaxRetries:       1,
+	}
+
+	assert.NoError(t, PreflightModerationRequest(context.Background(), ModerationRequestContent{UserPrompt: "prompt with high risk"}, defaultConfig))
+	assert.NoError(t, PreflightModerationRequest(context.Background(), ModerationRequestContent{UserPrompt: "prompt with medium risk"}, defaultConfig))
+	assert.NoError(t, PreflightModerationRequest(context.Background(), ModerationRequestContent{UserPrompt: "prompt with low risk"}, defaultConfig))
+	assert.ErrorIs(t, PreflightModerationRequest(context.Background(), ModerationRequestContent{UserPrompt: "prompt with critical risk"}, defaultConfig), model.ErrModerationBlocked)
+
+	// Case 2: Configured to "high"
+	// Both critical and high should be blocked, medium and low allowed
+	highConfig := defaultConfig
+	highConfig.BlockSeverity = "high"
+
+	resetModerationFingerprintCache()
+	assert.NoError(t, PreflightModerationRequest(context.Background(), ModerationRequestContent{UserPrompt: "second medium prompt"}, highConfig))
+	assert.ErrorIs(t, PreflightModerationRequest(context.Background(), ModerationRequestContent{UserPrompt: "second high prompt"}, highConfig), model.ErrModerationBlocked)
+	assert.ErrorIs(t, PreflightModerationRequest(context.Background(), ModerationRequestContent{UserPrompt: "second critical prompt"}, highConfig), model.ErrModerationBlocked)
 }
 
 func TestSanitizeModerationTextRuneSafe(t *testing.T) {

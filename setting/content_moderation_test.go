@@ -317,3 +317,47 @@ func TestGetViolationRetentionDuration(t *testing.T) {
 	sTooLarge := ContentModerationSetting{ViolationRetentionDays: 400}
 	assert.Equal(t, 7*24*time.Hour, sTooLarge.GetViolationRetentionDuration())
 }
+
+func TestBlockSeverityHandling(t *testing.T) {
+	assert.Equal(t, "critical", NormalizeBlockSeverity(""))
+	assert.Equal(t, "critical", NormalizeBlockSeverity("unknown"))
+	assert.Equal(t, "high", NormalizeBlockSeverity("high"))
+	assert.Equal(t, "medium", NormalizeBlockSeverity("Medium"))
+	assert.Equal(t, "low", NormalizeBlockSeverity("LOW"))
+
+	assert.Equal(t, 4, SeverityRank("critical"))
+	assert.Equal(t, 3, SeverityRank("high"))
+	assert.Equal(t, 2, SeverityRank("medium"))
+	assert.Equal(t, 1, SeverityRank("low"))
+	assert.Equal(t, 0, SeverityRank("none"))
+
+	// Default threshold: critical
+	assert.True(t, ShouldBlockSeverity("critical", "critical"))
+	assert.False(t, ShouldBlockSeverity("high", "critical"))
+	assert.False(t, ShouldBlockSeverity("medium", "critical"))
+	assert.False(t, ShouldBlockSeverity("low", "critical"))
+
+	// Threshold: high
+	assert.True(t, ShouldBlockSeverity("critical", "high"))
+	assert.True(t, ShouldBlockSeverity("high", "high"))
+	assert.False(t, ShouldBlockSeverity("medium", "high"))
+	assert.False(t, ShouldBlockSeverity("low", "high"))
+
+	// Threshold: medium
+	assert.True(t, ShouldBlockSeverity("critical", "medium"))
+	assert.True(t, ShouldBlockSeverity("high", "medium"))
+	assert.True(t, ShouldBlockSeverity("medium", "medium"))
+	assert.False(t, ShouldBlockSeverity("low", "medium"))
+
+	// Threshold: low
+	assert.True(t, ShouldBlockSeverity("critical", "low"))
+	assert.True(t, ShouldBlockSeverity("high", "low"))
+	assert.True(t, ShouldBlockSeverity("medium", "low"))
+	assert.True(t, ShouldBlockSeverity("low", "low"))
+
+	s := ContentModerationSetting{BlockSeverity: "high"}
+	assert.True(t, s.ShouldBlock("critical"))
+	assert.True(t, s.ShouldBlock("high"))
+	assert.False(t, s.ShouldBlock("medium"))
+	assert.False(t, s.ShouldBlock("low"))
+}

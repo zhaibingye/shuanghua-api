@@ -85,6 +85,7 @@ const contentModerationSchema = z.object({
   base_url: z.string().max(2048),
   api_key: z.string().max(32768),
   model: z.string().max(128),
+  block_severity: z.enum(['critical', 'high', 'medium', 'low']),
   preflight_enabled: z.boolean(),
   postflight_enabled: z.boolean(),
   failure_mode: z.enum(['open', 'closed']),
@@ -107,6 +108,7 @@ const fallbackValues: ContentModerationFormValues = {
   base_url: '',
   api_key: '',
   model: 'omni-moderation-latest',
+  block_severity: 'critical',
   preflight_enabled: true,
   postflight_enabled: false,
   failure_mode: 'closed',
@@ -176,6 +178,7 @@ export function ContentModerationSection(props: ContentModerationSectionProps) {
       base_url: data.base_url ?? '',
       api_key: '',
       model: data.model || 'omni-moderation-latest',
+      block_severity: data.block_severity ?? 'critical',
       preflight_enabled: data.preflight_enabled ?? true,
       postflight_enabled: data.postflight_enabled ?? false,
       failure_mode: data.failure_mode ?? 'closed',
@@ -689,6 +692,63 @@ export function ContentModerationSection(props: ContentModerationSectionProps) {
                     />
                   </FormControl>
                 </SettingsSwitchItem>
+              )}
+            />
+
+            <FormField
+              control={form.control}
+              name='block_severity'
+              render={({ field }) => (
+                <FormItem>
+                  <FormLabel>{t('Risk level threshold')}</FormLabel>
+                  <Select
+                    items={[
+                      {
+                        value: 'critical',
+                        label: t('Critical (score ≥ 0.90, default)'),
+                      },
+                      {
+                        value: 'high',
+                        label: t('High (score ≥ 0.75)'),
+                      },
+                      {
+                        value: 'medium',
+                        label: t('Medium (score ≥ 0.50)'),
+                      },
+                      {
+                        value: 'low',
+                        label: t('Low (any violation score)'),
+                      },
+                    ]}
+                    value={field.value}
+                    onValueChange={field.onChange}
+                  >
+                    <FormControl>
+                      <SelectTrigger className='w-full'>
+                        <SelectValue />
+                      </SelectTrigger>
+                    </FormControl>
+                    <SelectContent alignItemWithTrigger={false}>
+                      <SelectItem value='critical'>
+                        {t('Critical (score ≥ 0.90, default)')}
+                      </SelectItem>
+                      <SelectItem value='high'>
+                        {t('High (score ≥ 0.75)')}
+                      </SelectItem>
+                      <SelectItem value='medium'>
+                        {t('Medium (score ≥ 0.50)')}
+                      </SelectItem>
+                      <SelectItem value='low'>
+                        {t('Low (any violation score)')}
+                      </SelectItem>
+                    </SelectContent>
+                  </Select>
+                  <FormDescription>
+                    {t(
+                      'Only requests with risk severity at or above this threshold will be blocked. Requests below this threshold are allowed.'
+                    )}
+                  </FormDescription>
+                </FormItem>
               )}
             />
 

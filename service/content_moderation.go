@@ -907,7 +907,7 @@ func callModerationContent(ctx context.Context, config setting.ContentModeration
 	return openAIModerationResult{Flagged: false}, nil, nil
 }
 
-func moderationDecisionFromNativeResult(result openAIModerationResult) moderationDecision {
+func moderationDecisionFromNativeResult(result openAIModerationResult, blockSeverity string) moderationDecision {
 	scores := result.CategoryScores
 	if scores == nil {
 		scores = result.Scores
@@ -927,23 +927,25 @@ func moderationDecisionFromNativeResult(result openAIModerationResult) moderatio
 	sort.Strings(categories)
 	severity := "none"
 	if maxScore >= 0.9 {
-		severity = "critical"
+		severity = setting.ModerationSeverityCritical
 	} else if maxScore >= 0.75 {
-		severity = "high"
+		severity = setting.ModerationSeverityHigh
 	} else if maxScore >= 0.5 {
-		severity = "medium"
+		severity = setting.ModerationSeverityMedium
 	} else if len(categories) > 0 {
-		severity = "low"
+		severity = setting.ModerationSeverityLow
 	}
-	decision := "allow"
+	decision := model.ModerationEventDecisionAllow
 	reasonCode := ""
-	if result.Flagged || len(categories) > 0 {
-		decision = "block"
+	if (result.Flagged || len(categories) > 0) && setting.ShouldBlockSeverity(severity, blockSeverity) {
+		decision = model.ModerationEventDecisionBlock
 		if len(categories) > 0 {
 			reasonCode = categories[0]
 		} else {
 			reasonCode = "flagged"
 		}
+	} else if len(categories) > 0 {
+		reasonCode = categories[0]
 	}
 	return moderationDecision{
 		Decision:   decision,
@@ -1040,12 +1042,16 @@ func PreflightModerationRequest(ctx context.Context, content ModerationRequestCo
 		return nil
 	}
 
-	decision := moderationDecisionFromNativeResult(result)
+	decision := moderationDecisionFromNativeResult(result, config.BlockSeverity)
 	if ginCtx, ok := ctx.(*gin.Context); ok {
 		recordModerationEventFromContext(ginCtx, content, "", decision, model.ModerationEventSourcePreflight, config)
 	}
-	storeModerationFingerprint(fp, "block", config.GetViolationRetentionDuration())
-	return model.ErrModerationBlocked
+	if decision.Decision == model.ModerationEventDecisionBlock {
+		storeModerationFingerprint(fp, "block", config.GetViolationRetentionDuration())
+		return model.ErrModerationBlocked
+	}
+	storeModerationFingerprint(fp, "allow", moderationAllowCacheTTL)
+	return nil
 }
 
 func FinalizeModeration(c *gin.Context, info *relaycommon.RelayInfo, relayErr *types.NewAPIError) {
@@ -1082,7 +1088,7 @@ func FinalizeModeration(c *gin.Context, info *relaycommon.RelayInfo, relayErr *t
 		if err != nil || !result.Flagged {
 			return
 		}
-		decision := moderationDecisionFromNativeResult(result)
+		decision := moderationDecisionFromNativeResult(result, cfg.BlockSeverity)
 		decision.Actor = model.ModerationEventActorAssistant
 		now := common.GetTimestamp()
 		expiresAt := now + int64(cfg.GetViolationRetentionDuration().Seconds())
@@ -1178,7 +1184,8 @@ func recordModerationEventFromContext(c *gin.Context, content ModerationRequestC
 		CreatedAt:          now,
 		ExpiresAt:          expiresAt,
 	}
-	if err := persistModerationEvent(event, decision.Actor == model.ModerationEventActorUser); err != nil {
+	userViolation := decision.Decision == model.ModerationEventDecisionBlock && decision.Actor == model.ModerationEventActorUser
+	if err := persistModerationEvent(event, userViolation); err != nil {
 		common.SysError(fmt.Sprintf("failed to record content moderation event: %v", err))
 	}
 }
@@ -1319,7 +1326,7 @@ func ListModerationUsers(status string, userID, limit, offset int) ([]Moderation
 	var aggs []eventAgg
 	vQuery := model.DB.Model(&model.ModerationEvent{}).
 		Select("user_id, count(*) as count, max(created_at) as last_at").
-		Where("actor = ? AND status = ? AND created_at >= ? AND expires_at > ?", model.ModerationEventActorUser, model.ModerationEventActive, cutoff, now).
+		Where("actor = ? AND decision = ? AND status = ? AND created_at >= ? AND expires_at > ?", model.ModerationEventActorUser, model.ModerationEventDecisionBlock, model.ModerationEventActive, cutoff, now).
 		Group("user_id")
 	if userID > 0 {
 		vQuery = vQuery.Where("user_id = ?", userID)

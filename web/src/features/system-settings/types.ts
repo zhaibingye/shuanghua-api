@@ -38,6 +38,7 @@ export type ContentModerationSettings = {
   violation_retention_days?: number
   base_url: string
   model: string
+  block_severity?: 'critical' | 'high' | 'medium' | 'low'
   preflight_enabled?: boolean
   postflight_enabled?: boolean
   failure_mode?: 'open' | 'closed'

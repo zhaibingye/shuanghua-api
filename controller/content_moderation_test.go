@@ -791,3 +791,46 @@ func TestDeleteContentModerationUserHistoryWhenUserDeleted(t *testing.T) {
 	require.NoError(t, model.DB.Model(&model.ModerationUserRecord{}).Where("user_id = ?", 9999).Count(&count).Error)
 	assert.Equal(t, int64(0), count)
 }
+
+func TestUpdateContentModerationSettingsBlockSeverity(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	setupModerationTestDB(t)
+
+	// Valid block_severity: high
+	recorder := httptest.NewRecorder()
+	c, _ := gin.CreateTestContext(recorder)
+	body := `{"enabled": false, "model": "omni-moderation-latest", "block_severity": "high", "timeout_seconds": 30, "max_retries": 3}`
+	c.Request = httptest.NewRequest(http.MethodPut, "/api/moderation/settings", strings.NewReader(body))
+	c.Request.Header.Set("Content-Type", "application/json")
+	c.Set("id", 1)
+	c.Set("role", 100)
+	UpdateContentModerationSettings(c)
+	assert.Equal(t, http.StatusOK, recorder.Code)
+
+	getRecorder := httptest.NewRecorder()
+	getC, _ := gin.CreateTestContext(getRecorder)
+	getC.Request = httptest.NewRequest(http.MethodGet, "/api/moderation/settings", nil)
+	getC.Set("id", 1)
+	getC.Set("role", 100)
+	GetContentModerationSettings(getC)
+	require.Equal(t, http.StatusOK, getRecorder.Code)
+
+	var getResp struct {
+		Success bool                              `json:"success"`
+		Data    contentModerationSettingsResponse `json:"data"`
+	}
+	require.NoError(t, common.Unmarshal(getRecorder.Body.Bytes(), &getResp))
+	assert.Equal(t, "high", getResp.Data.BlockSeverity)
+
+	// Invalid block_severity: returns 400
+	badRecorder := httptest.NewRecorder()
+	badC, _ := gin.CreateTestContext(badRecorder)
+	badBody := `{"enabled": false, "model": "omni-moderation-latest", "block_severity": "invalid_val", "timeout_seconds": 30, "max_retries": 3}`
+	badC.Request = httptest.NewRequest(http.MethodPut, "/api/moderation/settings", strings.NewReader(badBody))
+	badC.Request.Header.Set("Content-Type", "application/json")
+	badC.Set("id", 1)
+	badC.Set("role", 100)
+	UpdateContentModerationSettings(badC)
+	assert.Equal(t, http.StatusBadRequest, badRecorder.Code)
+	assert.Contains(t, badRecorder.Body.String(), "block severity must be critical, high, medium, or low")
+}

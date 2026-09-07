@@ -28,6 +28,7 @@ type contentModerationSettingsResponse struct {
 	ViolationRetentionDays int    `json:"violation_retention_days"`
 	BaseURL                string `json:"base_url"`
 	Model                  string `json:"model"`
+	BlockSeverity          string `json:"block_severity"`
 	PreflightEnabled       bool   `json:"preflight_enabled"`
 	PostflightEnabled      bool   `json:"postflight_enabled"`
 	FailureMode            string `json:"failure_mode"`
@@ -47,6 +48,7 @@ type contentModerationSettingsRequest struct {
 	APIKey                 string `json:"api_key"`
 	ClearAPIKey            bool   `json:"clear_api_key"`
 	Model                  string `json:"model"`
+	BlockSeverity          string `json:"block_severity"`
 	PreflightEnabled       *bool  `json:"preflight_enabled"`
 	PostflightEnabled      *bool  `json:"postflight_enabled"`
 	FailureMode            string `json:"failure_mode"`
@@ -77,6 +79,7 @@ func GetContentModerationSettings(c *gin.Context) {
 			ViolationRetentionDays: config.ViolationRetentionDays,
 			BaseURL:                config.BaseURL,
 			Model:                  config.Model,
+			BlockSeverity:          config.BlockSeverity,
 			PreflightEnabled:       config.PreflightEnabled,
 			PostflightEnabled:      config.PostflightEnabled,
 			FailureMode:            config.FailureMode,
@@ -115,6 +118,17 @@ func UpdateContentModerationSettings(c *gin.Context) {
 	}
 	if failureMode != "open" && failureMode != "closed" {
 		c.JSON(http.StatusBadRequest, gin.H{"success": false, "message": "failure mode must be open or closed"})
+		return
+	}
+	blockSeverity := strings.ToLower(strings.TrimSpace(request.BlockSeverity))
+	if blockSeverity == "" {
+		blockSeverity = setting.DefaultContentModerationBlockSeverity
+	}
+	if blockSeverity != setting.ModerationSeverityCritical &&
+		blockSeverity != setting.ModerationSeverityHigh &&
+		blockSeverity != setting.ModerationSeverityMedium &&
+		blockSeverity != setting.ModerationSeverityLow {
+		c.JSON(http.StatusBadRequest, gin.H{"success": false, "message": "block severity must be critical, high, medium, or low"})
 		return
 	}
 	parsedChannelIDs, err := setting.ValidateChannelIDsString(request.Channels)
@@ -190,6 +204,7 @@ func UpdateContentModerationSettings(c *gin.Context) {
 		setting.ContentModerationViolationRetentionDaysOption: strconv.Itoa(request.ViolationRetentionDays),
 		setting.ContentModerationBaseURLOption:                baseURL,
 		setting.ContentModerationModelOption:                  modelName,
+		setting.ContentModerationBlockSeverityOption:          blockSeverity,
 		setting.ContentModerationPreflightOption:              strconv.FormatBool(*request.PreflightEnabled),
 		setting.ContentModerationPostflightOption:             strconv.FormatBool(*request.PostflightEnabled),
 		setting.ContentModerationFailureModeOption:            failureMode,
@@ -209,6 +224,7 @@ func UpdateContentModerationSettings(c *gin.Context) {
 	}
 	recordManageAudit(c, "moderation.settings_update", map[string]interface{}{
 		"model":                    modelName,
+		"block_severity":           blockSeverity,
 		"enabled":                  request.Enabled,
 		"channels":                 normalizedChannels,
 		"user_whitelist":           normalizedUserWhitelist,
