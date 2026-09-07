@@ -172,6 +172,30 @@ func TestCreditsEndpointWithAPIKey(t *testing.T) {
 			assert.Equal(t, float64(5), data["total_usage"])
 		})
 	}
+
+	t.Run("GET /v1/credits with unlimited token returns user quota instead of 100000000", func(t *testing.T) {
+		unlimitedToken := model.Token{
+			UserId:         user.Id,
+			Key:            "unlimitedcredittestkey",
+			Status:         common.TokenStatusEnabled,
+			ExpiredTime:    -1,
+			UnlimitedQuota: true,
+		}
+		require.NoError(t, model.DB.Create(&unlimitedToken).Error)
+
+		recorder := httptest.NewRecorder()
+		req := httptest.NewRequest(http.MethodGet, "/v1/credits", nil)
+		req.Header.Set("Authorization", "Bearer unlimitedcredittestkey")
+		engine.ServeHTTP(recorder, req)
+
+		require.Equal(t, http.StatusOK, recorder.Code)
+		var payload map[string]any
+		require.NoError(t, common.Unmarshal(recorder.Body.Bytes(), &payload))
+		data, ok := payload["data"].(map[string]any)
+		require.True(t, ok)
+		assert.Equal(t, float64(5), data["total_usage"])
+		assert.Equal(t, float64(5), payload["total_available"])
+	})
 }
 
 func TestGeminiModelEndpointsOnRouter(t *testing.T) {

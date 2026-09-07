@@ -18,9 +18,20 @@ import (
 )
 
 type creditsResponse struct {
-	Data struct {
-		TotalUsage float64 `json:"total_usage"`
+	Object         string  `json:"object"`
+	TotalGranted   float64 `json:"total_granted"`
+	TotalUsed      float64 `json:"total_used"`
+	TotalAvailable float64 `json:"total_available"`
+	Data           struct {
+		TotalGranted   float64 `json:"total_granted"`
+		TotalUsed      float64 `json:"total_used"`
+		TotalAvailable float64 `json:"total_available"`
+		TotalUsage     float64 `json:"total_usage"`
 	} `json:"data"`
+	Error struct {
+		Message string `json:"message"`
+		Type    string `json:"type"`
+	} `json:"error"`
 }
 
 func setupBillingCreditsTestDB(t *testing.T) *gorm.DB {
@@ -75,31 +86,11 @@ func requestCredits(t *testing.T, configureContext func(*gin.Context)) creditsRe
 	return response
 }
 
-func TestGetCreditsUsesTokenRemainingQuotaWhenTokenStatsEnabled(t *testing.T) {
+func TestGetCreditsUsesUserQuotaRegardlessOfTokenStats(t *testing.T) {
 	db := setupBillingCreditsTestDB(t)
-
-	token := model.Token{
-		Id:          12,
-		UserId:      34,
-		Key:         "credits-token",
-		Status:      common.TokenStatusEnabled,
-		RemainQuota: int(common.QuotaPerUnit * 2),
-	}
-	require.NoError(t, db.Create(&token).Error)
-
-	response := requestCredits(t, func(ctx *gin.Context) {
-		ctx.Set("token_id", token.Id)
-	})
-
-	assert.Equal(t, 2.0, response.Data.TotalUsage)
-}
-
-func TestGetCreditsUsesUserQuotaWhenTokenStatsDisabled(t *testing.T) {
-	db := setupBillingCreditsTestDB(t)
-	common.DisplayTokenStatEnabled = false
 
 	user := model.User{
-		Id:       56,
+		Id:       34,
 		Username: "credits-user",
 		Password: "password123",
 		Status:   common.UserStatusEnabled,
@@ -107,9 +98,93 @@ func TestGetCreditsUsesUserQuotaWhenTokenStatsDisabled(t *testing.T) {
 	}
 	require.NoError(t, db.Create(&user).Error)
 
+	token := model.Token{
+		Id:          12,
+		UserId:      user.Id,
+		Key:         "credits-token",
+		Status:      common.TokenStatusEnabled,
+		RemainQuota: int(common.QuotaPerUnit * 2),
+	}
+	require.NoError(t, db.Create(&token).Error)
+
+	// Even if DisplayTokenStatEnabled is true and token_id is set, credits must return user's quota.
+	response := requestCredits(t, func(ctx *gin.Context) {
+		ctx.Set("id", user.Id)
+		ctx.Set("token_id", token.Id)
+	})
+
+	assert.Equal(t, 4.0, response.TotalAvailable)
+	assert.Equal(t, 4.0, response.Data.TotalAvailable)
+	assert.Equal(t, 4.0, response.Data.TotalUsage)
+}
+
+func TestGetCreditsUsesUserQuotaWhenTokenIsUnlimited(t *testing.T) {
+	db := setupBillingCreditsTestDB(t)
+
+	user := model.User{
+		Id:       56,
+		Username: "unlimited-token-user",
+		Password: "password123",
+		Status:   common.UserStatusEnabled,
+		Quota:    int(common.QuotaPerUnit * 3),
+	}
+	require.NoError(t, db.Create(&user).Error)
+
+	token := model.Token{
+		Id:             78,
+		UserId:         user.Id,
+		Key:            "unlimited-token",
+		Status:         common.TokenStatusEnabled,
+		UnlimitedQuota: true,
+	}
+	require.NoError(t, db.Create(&token).Error)
+
+	// Even if token is unlimited, credits must return user's real quota, not 100000000.
+	response := requestCredits(t, func(ctx *gin.Context) {
+		ctx.Set("id", user.Id)
+		ctx.Set("token_id", token.Id)
+		ctx.Set("token_unlimited_quota", true)
+	})
+
+	assert.Equal(t, 3.0, response.TotalAvailable)
+	assert.Equal(t, 3.0, response.Data.TotalAvailable)
+	assert.Equal(t, 3.0, response.Data.TotalUsage)
+	assert.NotEqual(t, 100000000.0, response.TotalAvailable)
+}
+
+func TestGetCreditsCalculatesUsedAndTotalGranted(t *testing.T) {
+	db := setupBillingCreditsTestDB(t)
+
+	user := model.User{
+		Id:        90,
+		Username:  "used-quota-user",
+		Password:  "password123",
+		Status:    common.UserStatusEnabled,
+		Quota:     int(common.QuotaPerUnit * 6),
+		UsedQuota: int(common.QuotaPerUnit * 2),
+	}
+	require.NoError(t, db.Create(&user).Error)
+
 	response := requestCredits(t, func(ctx *gin.Context) {
 		ctx.Set("id", user.Id)
 	})
 
-	assert.Equal(t, 4.0, response.Data.TotalUsage)
+	assert.Equal(t, "credit_summary", response.Object)
+	assert.Equal(t, 6.0, response.TotalAvailable)
+	assert.Equal(t, 2.0, response.TotalUsed)
+	assert.Equal(t, 8.0, response.TotalGranted)
+	assert.Equal(t, 6.0, response.Data.TotalAvailable)
+	assert.Equal(t, 2.0, response.Data.TotalUsed)
+	assert.Equal(t, 8.0, response.Data.TotalGranted)
+	assert.Equal(t, 6.0, response.Data.TotalUsage)
+}
+
+func TestGetCreditsMissingUser(t *testing.T) {
+	_ = setupBillingCreditsTestDB(t)
+
+	response := requestCredits(t, func(ctx *gin.Context) {
+		// id not set
+	})
+
+	assert.Equal(t, "user not found", response.Error.Message)
 }
