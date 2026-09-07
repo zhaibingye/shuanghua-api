@@ -18,7 +18,17 @@ For commercial licensing, please contact support@quantumnous.com
 */
 import { zodResolver } from '@hookform/resolvers/zod'
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
-import { CheckCircle2, Copy, Eye, EyeOff, Loader2, XCircle } from 'lucide-react'
+import {
+  CheckCircle2,
+  Copy,
+  Eye,
+  EyeOff,
+  Loader2,
+  Pencil,
+  RotateCcw,
+  Trash2,
+  XCircle,
+} from 'lucide-react'
 import { useCallback, useEffect, useState, type ChangeEvent } from 'react'
 import { useForm } from 'react-hook-form'
 import { useTranslation } from 'react-i18next'
@@ -119,6 +129,7 @@ export function ContentModerationSection(props: ContentModerationSectionProps) {
   const [moderationKey, setModerationKey] = useState<string | null>(null)
   const [isKeyLoading, setIsKeyLoading] = useState(false)
   const [isTestingKeys, setIsTestingKeys] = useState(false)
+  const [isMarkedForClear, setIsMarkedForClear] = useState(false)
   const [keyTestResults, setKeyTestResults] = useState<
     ModerationKeyTestResult[] | null
   >(null)
@@ -174,6 +185,7 @@ export function ContentModerationSection(props: ContentModerationSectionProps) {
     })
     setModerationKey(null)
     setKeyTestResults(null)
+    setIsMarkedForClear(false)
   }, [form, query.data])
 
   const fetchKey = useCallback(
@@ -222,7 +234,8 @@ export function ContentModerationSection(props: ContentModerationSectionProps) {
   const handleTestKeys = useCallback(async () => {
     const values = form.getValues()
     const hasDraftKeys = values.api_key.trim() !== ''
-    const hasSavedKeys = Boolean(query.data?.data.api_key_configured)
+    const hasSavedKeys =
+      Boolean(query.data?.data.api_key_configured) && !isMarkedForClear
     if (!hasDraftKeys && !hasSavedKeys) {
       toast.error(t('No moderation API keys to test'))
       return
@@ -260,14 +273,14 @@ export function ContentModerationSection(props: ContentModerationSectionProps) {
     } finally {
       setIsTestingKeys(false)
     }
-  }, [form, query.data?.data.api_key_configured, t])
+  }, [form, isMarkedForClear, query.data?.data.api_key_configured, t])
 
   const onSubmit = async (values: ContentModerationFormValues) => {
-    if (
-      values.enabled &&
-      values.api_key.trim() === '' &&
-      !query.data?.data.api_key_configured
-    ) {
+    const isClearing = isMarkedForClear && values.api_key.trim() === ''
+    const hasKey =
+      values.api_key.trim() !== '' ||
+      (Boolean(query.data?.data.api_key_configured) && !isClearing)
+    if (values.enabled && !hasKey) {
       form.setError('api_key', {
         type: 'required',
         message: t(
@@ -276,7 +289,10 @@ export function ContentModerationSection(props: ContentModerationSectionProps) {
       })
       return
     }
-    await mutation.mutateAsync(values)
+    await mutation.mutateAsync({
+      ...values,
+      clear_api_key: isClearing,
+    })
   }
 
   if (query.isLoading) {
@@ -384,15 +400,17 @@ export function ContentModerationSection(props: ContentModerationSectionProps) {
                 const apiKeyConfigured = Boolean(
                   query.data?.data.api_key_configured
                 )
+                const effectivelyConfigured =
+                  apiKeyConfigured && !isMarkedForClear
                 let keysDescription = t(
                   'Enter one moderation API key per line. Requests rotate across keys to spread rate limits.'
                 )
-                if (apiKeyConfigured && apiKeyCount > 1) {
+                if (effectivelyConfigured && apiKeyCount > 1) {
                   keysDescription = t(
                     '{{count}} keys currently configured. Leave blank to keep current keys.',
                     { count: apiKeyCount }
                   )
-                } else if (apiKeyConfigured) {
+                } else if (effectivelyConfigured) {
                   keysDescription = t(
                     'A moderation API key is currently configured. Leave blank to keep current key.'
                   )
@@ -401,21 +419,71 @@ export function ContentModerationSection(props: ContentModerationSectionProps) {
                   <FormItem>
                     <div className='flex flex-col gap-2 sm:flex-row sm:items-center sm:justify-between'>
                       <FormLabel>{t('Moderation API keys')}</FormLabel>
-                      <Button
-                        type='button'
-                        variant='outline'
-                        size='sm'
-                        onClick={handleTestKeys}
-                        disabled={
-                          isTestingKeys ||
-                          (field.value.trim() === '' && !apiKeyConfigured)
-                        }
-                      >
-                        {isTestingKeys ? (
-                          <Loader2 className='mr-2 h-4 w-4 animate-spin' />
-                        ) : null}
-                        {t('Test keys')}
-                      </Button>
+                      <div className='flex items-center gap-2'>
+                        {effectivelyConfigured && (
+                          <Button
+                            type='button'
+                            variant='outline'
+                            size='sm'
+                            className='text-destructive hover:text-destructive'
+                            onClick={() => {
+                              if (
+                                window.confirm(
+                                  t(
+                                    'Are you sure you want to clear the configured moderation API keys?'
+                                  )
+                                )
+                              ) {
+                                setIsMarkedForClear(true)
+                                form.setValue('api_key', '')
+                                setModerationKey(null)
+                                setKeyTestResults(null)
+                                toast.info(
+                                  t(
+                                    'Moderation API keys cleared. Click Save to apply changes.'
+                                  )
+                                )
+                              }
+                            }}
+                          >
+                            <Trash2 className='mr-2 h-4 w-4' />
+                            {t('Clear keys')}
+                          </Button>
+                        )}
+                        {isMarkedForClear && (
+                          <div className='flex items-center gap-1.5'>
+                            <span className='text-destructive text-xs font-medium'>
+                              {t('Keys will be cleared on save')}
+                            </span>
+                            <Button
+                              type='button'
+                              variant='ghost'
+                              size='sm'
+                              onClick={() => {
+                                setIsMarkedForClear(false)
+                              }}
+                            >
+                              <RotateCcw className='mr-1.5 h-3.5 w-3.5' />
+                              {t('Undo clear')}
+                            </Button>
+                          </div>
+                        )}
+                        <Button
+                          type='button'
+                          variant='outline'
+                          size='sm'
+                          onClick={handleTestKeys}
+                          disabled={
+                            isTestingKeys ||
+                            (field.value.trim() === '' && !effectivelyConfigured)
+                          }
+                        >
+                          {isTestingKeys ? (
+                            <Loader2 className='mr-2 h-4 w-4 animate-spin' />
+                          ) : null}
+                          {t('Test keys')}
+                        </Button>
+                      </div>
                     </div>
                     <FormControl>
                       <Textarea
@@ -424,11 +492,17 @@ export function ContentModerationSection(props: ContentModerationSectionProps) {
                         rows={4}
                         className='font-mono text-xs'
                         placeholder={
-                          apiKeyConfigured
+                          effectivelyConfigured
                             ? t('Leave empty to keep existing keys')
                             : t('One API key per line')
                         }
                         {...field}
+                        onChange={(e) => {
+                          field.onChange(e)
+                          if (e.target.value.trim() !== '' && isMarkedForClear) {
+                            setIsMarkedForClear(false)
+                          }
+                        }}
                       />
                     </FormControl>
                     <FormDescription>{keysDescription}</FormDescription>
@@ -518,6 +592,20 @@ export function ContentModerationSection(props: ContentModerationSectionProps) {
                               )}
                               className='font-mono text-xs'
                             />
+                            <Button
+                              type='button'
+                              variant='outline'
+                              size='icon-sm'
+                              onClick={() => {
+                                form.setValue('api_key', moderationKey)
+                                setIsMarkedForClear(false)
+                                toast.success(t('Keys loaded into editor'))
+                              }}
+                              aria-label={t('Load keys to editor')}
+                              title={t('Load keys to editor')}
+                            >
+                              <Pencil className='h-4 w-4' />
+                            </Button>
                             <Button
                               type='button'
                               variant='outline'

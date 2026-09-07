@@ -17,7 +17,7 @@ along with this program. If not, see <https://www.gnu.org/licenses/>.
 For commercial licensing, please contact support@quantumnous.com
 */
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query'
-import { fireEvent, render, screen } from '@testing-library/react'
+import { fireEvent, render, screen, waitFor } from '@testing-library/react'
 import { beforeEach, describe, expect, test, vi } from 'vitest'
 
 import { SettingsPageProvider } from '../../components/settings-page-context'
@@ -180,6 +180,62 @@ describe('content moderation settings', () => {
 
     expect(await screen.findByText('sk-t...lpha')).toBeInTheDocument()
     expect(mocks.testContentModerationKeys).toHaveBeenCalled()
+    actionsContainer.remove()
+  })
+
+  test('allows clearing configured keys and submitting clear_api_key', async () => {
+    const configuredResponse: ContentModerationSettingsResponse = {
+      ...settingsResponse,
+      data: {
+        ...settingsResponse.data,
+        api_key_configured: true,
+        api_key_count: 1,
+      },
+    }
+    vi.spyOn(window, 'confirm').mockReturnValue(true)
+
+    const { actionsContainer } = renderSettings(configuredResponse)
+    const clearButton = await screen.findByRole('button', { name: 'Clear keys' })
+    fireEvent.click(clearButton)
+
+    expect(await screen.findByText('Keys will be cleared on save')).toBeInTheDocument()
+
+    const saveButton = await screen.findByRole('button', {
+      name: 'Save content moderation settings',
+    })
+    fireEvent.click(saveButton)
+
+    await waitFor(() => {
+      expect(mocks.updateContentModerationSettings.mock.calls[0]?.[0]).toMatchObject({
+        clear_api_key: true,
+      })
+    })
+    actionsContainer.remove()
+  })
+
+  test('loads revealed keys into editor', async () => {
+    const configuredResponse: ContentModerationSettingsResponse = {
+      ...settingsResponse,
+      data: {
+        ...settingsResponse.data,
+        api_key_configured: true,
+        api_key_count: 1,
+      },
+    }
+    mocks.getContentModerationKey.mockResolvedValue({
+      success: true,
+      data: { key: 'sk-line-1\nsk-line-2' },
+    })
+
+    const { actionsContainer } = renderSettings(configuredResponse)
+    const revealButton = await screen.findByRole('button', { name: 'Reveal keys' })
+    fireEvent.click(revealButton)
+
+    const loadButton = await screen.findByRole('button', { name: 'Load keys to editor' })
+    fireEvent.click(loadButton)
+
+    const textarea = await screen.findByLabelText('Moderation API keys')
+    expect(textarea).toHaveValue('sk-line-1\nsk-line-2')
     actionsContainer.remove()
   })
 })

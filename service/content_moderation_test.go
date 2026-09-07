@@ -14,7 +14,9 @@ import (
 	"github.com/QuantumNous/new-api/common"
 	"github.com/QuantumNous/new-api/constant"
 	"github.com/QuantumNous/new-api/model"
+	relaycommon "github.com/QuantumNous/new-api/relay/common"
 	"github.com/QuantumNous/new-api/relaykit/dto"
+	"github.com/QuantumNous/new-api/relaykit/types"
 	"github.com/QuantumNous/new-api/setting"
 	"github.com/QuantumNous/new-api/setting/system_setting"
 	"github.com/gin-gonic/gin"
@@ -518,4 +520,319 @@ func TestCleanupDropsLegacyModerationTablesAndExpiredEvents(t *testing.T) {
 	var remaining int64
 	require.NoError(t, model.DB.Model(&model.ModerationEvent{}).Where("id IN ?", []int64{stale.ID, fresh.ID}).Count(&remaining).Error)
 	assert.Equal(t, int64(1), remaining)
+}
+
+func TestModerationChannelIDSafeWhenChannelMetaNil(t *testing.T) {
+	ginContext, _ := testGinContext()
+	ginContext.Set(string(constant.ContextKeyChannelId), 42)
+
+	// info with nil ChannelMeta must not panic
+	info := &relaycommon.RelayInfo{}
+	assert.Nil(t, info.ChannelMeta)
+	assert.Equal(t, 42, moderationChannelID(ginContext, info))
+
+	// info nil altogether
+	assert.Equal(t, 42, moderationChannelID(ginContext, nil))
+
+	// context fallback to "channel_id" int
+	ginContext2, _ := testGinContext()
+	ginContext2.Set("channel_id", 84)
+	assert.Equal(t, 84, moderationChannelID(ginContext2, info))
+}
+
+func TestCallModerationContentGracefulEmptyHandling(t *testing.T) {
+	config := setting.ContentModerationSetting{
+		Model:       "omni-moderation-latest",
+		FailureMode: "closed",
+	}
+	// Completely empty content
+	res, raw, err := callModerationContent(context.Background(), config, ModerationRequestContent{})
+	require.NoError(t, err)
+	assert.False(t, res.Flagged)
+	assert.Nil(t, raw)
+
+	// Whitespace only
+	res, raw, err = callModerationContent(context.Background(), config, ModerationRequestContent{UserPrompt: "   \t\n  "})
+	require.NoError(t, err)
+	assert.False(t, res.Flagged)
+	assert.Nil(t, raw)
+
+	// Preflight with empty content succeeds even fail-closed
+	config.PreflightEnabled = true
+	config.APIKey = "sk-fake-key"
+	err = PreflightModerationRequest(context.Background(), ModerationRequestContent{}, config)
+	require.NoError(t, err)
+}
+
+func TestExtractModerationAssistantTextAllFourFormats(t *testing.T) {
+	// 1. OpenAI Chat
+	// Non-streaming
+	openAINonStream := []byte(`{"choices":[{"message":{"content":"OpenAI non-stream reply"}}]}`)
+	assert.Equal(t, "OpenAI non-stream reply", ExtractModerationAssistantText(openAINonStream, "application/json", types.RelayFormatOpenAI))
+	// Streaming
+	openAIStream := []byte("data: {\"choices\":[{\"delta\":{\"content\":\"Hello \"}}]}\n\ndata: {\"choices\":[{\"delta\":{\"content\":\"world\"}}]}\n\ndata: [DONE]\n")
+	assert.Equal(t, "Hello world", ExtractModerationAssistantText(openAIStream, "text/event-stream", types.RelayFormatOpenAI))
+
+	// 2. Anthropic Claude
+	// Non-streaming
+	claudeNonStream := []byte(`{"content":[{"type":"text","text":"Claude non-stream reply"}]}`)
+	assert.Equal(t, "Claude non-stream reply", ExtractModerationAssistantText(claudeNonStream, "application/json", types.RelayFormatClaude))
+	// Streaming (content_block_delta with delta.text map)
+	claudeStream := []byte("event: content_block_delta\ndata: {\"type\":\"content_block_delta\",\"index\":0,\"delta\":{\"type\":\"text_delta\",\"text\":\"Claude \"}}\n\nevent: content_block_delta\ndata: {\"type\":\"content_block_delta\",\"index\":0,\"delta\":{\"type\":\"text_delta\",\"text\":\"stream\"}}\n\n")
+	assert.Equal(t, "Claude stream", ExtractModerationAssistantText(claudeStream, "text/event-stream", types.RelayFormatClaude))
+
+	// 3. Google Gemini
+	// Non-streaming object
+	geminiNonStream := []byte(`{"candidates":[{"content":{"parts":[{"text":"Gemini non-stream reply"}]}}]}`)
+	assert.Equal(t, "Gemini non-stream reply", ExtractModerationAssistantText(geminiNonStream, "application/json", types.RelayFormatGemini))
+	// Non-streaming array
+	geminiArray := []byte(`[{"candidates":[{"content":{"parts":[{"text":"Gemini array reply"}]}}]}]`)
+	assert.Equal(t, "Gemini array reply", ExtractModerationAssistantText(geminiArray, "application/json", types.RelayFormatGemini))
+	// Streaming
+	geminiStream := []byte("data: {\"candidates\":[{\"content\":{\"parts\":[{\"text\":\"Gemini \"}]}}]}\n\ndata: {\"candidates\":[{\"content\":{\"parts\":[{\"text\":\"stream\"}]}}]}\n\n")
+	assert.Equal(t, "Gemini stream", ExtractModerationAssistantText(geminiStream, "text/event-stream", types.RelayFormatGemini))
+
+	// 4. OpenAI Responses
+	// Non-streaming output array
+	responsesNonStream := []byte(`{"output":[{"type":"message","role":"assistant","content":[{"type":"text","text":"Responses non-stream output"}]}]}`)
+	assert.Equal(t, "Responses non-stream output", ExtractModerationAssistantText(responsesNonStream, "application/json", types.RelayFormatOpenAIResponses))
+	// Streaming (response.text.delta with string delta)
+	responsesStream := []byte("data: {\"type\":\"response.text.delta\",\"delta\":\"Responses \"}\n\ndata: {\"type\":\"response.text.delta\",\"delta\":\"stream\"}\n\n")
+	assert.Equal(t, "Responses stream", ExtractModerationAssistantText(responsesStream, "text/event-stream", types.RelayFormatOpenAIResponses))
+}
+
+func TestLatestGeminiUserTurnBoundsLargeInlineData(t *testing.T) {
+	// Small inline data -> included
+	smallReq := &dto.GeminiChatRequest{
+		Contents: []dto.GeminiChatContent{
+			{
+				Role: "user",
+				Parts: []dto.GeminiPart{
+					{Text: "describe picture"},
+					{InlineData: &dto.GeminiInlineData{MimeType: "image/png", Data: "small-base64"}},
+				},
+			},
+		},
+	}
+	content := latestGeminiUserTurn(smallReq)
+	assert.Equal(t, "describe picture", content.UserPrompt)
+	assert.Len(t, content.ImageURLs, 1)
+
+	// Oversized inline data (> 2MB) -> omitted from ImageURLs
+	largeData := strings.Repeat("A", moderationMaxInlineDataBytes+10)
+	largeReq := &dto.GeminiChatRequest{
+		Contents: []dto.GeminiChatContent{
+			{
+				Role: "user",
+				Parts: []dto.GeminiPart{
+					{Text: "describe oversized picture"},
+					{InlineData: &dto.GeminiInlineData{MimeType: "image/png", Data: largeData}},
+				},
+			},
+		},
+	}
+	content = latestGeminiUserTurn(largeReq)
+	assert.Equal(t, "describe oversized picture", content.UserPrompt)
+	assert.Empty(t, content.ImageURLs)
+}
+
+func TestLatestOpenAIUserTurnArrayPrompt(t *testing.T) {
+	// String array prompt
+	reqStrArray := &dto.GeneralOpenAIRequest{
+		Prompt: []string{"first prompt line", "second prompt line"},
+	}
+	content := latestOpenAIUserTurn(reqStrArray)
+	assert.Equal(t, "first prompt line\nsecond prompt line", content.UserPrompt)
+
+	// Any array prompt
+	reqAnyArray := &dto.GeneralOpenAIRequest{
+		Prompt: []any{"hello world", "another line"},
+	}
+	content = latestOpenAIUserTurn(reqAnyArray)
+	assert.Equal(t, "hello world\nanother line", content.UserPrompt)
+
+	// Single string prompt
+	reqStr := &dto.GeneralOpenAIRequest{
+		Prompt: "single prompt",
+	}
+	content = latestOpenAIUserTurn(reqStr)
+	assert.Equal(t, "single prompt", content.UserPrompt)
+}
+
+func TestExtractClaudeImagesBoundsLargeBase64(t *testing.T) {
+	// Small image (< 2MB) -> included
+	smallMsg := dto.ClaudeMessage{
+		Role: "user",
+		Content: []any{
+			map[string]any{
+				"type": "image",
+				"source": map[string]any{
+					"type":       "base64",
+					"media_type": "image/jpeg",
+					"data":       "small_base64_data",
+				},
+			},
+		},
+	}
+	imgs := extractClaudeImages(smallMsg)
+	assert.Len(t, imgs, 1)
+	assert.Equal(t, "data:image/jpeg;base64,small_base64_data", imgs[0])
+
+	// Oversized image (> 2MB) -> omitted
+	largeData := strings.Repeat("B", moderationMaxInlineDataBytes+100)
+	largeMsg := dto.ClaudeMessage{
+		Role: "user",
+		Content: []any{
+			map[string]any{
+				"type": "image",
+				"source": map[string]any{
+					"type":       "base64",
+					"media_type": "image/png",
+					"data":       largeData,
+				},
+			},
+		},
+	}
+	imgs = extractClaudeImages(largeMsg)
+	assert.Empty(t, imgs)
+}
+
+func TestRestoreUserResetsEffectiveViolationCount(t *testing.T) {
+	require.NoError(t, model.DB.AutoMigrate(&model.User{}, &model.ModerationEvent{}, &model.ModerationUserRecord{}, &model.ModerationAccountState{}, &model.ModerationTokenState{}, &model.ModerationAction{}))
+
+	now := common.GetTimestamp()
+	user := model.User{
+		Username: fmt.Sprintf("violation_user_1_%d", now),
+		Role:     common.RoleCommonUser,
+		Status:   common.UserStatusDisabled,
+		AffCode:  fmt.Sprintf("aff_1_%d", time.Now().UnixNano()),
+	}
+	require.NoError(t, model.DB.Create(&user).Error)
+	t.Cleanup(func() {
+		_ = model.DB.Where("user_id = ?", user.Id).Delete(&model.ModerationEvent{}).Error
+		_ = model.DB.Where("user_id = ?", user.Id).Delete(&model.ModerationUserRecord{}).Error
+		_ = model.DB.Where("user_id = ?", user.Id).Delete(&model.ModerationAccountState{}).Error
+		_ = model.DB.Delete(&user).Error
+	})
+
+	// Insert 3 violations
+	for i := 0; i < 3; i++ {
+		event := model.ModerationEvent{
+			UserID:    user.Id,
+			Source:    model.ModerationEventSourcePreflight,
+			Actor:     model.ModerationEventActorUser,
+			Decision:  "block",
+			Severity:  "high",
+			Status:    model.ModerationEventActive,
+			CreatedAt: now - int64(3-i)*10,
+			ExpiresAt: now + 86400,
+		}
+		require.NoError(t, model.DB.Create(&event).Error)
+	}
+
+	// Create user record
+	rec := model.ModerationUserRecord{
+		UserID:            user.Id,
+		MaxViolationCount: 3,
+		LastViolationAt:   now,
+		CreatedAt:         now,
+		UpdatedAt:         now,
+	}
+	require.NoError(t, model.DB.Create(&rec).Error)
+
+	// Create account state marking it as disabled by moderation
+	accState := model.ModerationAccountState{
+		UserID:         user.Id,
+		PreviousStatus: common.UserStatusEnabled,
+		CreatedAt:      now,
+	}
+	require.NoError(t, model.DB.Create(&accState).Error)
+
+	// Admin restores the user
+	require.NoError(t, RestoreUserAfterModeration(user.Id, 1, "test restore"))
+
+	// Verify effective violation count is reset to 0
+	detail, err := GetModerationUserDetail(user.Id)
+	require.NoError(t, err)
+	assert.Equal(t, 0, detail.User.ViolationCount)
+	assert.Equal(t, "history", detail.User.RecordStatus)
+}
+
+func TestMaybeAutoDisableRespectsOverride(t *testing.T) {
+	require.NoError(t, model.DB.AutoMigrate(&model.User{}, &model.ModerationEvent{}, &model.ModerationUserRecord{}, &model.ModerationAccountState{}, &model.ModerationTokenState{}, &model.ModerationAction{}))
+
+	common.OptionMapRWMutex.Lock()
+	if common.OptionMap == nil {
+		common.OptionMap = make(map[string]string)
+	}
+	common.OptionMap[setting.ContentModerationAutoDisableViolationsOption] = "3"
+	common.OptionMapRWMutex.Unlock()
+	t.Cleanup(func() {
+		common.OptionMapRWMutex.Lock()
+		delete(common.OptionMap, setting.ContentModerationAutoDisableViolationsOption)
+		delete(common.OptionMap, setting.ContentModerationEnabledOption)
+		common.OptionMapRWMutex.Unlock()
+	})
+
+	now := common.GetTimestamp()
+	user := model.User{
+		Username: fmt.Sprintf("violation_user_2_%d", now),
+		Role:     common.RoleCommonUser,
+		Status:   common.UserStatusEnabled,
+		AffCode:  fmt.Sprintf("aff_2_%d", time.Now().UnixNano()),
+	}
+	require.NoError(t, model.DB.Create(&user).Error)
+	t.Cleanup(func() {
+		_ = model.DB.Where("user_id = ?", user.Id).Delete(&model.ModerationEvent{}).Error
+		_ = model.DB.Where("user_id = ?", user.Id).Delete(&model.ModerationUserRecord{}).Error
+		_ = model.DB.Where("user_id = ?", user.Id).Delete(&model.ModerationAccountState{}).Error
+		_ = model.DB.Delete(&user).Error
+	})
+
+	// Insert 3 historical violations before override
+	for i := 0; i < 3; i++ {
+		event := model.ModerationEvent{
+			UserID:    user.Id,
+			Source:    model.ModerationEventSourcePreflight,
+			Actor:     model.ModerationEventActorUser,
+			Decision:  "block",
+			Severity:  "high",
+			Status:    model.ModerationEventActive,
+			CreatedAt: now - 100,
+			ExpiresAt: now + 86400,
+		}
+		require.NoError(t, model.DB.Create(&event).Error)
+	}
+
+	// Admin overrides violation count to 0 at time 'now - 50'
+	rec := model.ModerationUserRecord{
+		UserID:                 user.Id,
+		ViolationCountOverride: 0,
+		OverrideActive:         true,
+		OverrideAt:             now - 50,
+		CreatedAt:              now - 100,
+		UpdatedAt:              now - 50,
+	}
+	require.NoError(t, model.DB.Create(&rec).Error)
+
+	// A new single violation arrives at 'now'
+	eventNew := model.ModerationEvent{
+		UserID:    user.Id,
+		Source:    model.ModerationEventSourcePreflight,
+		Actor:     model.ModerationEventActorUser,
+		Decision:  "block",
+		Severity:  "high",
+		Status:    model.ModerationEventActive,
+		CreatedAt: now,
+		ExpiresAt: now + 86400,
+	}
+	require.NoError(t, model.DB.Create(&eventNew).Error)
+
+	// Call maybeAutoDisableUser; since override is 0 and only 1 new event happened after override,
+	// effective count is 1 (< threshold 3), so user should NOT be disabled!
+	maybeAutoDisableUser(user.Id, now)
+
+	var refreshedUser model.User
+	require.NoError(t, model.DB.First(&refreshedUser, user.Id).Error)
+	assert.Equal(t, common.UserStatusEnabled, refreshedUser.Status, "user should remain enabled because effective count is 1 < 3")
 }

@@ -34,6 +34,7 @@ const (
 	moderationMaxRequestBytes     = 128 * 1024
 	moderationExcerptMaxBytes     = 2048
 	moderationMaxImages           = 4
+	moderationMaxInlineDataBytes  = 2 * 1024 * 1024
 	moderationAllowCacheTTL       = 24 * time.Hour
 	moderationFingerprintCacheCap = 100_000
 	moderationCleanupInterval     = time.Hour
@@ -242,8 +243,28 @@ func latestOpenAIUserTurn(req *dto.GeneralOpenAIRequest) ModerationRequestConten
 		}
 	}
 	if req.Prompt != nil {
-		if str, ok := req.Prompt.(string); ok {
-			return ModerationRequestContent{UserPrompt: str}
+		switch v := req.Prompt.(type) {
+		case string:
+			return ModerationRequestContent{UserPrompt: v}
+		case []any:
+			var texts []string
+			for _, item := range v {
+				if str, ok := item.(string); ok && strings.TrimSpace(str) != "" {
+					texts = append(texts, str)
+				}
+			}
+			if len(texts) > 0 {
+				return ModerationRequestContent{UserPrompt: strings.Join(texts, "\n")}
+			}
+		case []string:
+			if len(v) > 0 {
+				return ModerationRequestContent{UserPrompt: strings.Join(v, "\n")}
+			}
+		default:
+			str := fmt.Sprintf("%v", req.Prompt)
+			if strings.TrimSpace(str) != "" {
+				return ModerationRequestContent{UserPrompt: str}
+			}
 		}
 	}
 	return ModerationRequestContent{}
@@ -285,7 +306,9 @@ func latestGeminiUserTurn(req *dto.GeminiChatRequest) ModerationRequestContent {
 				text.WriteString(part.Text)
 			}
 			if part.InlineData != nil && part.InlineData.Data != "" {
-				imageURLs = append(imageURLs, fmt.Sprintf("data:%s;base64,%s", part.InlineData.MimeType, part.InlineData.Data))
+				if len(part.InlineData.Data) <= moderationMaxInlineDataBytes {
+					imageURLs = append(imageURLs, fmt.Sprintf("data:%s;base64,%s", part.InlineData.MimeType, part.InlineData.Data))
+				}
 			}
 		}
 		return ModerationRequestContent{
@@ -493,7 +516,9 @@ func extractClaudeImages(message dto.ClaudeMessage) []string {
 	for _, item := range media {
 		if item.Type == "image" && item.Source != nil && item.Source.Type == "base64" {
 			if strData, ok := item.Source.Data.(string); ok && strData != "" {
-				imageURLs = append(imageURLs, fmt.Sprintf("data:%s;base64,%s", item.Source.MediaType, strData))
+				if len(strData) <= moderationMaxInlineDataBytes {
+					imageURLs = append(imageURLs, fmt.Sprintf("data:%s;base64,%s", item.Source.MediaType, strData))
+				}
 			}
 		}
 	}
@@ -525,18 +550,32 @@ func ExtractModerationAssistantText(data []byte, contentType string, _ types.Rel
 				continue
 			}
 			var item map[string]any
-			if err := common.Unmarshal(payload, &item); err != nil {
+			if err := common.Unmarshal(payload, &item); err == nil {
+				builder.WriteString(assistantTextFromPayload(item))
 				continue
 			}
-			builder.WriteString(assistantTextFromPayload(item))
+			var items []map[string]any
+			if err := common.Unmarshal(payload, &items); err == nil {
+				for _, it := range items {
+					builder.WriteString(assistantTextFromPayload(it))
+				}
+			}
 		}
 		return builder.String()
 	}
 	var item map[string]any
-	if err := common.Unmarshal(data, &item); err != nil {
-		return ""
+	if err := common.Unmarshal(data, &item); err == nil {
+		return assistantTextFromPayload(item)
 	}
-	return assistantTextFromPayload(item)
+	var items []map[string]any
+	if err := common.Unmarshal(data, &items); err == nil {
+		var builder strings.Builder
+		for _, it := range items {
+			builder.WriteString(assistantTextFromPayload(it))
+		}
+		return builder.String()
+	}
+	return ""
 }
 
 func assistantTextFromPayload(item map[string]any) string {
@@ -554,9 +593,17 @@ func assistantTextFromPayload(item map[string]any) string {
 			}
 		}
 	}
+	// Anthropic Claude streaming delta: {"type": "content_block_delta", "delta": {"type": "text_delta", "text": "..."}}
+	if deltaMap, ok := item["delta"].(map[string]any); ok {
+		if text, ok := deltaMap["text"].(string); ok && text != "" {
+			return text
+		}
+	}
+	// OpenAI Responses streaming delta or string delta: {"type": "response.text.delta", "delta": "..."}
 	if delta, ok := item["delta"].(string); ok {
 		return delta
 	}
+	// Google Gemini candidates: {"candidates": [{"content": {"parts": [{"text": "..."}]}}]}
 	if candidates, ok := item["candidates"].([]any); ok && len(candidates) > 0 {
 		if cand, ok := candidates[0].(map[string]any); ok {
 			if content, ok := cand["content"].(map[string]any); ok {
@@ -574,6 +621,7 @@ func assistantTextFromPayload(item map[string]any) string {
 			}
 		}
 	}
+	// Anthropic Claude non-streaming content: {"content": [{"type": "text", "text": "..."}]}
 	if contentArr, ok := item["content"].([]any); ok {
 		var builder strings.Builder
 		for _, c := range contentArr {
@@ -583,7 +631,29 @@ func assistantTextFromPayload(item map[string]any) string {
 				}
 			}
 		}
-		return builder.String()
+		if builder.Len() > 0 {
+			return builder.String()
+		}
+	}
+	// OpenAI Responses non-streaming output: {"output": [{"type": "message", "content": [{"type": "text", "text": "..."}]}]}
+	if outputArr, ok := item["output"].([]any); ok && len(outputArr) > 0 {
+		var builder strings.Builder
+		for _, out := range outputArr {
+			if outMap, ok := out.(map[string]any); ok {
+				if contentArr, ok := outMap["content"].([]any); ok {
+					for _, c := range contentArr {
+						if cMap, ok := c.(map[string]any); ok {
+							if text, ok := cMap["text"].(string); ok && text != "" {
+								builder.WriteString(text)
+							}
+						}
+					}
+				}
+			}
+		}
+		if builder.Len() > 0 {
+			return builder.String()
+		}
 	}
 	return ""
 }
@@ -834,7 +904,7 @@ func callModerationContent(ctx context.Context, config setting.ContentModeration
 	if u := sanitizeModerationText(content.UserPrompt); u != "" {
 		return callNativeModeration(ctx, config, u)
 	}
-	return openAIModerationResult{}, nil, errors.New("moderation input is empty")
+	return openAIModerationResult{Flagged: false}, nil, nil
 }
 
 func moderationDecisionFromNativeResult(result openAIModerationResult) moderationDecision {
@@ -1043,12 +1113,12 @@ func moderationChannelID(c *gin.Context, info *relaycommon.RelayInfo) int {
 	channelID := 0
 	if info != nil {
 		channelID = info.GetChannelID()
-		if channelID <= 0 {
-			channelID = info.ChannelId
-		}
 	}
 	if channelID <= 0 && c != nil {
 		channelID = common.GetContextKeyInt(c, constant.ContextKeyChannelId)
+	}
+	if channelID <= 0 && c != nil {
+		channelID = c.GetInt("channel_id")
 	}
 	return channelID
 }
@@ -1083,12 +1153,16 @@ func recordModerationEventFromContext(c *gin.Context, content ModerationRequestC
 	if modelName == "" {
 		modelName = config.Model
 	}
+	relayFormat := c.GetString("relay_format")
+	if relayFormat == "" {
+		relayFormat = string(types.RelayFormatOpenAI)
+	}
 	event := model.ModerationEvent{
 		UserID:             userID,
 		RequestID:          c.GetString(common.RequestIdKey),
 		ChannelID:          channelID,
 		Model:              modelName,
-		RelayFormat:        c.GetString("relay_format"),
+		RelayFormat:        relayFormat,
 		Source:             source,
 		Actor:              decision.Actor,
 		Decision:           decision.Decision,
@@ -1194,7 +1268,17 @@ func maybeAutoDisableUser(userID int, now int64) {
 		common.SysError(fmt.Sprintf("failed to count moderation events for auto-disable: %v", err))
 		return
 	}
-	if int(count) < threshold {
+	record, err := model.GetModerationUserRecord(userID)
+	if err != nil && !errors.Is(err, gorm.ErrRecordNotFound) {
+		common.SysError(fmt.Sprintf("failed to get user record for auto-disable: %v", err))
+		return
+	}
+	recVal := model.ModerationUserRecord{}
+	if record != nil {
+		recVal = *record
+	}
+	effectiveCount := effectiveViolationCount(userID, int(count), recVal, cutoff, now)
+	if effectiveCount < threshold {
 		return
 	}
 	if _, err := model.DisableUserAndTokensForModeration(userID, now); err != nil {
@@ -1531,11 +1615,14 @@ func DeleteModerationUserHistory(userID, adminID, adminRole int) error {
 		return errors.New("invalid user id")
 	}
 	var user model.User
-	if err := model.DB.First(&user, userID).Error; err != nil {
+	err := model.DB.First(&user, userID).Error
+	if err != nil && !errors.Is(err, gorm.ErrRecordNotFound) {
 		return err
 	}
-	if err := validateModerationUserMutation(&user, adminID, adminRole); err != nil {
-		return err
+	if err == nil {
+		if err := validateModerationUserMutation(&user, adminID, adminRole); err != nil {
+			return err
+		}
 	}
 	now := common.GetTimestamp()
 	cutoff := now - int64(setting.GetContentModerationSetting().GetViolationRetentionDuration().Seconds())
@@ -1548,6 +1635,15 @@ func RestoreUserAfterModeration(userID, adminID int, reason string) error {
 	if err != nil {
 		return err
 	}
+	_ = model.DB.Model(&model.ModerationUserRecord{}).
+		Where("user_id = ?", userID).
+		Updates(map[string]any{
+			"violation_count_override": 0,
+			"override_active":          true,
+			"override_at":              now,
+			"archived_at":              now,
+			"updated_at":               now,
+		}).Error
 	action := model.ModerationAction{
 		AdminID: adminID,
 		UserID:  userID,

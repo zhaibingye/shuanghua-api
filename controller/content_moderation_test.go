@@ -9,7 +9,10 @@ import (
 	"time"
 
 	"github.com/QuantumNous/new-api/common"
+	"github.com/QuantumNous/new-api/constant"
 	"github.com/QuantumNous/new-api/model"
+	"github.com/QuantumNous/new-api/relaykit/types"
+	"github.com/QuantumNous/new-api/service"
 	"github.com/QuantumNous/new-api/setting"
 	"github.com/gin-gonic/gin"
 	"github.com/glebarez/sqlite"
@@ -639,4 +642,152 @@ func TestTestContentModerationKeysRejectsEmptyKeys(t *testing.T) {
 	}
 	require.NoError(t, common.Unmarshal(recorder.Body.Bytes(), &response))
 	assert.Contains(t, response.Message, "no moderation API keys")
+}
+
+func TestRelaySkipsContentModerationForUnrelatedChannelWithoutPanic(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	setupModerationTestDB(t)
+
+	common.OptionMapRWMutex.Lock()
+	common.OptionMap[setting.ContentModerationEnabledOption] = "true"
+	common.OptionMap[setting.ContentModerationChannelsOption] = "1"
+	common.OptionMap[setting.ContentModerationAPIKeyOption] = "sk-fake-key"
+	common.OptionMap[setting.ContentModerationModelOption] = "omni-moderation-latest"
+	common.OptionMap[setting.ContentModerationPreflightOption] = "true"
+	common.OptionMapRWMutex.Unlock()
+	t.Cleanup(func() {
+		common.OptionMapRWMutex.Lock()
+		delete(common.OptionMap, setting.ContentModerationEnabledOption)
+		delete(common.OptionMap, setting.ContentModerationChannelsOption)
+		delete(common.OptionMap, setting.ContentModerationAPIKeyOption)
+		delete(common.OptionMap, setting.ContentModerationModelOption)
+		delete(common.OptionMap, setting.ContentModerationPreflightOption)
+		common.OptionMapRWMutex.Unlock()
+	})
+
+	// Channel 2 is an unmoderated channel (e.g. Gemini channel)
+	recorder := httptest.NewRecorder()
+	c, _ := gin.CreateTestContext(recorder)
+	c.Request = httptest.NewRequest(http.MethodPost, "/v1/chat/completions", strings.NewReader(`{"model":"gemini-1.5-flash","messages":[{"role":"user","content":"hello"}]}`))
+	c.Request.Header.Set("Content-Type", "application/json")
+	c.Set("id", 42) // Non-root user
+	common.SetContextKey(c, constant.ContextKeyChannelId, 2)
+	c.Set("channel_id", 2)
+
+	// Calling Relay must not panic, and must not set moderation content
+	assert.NotPanics(t, func() {
+		Relay(c, types.RelayFormatOpenAI)
+	})
+	// Moderation request content should not be set because moderation was skipped
+	_, hasContent := common.GetContextKeyType[service.ModerationRequestContent](c, constant.ContextKeyModerationRequestContent)
+	assert.False(t, hasContent, "moderation content should not be set for unmoderated channel")
+}
+
+func TestRelayEnforcesContentModerationForTargetChannel(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	setupModerationTestDB(t)
+
+	common.OptionMapRWMutex.Lock()
+	common.OptionMap[setting.ContentModerationEnabledOption] = "true"
+	common.OptionMap[setting.ContentModerationChannelsOption] = "1"
+	common.OptionMap[setting.ContentModerationAPIKeyOption] = "" // Intentionally empty to trigger unconfigured error
+	common.OptionMap[setting.ContentModerationModelOption] = "omni-moderation-latest"
+	common.OptionMap[setting.ContentModerationPreflightOption] = "true"
+	common.OptionMapRWMutex.Unlock()
+	t.Cleanup(func() {
+		common.OptionMapRWMutex.Lock()
+		delete(common.OptionMap, setting.ContentModerationEnabledOption)
+		delete(common.OptionMap, setting.ContentModerationChannelsOption)
+		delete(common.OptionMap, setting.ContentModerationAPIKeyOption)
+		delete(common.OptionMap, setting.ContentModerationModelOption)
+		delete(common.OptionMap, setting.ContentModerationPreflightOption)
+		common.OptionMapRWMutex.Unlock()
+	})
+
+	// Channel 1 IS the moderated channel
+	recorder := httptest.NewRecorder()
+	c, _ := gin.CreateTestContext(recorder)
+	c.Request = httptest.NewRequest(http.MethodPost, "/v1/chat/completions", strings.NewReader(`{"model":"gpt-4o","messages":[{"role":"user","content":"hello"}]}`))
+	c.Request.Header.Set("Content-Type", "application/json")
+	c.Set("id", 42) // Non-root user
+	common.SetContextKey(c, constant.ContextKeyChannelId, 1)
+	c.Set("channel_id", 1)
+
+	Relay(c, types.RelayFormatOpenAI)
+
+	// Should reject because moderation is enabled on channel 1 but API key is unconfigured
+	assert.Equal(t, http.StatusServiceUnavailable, recorder.Code)
+	assert.Contains(t, recorder.Body.String(), "content moderation is enabled but not configured")
+}
+
+func TestUpdateContentModerationSettingsClearAPIKey(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	setupModerationTestDB(t)
+
+	// 1. Initially set a key
+	common.OptionMapRWMutex.Lock()
+	common.OptionMap[setting.ContentModerationAPIKeyOption] = "sk-initial-secret-key"
+	common.OptionMap[setting.ContentModerationEnabledOption] = "false"
+	common.OptionMapRWMutex.Unlock()
+	t.Cleanup(func() {
+		common.OptionMapRWMutex.Lock()
+		delete(common.OptionMap, setting.ContentModerationAPIKeyOption)
+		delete(common.OptionMap, setting.ContentModerationEnabledOption)
+		common.OptionMapRWMutex.Unlock()
+	})
+
+	// Try clearing when enabled=true without providing a new key -> should be rejected
+	recorder := httptest.NewRecorder()
+	c, _ := gin.CreateTestContext(recorder)
+	body := `{"enabled": true, "clear_api_key": true, "model": "omni-moderation-latest", "timeout_seconds": 30, "max_retries": 3}`
+	c.Request = httptest.NewRequest(http.MethodPut, "/api/moderation/settings", strings.NewReader(body))
+	c.Request.Header.Set("Content-Type", "application/json")
+	UpdateContentModerationSettings(c)
+	assert.Equal(t, http.StatusBadRequest, recorder.Code)
+	assert.Contains(t, recorder.Body.String(), "API key are required when content moderation is enabled")
+
+	// Clearing when enabled=false -> should succeed and clear the key
+	recorder = httptest.NewRecorder()
+	c, _ = gin.CreateTestContext(recorder)
+	body = `{"enabled": false, "clear_api_key": true, "model": "omni-moderation-latest", "timeout_seconds": 30, "max_retries": 3}`
+	c.Request = httptest.NewRequest(http.MethodPut, "/api/moderation/settings", strings.NewReader(body))
+	c.Request.Header.Set("Content-Type", "application/json")
+	UpdateContentModerationSettings(c)
+	assert.Equal(t, http.StatusOK, recorder.Code)
+
+	// Verify key is cleared
+	cfg := setting.GetContentModerationSetting()
+	assert.Empty(t, cfg.APIKey)
+	assert.False(t, cfg.HasAPIKey())
+}
+
+func TestDeleteContentModerationUserHistoryWhenUserDeleted(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	setupModerationTestDB(t)
+
+	now := common.GetTimestamp()
+	// Insert an archived record for user 9999 who does NOT exist in users table
+	rec := model.ModerationUserRecord{
+		UserID:           9999,
+		ArchivedAt:       now,
+		UsernameSnapshot: "deleted_user",
+		CreatedAt:        now,
+		UpdatedAt:        now,
+	}
+	require.NoError(t, model.DB.Create(&rec).Error)
+
+	recorder := httptest.NewRecorder()
+	c, _ := gin.CreateTestContext(recorder)
+	c.Request = httptest.NewRequest(http.MethodDelete, "/api/moderation/users/9999/history", nil)
+	c.Params = gin.Params{{Key: "id", Value: "9999"}}
+	c.Set("id", 1)
+	c.Set("role", common.RoleRootUser)
+
+	DeleteContentModerationUserHistory(c)
+	assert.Equal(t, http.StatusOK, recorder.Code)
+
+	// Verify deleted from DB
+	var count int64
+	require.NoError(t, model.DB.Model(&model.ModerationUserRecord{}).Where("user_id = ?", 9999).Count(&count).Error)
+	assert.Equal(t, int64(0), count)
 }

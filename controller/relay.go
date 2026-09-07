@@ -69,6 +69,9 @@ func geminiRelayHandler(c *gin.Context, info *relaycommon.RelayInfo) *types.NewA
 }
 
 func Relay(c *gin.Context, relayFormat types.RelayFormat) {
+	if c != nil {
+		c.Set("relay_format", string(relayFormat))
+	}
 
 	requestId := c.GetString(common.RequestIdKey)
 	//group := common.GetContextKeyString(c, constant.ContextKeyUsingGroup)
@@ -131,14 +134,17 @@ func Relay(c *gin.Context, relayFormat types.RelayFormat) {
 	isResponsesCompaction := relayInfo.RelayMode == relayconstant.RelayModeResponsesCompact
 	isUserWhitelisted := relayInfo.UserId > 0 && moderationConfig.IsUserWhitelisted(relayInfo.UserId)
 	if moderationConfig.Enabled && !isGeminiCountTokens && !isResponsesCompaction && !isUserWhitelisted && service.IsModerationRequestSupported(request) {
-		channelID := relayInfo.GetChannelID()
-		if channelID <= 0 {
-			channelID = relayInfo.ChannelId
+		channelID := 0
+		if relayInfo != nil {
+			channelID = relayInfo.GetChannelID()
 		}
-		if channelID <= 0 {
+		if channelID <= 0 && c != nil {
 			channelID = common.GetContextKeyInt(c, constant.ContextKeyChannelId)
 		}
-		if moderationConfig.HasModeratedChannels() && (channelID <= 0 || moderationConfig.ShouldModerateChannel(channelID)) {
+		if channelID <= 0 && c != nil {
+			channelID = c.GetInt("channel_id")
+		}
+		if moderationConfig.ShouldModerateChannel(channelID) {
 			moderationURLInvalid := service.ValidateContentModerationURL(moderationConfig.BaseURL) != nil
 			if strings.TrimSpace(moderationConfig.APIKey) == "" || strings.TrimSpace(moderationConfig.Model) == "" || moderationURLInvalid {
 				newAPIError = types.NewErrorWithStatusCode(

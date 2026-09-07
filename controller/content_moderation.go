@@ -45,6 +45,7 @@ type contentModerationSettingsRequest struct {
 	ViolationRetentionDays int    `json:"violation_retention_days"`
 	BaseURL                string `json:"base_url"`
 	APIKey                 string `json:"api_key"`
+	ClearAPIKey            bool   `json:"clear_api_key"`
 	Model                  string `json:"model"`
 	PreflightEnabled       *bool  `json:"preflight_enabled"`
 	PostflightEnabled      *bool  `json:"postflight_enabled"`
@@ -165,9 +166,13 @@ func UpdateContentModerationSettings(c *gin.Context) {
 		}
 	}
 	currentConfig := setting.GetContentModerationSetting()
-	if request.Enabled && (modelName == "" || (len(parsedKeys) == 0 && !currentConfig.HasAPIKey())) {
-		c.JSON(http.StatusBadRequest, gin.H{"success": false, "message": "model and API key are required when content moderation is enabled"})
-		return
+	isClearingKey := request.ClearAPIKey && len(parsedKeys) == 0
+	if request.Enabled {
+		hasKey := (len(parsedKeys) > 0) || (!isClearingKey && currentConfig.HasAPIKey())
+		if modelName == "" || !hasKey {
+			c.JSON(http.StatusBadRequest, gin.H{"success": false, "message": "model and API key are required when content moderation is enabled"})
+			return
+		}
 	}
 	if request.TimeoutSeconds < 1 || request.TimeoutSeconds > 120 || request.MaxRetries < 1 || request.MaxRetries > 5 {
 		c.JSON(http.StatusBadRequest, gin.H{"success": false, "message": "content moderation limits are out of range"})
@@ -193,10 +198,9 @@ func UpdateContentModerationSettings(c *gin.Context) {
 		setting.ContentModerationAutoDisableViolationsOption:  strconv.Itoa(request.AutoDisableViolations),
 	}
 	effectiveAPIKey := apiKey
-	if effectiveAPIKey == "" {
-		effectiveAPIKey = strings.TrimSpace(currentConfig.APIKey)
-	}
-	if effectiveAPIKey != "" {
+	if isClearingKey {
+		values[setting.ContentModerationAPIKeyOption] = ""
+	} else if effectiveAPIKey != "" {
 		values[setting.ContentModerationAPIKeyOption] = effectiveAPIKey
 	}
 	if err := model.UpdateOptionsBulk(values); err != nil {
@@ -510,6 +514,9 @@ func DeleteContentModerationUserHistory(c *gin.Context) {
 func validateModerationTargetRole(c *gin.Context, userID int) error {
 	var target model.User
 	if err := model.DB.Unscoped().Select("role").First(&target, userID).Error; err != nil {
+		if errors.Is(err, gorm.ErrRecordNotFound) {
+			return nil
+		}
 		return err
 	}
 	if !canManageTargetRole(c.GetInt("role"), target.Role) {

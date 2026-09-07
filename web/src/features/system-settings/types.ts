@@ -58,6 +58,7 @@ export type ContentModerationSettingsUpdate = Omit<
   'api_key_configured' | 'api_key_count' | 'channel_ids' | 'user_whitelist_ids'
 > & {
   api_key: string
+  clear_api_key?: boolean
 }
 
 export type ModerationKeyTestResult = {
