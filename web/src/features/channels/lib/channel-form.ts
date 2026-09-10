@@ -27,8 +27,9 @@ import {
   FIELD_PASSTHROUGH_TYPES,
   MODEL_FETCHABLE_TYPES,
   OPENAI_FIELD_PASSTHROUGH_TYPES,
+  OPENCODE_GO_COMPAT_TYPES,
 } from '../constants'
-import type { Channel } from '../types'
+import type { Channel, FetchModelsRequest } from '../types'
 import {
   CHANNEL_TYPE_ADVANCED_CUSTOM,
   advancedCustomConfigUsesRelativeUpstreamPath,
@@ -267,6 +268,7 @@ export const channelFormSchema = z
     system_prompt: z.string().optional(),
     system_prompt_override: z.boolean().optional(),
     // Type-specific settings (stored in settings JSON)
+    opencode_go_compat: z.boolean().optional(),
     is_enterprise_account: z.boolean().optional(), // OpenRouter specific
     vertex_key_type: z.enum(['json', 'api_key']).optional(), // Vertex AI specific
     aws_key_type: z.enum(['ak_sk', 'api_key']).optional(), // AWS specific
@@ -459,6 +461,7 @@ export const CHANNEL_FORM_DEFAULT_VALUES: ChannelFormValues = {
   system_prompt: '',
   system_prompt_override: false,
   // Type-specific settings
+  opencode_go_compat: false,
   is_enterprise_account: false,
   vertex_key_type: 'json',
   aws_key_type: 'ak_sk',
@@ -538,6 +541,7 @@ export function transformChannelToFormDefaults(
   let allowInferenceGeo = false
   let allowSpeed = false
   let claudeBetaQuery = false
+  let openCodeGoCompat = false
   let disableTaskPollingSleep = false
   let mediaKitBaseUrl = DEFAULT_MEDIAKIT_BASE_URL
   let upstreamModelUpdateCheckEnabled = false
@@ -559,6 +563,9 @@ export function transformChannelToFormDefaults(
       allowInferenceGeo = parsed.allow_inference_geo === true
       allowSpeed = parsed.allow_speed === true
       claudeBetaQuery = parsed.claude_beta_query === true
+      openCodeGoCompat =
+        OPENCODE_GO_COMPAT_TYPES.has(channel.type) &&
+        parsed.opencode_go_compat === true
       disableTaskPollingSleep = parsed.disable_task_polling_sleep === true
       mediaKitBaseUrl = parsed.mediakit_base_url || DEFAULT_MEDIAKIT_BASE_URL
       upstreamModelUpdateCheckEnabled =
@@ -618,6 +625,7 @@ export function transformChannelToFormDefaults(
     allow_inference_geo: allowInferenceGeo,
     allow_speed: allowSpeed,
     claude_beta_query: claudeBetaQuery,
+    opencode_go_compat: openCodeGoCompat,
     disable_task_polling_sleep: disableTaskPollingSleep,
     ark_api_key: '',
     mediakit_api_key: '',
@@ -627,6 +635,28 @@ export function transformChannelToFormDefaults(
     upstream_model_update_auto_sync_enabled: upstreamModelUpdateAutoSyncEnabled,
     upstream_model_update_ignored_models: upstreamModelUpdateIgnoredModels,
     advanced_custom: advancedCustom,
+  }
+}
+
+/** Build model discovery from unsaved settings without exposing saved credentials. */
+export function buildModelPreviewRequest(
+  formData: ChannelFormValues,
+  channelId?: number
+): FetchModelsRequest {
+  return {
+    type: formData.type,
+    key: channelId ? undefined : formData.key,
+    channel_id: channelId,
+    base_url: formData.base_url || '',
+    advanced_custom:
+      formData.type === CHANNEL_TYPE_ADVANCED_CUSTOM
+        ? formData.advanced_custom
+        : undefined,
+    header_override: formData.header_override,
+    proxy: formData.proxy,
+    opencode_go_compat: OPENCODE_GO_COMPAT_TYPES.has(formData.type)
+      ? formData.opencode_go_compat === true
+      : undefined,
   }
 }
 
@@ -673,6 +703,15 @@ function buildSettingsJSON(formData: ChannelFormValues): string {
       // eslint-disable-next-line no-console
       console.error('Failed to parse existing settings:', error)
     }
+  }
+
+  if (
+    OPENCODE_GO_COMPAT_TYPES.has(formData.type) &&
+    formData.opencode_go_compat
+  ) {
+    settingsObj.opencode_go_compat = true
+  } else {
+    delete settingsObj.opencode_go_compat
   }
 
   // Add vertex_key_type for Vertex AI channels (type 41)

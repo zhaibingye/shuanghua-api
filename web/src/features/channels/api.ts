@@ -29,6 +29,7 @@ import type {
   ChannelTestResponse,
   CopyChannelParams,
   CopyChannelResponse,
+  FetchModelsRequest,
   FetchModelsResponse,
   GetChannelResponse,
   GetChannelsParams,
@@ -526,15 +527,9 @@ export async function getTagModels(
 /**
  * Fetch models from the current unsaved channel form configuration.
  */
-export async function fetchModels(data: {
-  base_url: string
-  type: number
-  key?: string
-  channel_id?: number
-  advanced_custom?: string
-  header_override?: string
-  proxy?: string
-}): Promise<FetchModelsResponse> {
+export async function fetchModels(
+  data: FetchModelsRequest
+): Promise<FetchModelsResponse> {
   const res = await api.post(
     '/api/channel/fetch_models',
     data,

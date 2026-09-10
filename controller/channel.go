@@ -213,8 +213,10 @@ func applyFetchModelsHeaderOverrides(channel *model.Channel, key string, headers
 	info := &relaycommon.RelayInfo{
 		IsChannelTest: true,
 		ChannelMeta: &relaycommon.ChannelMeta{
-			ApiKey:          key,
-			HeadersOverride: channel.GetHeaderOverride(),
+			ApiKey:               key,
+			HeadersOverride:      channel.GetHeaderOverride(),
+			ChannelType:          channel.Type,
+			ChannelOtherSettings: channel.GetOtherSettings(),
 		},
 	}
 	overrides, err := relaychannel.ResolveHeaderOverride(info, nil)
@@ -224,6 +226,7 @@ func applyFetchModelsHeaderOverrides(channel *model.Channel, key string, headers
 	for name, value := range overrides {
 		headers.Set(name, value)
 	}
+	service.ApplyOpenCodeSession(nil, info, headers)
 
 	return nil
 }
@@ -1212,29 +1215,35 @@ func equalStringPtr(a, b *string) bool {
 }
 
 type fetchModelsRequest struct {
-	ChannelID      int     `json:"channel_id"`
-	BaseURL        *string `json:"base_url"`
-	Type           int     `json:"type"`
-	Key            string  `json:"key"`
-	AdvancedCustom *string `json:"advanced_custom"`
-	HeaderOverride *string `json:"header_override"`
-	Proxy          *string `json:"proxy"`
+	ChannelID        int     `json:"channel_id"`
+	BaseURL          *string `json:"base_url"`
+	Type             int     `json:"type"`
+	Key              string  `json:"key"`
+	AdvancedCustom   *string `json:"advanced_custom"`
+	HeaderOverride   *string `json:"header_override"`
+	Proxy            *string `json:"proxy"`
+	OpenCodeGoCompat *bool   `json:"opencode_go_compat,omitempty"`
 }
 
-func buildAdvancedCustomModelPreviewChannel(req fetchModelsRequest) (*model.Channel, error) {
+// buildModelPreviewChannel applies unsaved connection settings to an isolated
+// channel value. Saved credentials stay server-side and are never persisted by a preview.
+func buildModelPreviewChannel(req fetchModelsRequest) (*model.Channel, error) {
 	var channel *model.Channel
 	if req.ChannelID > 0 {
 		savedChannel, err := model.GetChannelById(req.ChannelID, true)
 		if err != nil {
 			return nil, err
 		}
-		if savedChannel.Type != constant.ChannelTypeAdvancedCustom {
-			return nil, fmt.Errorf("channel %d is not an advanced custom channel", req.ChannelID)
+		if req.Type != 0 && savedChannel.Type != req.Type {
+			return nil, fmt.Errorf("save the channel type change before previewing models")
 		}
 		channel = savedChannel
 	} else {
+		if req.Type <= 0 || req.Type >= len(constant.ChannelBaseURLs) {
+			return nil, fmt.Errorf("invalid channel type")
+		}
 		key := strings.TrimSpace(req.Key)
-		if key != "" {
+		if req.Type != constant.ChannelTypeCodex {
 			key = strings.Split(key, "\n")[0]
 		}
 		channel = &model.Channel{
@@ -1243,16 +1252,16 @@ func buildAdvancedCustomModelPreviewChannel(req fetchModelsRequest) (*model.Chan
 		}
 	}
 
-	if channel.Type != constant.ChannelTypeAdvancedCustom {
-		return nil, fmt.Errorf("channel type must be advanced custom")
-	}
 	if req.BaseURL != nil {
 		baseURL := strings.TrimSpace(*req.BaseURL)
 		channel.BaseURL = &baseURL
 	}
 
 	settings := channel.GetOtherSettings()
-	if req.AdvancedCustom != nil {
+	if req.OpenCodeGoCompat != nil {
+		settings.OpenCodeGoCompat = *req.OpenCodeGoCompat
+	}
+	if channel.Type == constant.ChannelTypeAdvancedCustom && req.AdvancedCustom != nil {
 		rawConfig := strings.TrimSpace(*req.AdvancedCustom)
 		if rawConfig == "" {
 			return nil, fmt.Errorf("advanced_custom is required")
@@ -1262,7 +1271,7 @@ func buildAdvancedCustomModelPreviewChannel(req fetchModelsRequest) (*model.Chan
 			return nil, err
 		}
 		settings.AdvancedCustom = &config
-	} else if req.ChannelID <= 0 {
+	} else if channel.Type == constant.ChannelTypeAdvancedCustom && req.ChannelID <= 0 {
 		return nil, fmt.Errorf("advanced_custom is required")
 	}
 	channel.SetOtherSettings(settings)
@@ -1283,7 +1292,7 @@ func buildAdvancedCustomModelPreviewChannel(req fetchModelsRequest) (*model.Chan
 		channel.SetSetting(channelSettings)
 	}
 
-	if err := validateChannel(channel, false); err != nil {
+	if err := channel.ValidateSettings(); err != nil {
 		return nil, err
 	}
 	return channel, nil
@@ -1300,35 +1309,13 @@ func FetchModels(c *gin.Context) {
 		return
 	}
 
-	var channel *model.Channel
-	if req.Type == constant.ChannelTypeAdvancedCustom || req.ChannelID > 0 {
-		var err error
-		channel, err = buildAdvancedCustomModelPreviewChannel(req)
-		if err != nil {
-			c.JSON(http.StatusOK, gin.H{
-				"success": false,
-				"message": err.Error(),
-			})
-			return
-		}
-	} else {
-		baseURL := ""
-		if req.BaseURL != nil {
-			baseURL = strings.TrimSpace(*req.BaseURL)
-		}
-		if baseURL == "" {
-			baseURL = constant.ChannelBaseURLs[req.Type]
-		}
-
-		key := strings.TrimSpace(req.Key)
-		if req.Type != constant.ChannelTypeCodex {
-			key = strings.Split(key, "\n")[0]
-		}
-		channel = &model.Channel{
-			Type:    req.Type,
-			Key:     key,
-			BaseURL: &baseURL,
-		}
+	channel, err := buildModelPreviewChannel(req)
+	if err != nil {
+		c.JSON(http.StatusOK, gin.H{
+			"success": false,
+			"message": err.Error(),
+		})
+		return
 	}
 
 	models, err := fetchChannelUpstreamModelIDs(channel)

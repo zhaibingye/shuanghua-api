@@ -23,6 +23,7 @@ For commercial licensing, please contact support@quantumnous.com
 
 export const CHANNEL_TYPE_NEW_API = 60
 export const CHANNEL_TYPE_DOUBAO_VIDEO_MEDIAKIT = 61
+export const OPENCODE_GO_COMPAT_TYPES = new Set([1, 14])
 
 export const CHANNEL_TYPES = {
   0: 'Unknown',

@@ -91,6 +91,7 @@ export interface ChannelSettings {
 }
 
 export interface ChannelOtherSettings {
+  opencode_go_compat?: boolean
   azure_responses_version?: string
   vertex_key_type?: 'json' | 'api_key'
   openrouter_enterprise?: boolean
@@ -199,6 +200,17 @@ export interface ChannelBalanceResponse {
   balance?: number
   currency?: string
   raw_response?: string
+}
+
+export interface FetchModelsRequest {
+  base_url: string
+  type: number
+  key?: string
+  channel_id?: number
+  advanced_custom?: string
+  header_override?: string
+  proxy?: string
+  opencode_go_compat?: boolean
 }
 
 export interface FetchModelsResponse {

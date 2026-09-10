@@ -66,6 +66,7 @@ const (
 )
 
 type ChannelOtherSettings struct {
+	OpenCodeGoCompat                      bool                  `json:"opencode_go_compat,omitempty"` // Stable per-conversation X-Opencode-Session (OpenAI/Anthropic only).
 	AzureResponsesVersion                 string                `json:"azure_responses_version,omitempty"`
 	VertexKeyType                         VertexKeyType         `json:"vertex_key_type,omitempty"` // "json" or "api_key"
 	OpenRouterEnterprise                  *bool                 `json:"openrouter_enterprise,omitempty"`

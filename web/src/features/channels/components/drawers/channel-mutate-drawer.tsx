@@ -149,6 +149,7 @@ import {
   FIELD_PLACEHOLDERS,
   MODEL_FETCHABLE_TYPES,
   OPENAI_FIELD_PASSTHROUGH_TYPES,
+  OPENCODE_GO_COMPAT_TYPES,
 } from '../../constants'
 import { useChannelMutateForm } from '../../hooks/use-channel-mutate-form'
 import {
@@ -158,6 +159,7 @@ import {
   DEFAULT_MEDIAKIT_BASE_URL,
   parseMediaKitKey,
   channelFormSchema,
+  buildModelPreviewRequest,
   channelsQueryKeys,
   getAdvancedCustomStats,
   transformChannelToFormDefaults,
@@ -197,6 +199,7 @@ import {
   ChannelEditorLoadingState,
   ChannelModelsSection,
 } from './sections'
+import { ChannelOpenCodeSetting } from './sections/channel-opencode-setting'
 
 type ChannelMutateDrawerProps = {
   open: boolean
@@ -303,6 +306,7 @@ const SENSITIVE_FORM_FIELDS = [
   'allow_inference_geo',
   'allow_speed',
   'claude_beta_query',
+  'opencode_go_compat',
   'ark_api_key',
   'mediakit_api_key',
   'mediakit_base_url',
@@ -355,6 +359,7 @@ function hasAdvancedSettingsValues(values: ChannelFormValues): boolean {
     (values.http2_connection_shards != null &&
       values.http2_connection_shards > 1) ||
     values.claude_beta_query ||
+    (OPENCODE_GO_COMPAT_TYPES.has(values.type) && values.opencode_go_compat) ||
     values.upstream_model_update_check_enabled ||
     values.upstream_model_update_auto_sync_enabled ||
     values.upstream_model_update_ignored_models?.trim()
@@ -773,6 +778,7 @@ export function ChannelMutateDrawer({
   const currentAllowInferenceGeo = form.watch('allow_inference_geo')
   const currentAllowSpeed = form.watch('allow_speed')
   const currentClaudeBetaQuery = form.watch('claude_beta_query')
+  const currentOpenCodeGoCompat = form.watch('opencode_go_compat')
   const currentUpstreamModelUpdateAutoSyncEnabled = form.watch(
     'upstream_model_update_auto_sync_enabled'
   )
@@ -781,7 +787,9 @@ export function ChannelMutateDrawer({
   )
   const shouldPreviewUnsavedModels =
     !isEditing ||
-    (currentType === CHANNEL_TYPE_ADVANCED_CUSTOM && canEditSensitive)
+    ((currentType === CHANNEL_TYPE_ADVANCED_CUSTOM ||
+      OPENCODE_GO_COMPAT_TYPES.has(currentType)) &&
+      canEditSensitive)
   const {
     unlocked: doubaoApiEditUnlocked,
     handleClick: handleApiConfigSecretClick,
@@ -1049,6 +1057,7 @@ export function ChannelMutateDrawer({
     hasConfiguredOverrideValue(currentHeaderOverride)
   )
   const extraSettingsConfigured = Boolean(
+    (OPENCODE_GO_COMPAT_TYPES.has(currentType) && currentOpenCodeGoCompat) ||
     currentForceFormat ||
     currentThinkingToContent ||
     currentPassThroughBodyEnabled ||
@@ -1507,21 +1516,15 @@ export function ChannelMutateDrawer({
     if (!canEditSensitive) {
       throw new Error(t("You don't have necessary permission"))
     }
-    const type = form.getValues('type')
-    const editingAdvancedCustom =
-      isEditing && type === CHANNEL_TYPE_ADVANCED_CUSTOM
-    if (editingAdvancedCustom && channelId === null) {
+    if (isEditing && channelId === null) {
       throw new Error(t('No channel selected'))
     }
-    const response = await fetchModels({
-      type,
-      key: isEditing ? undefined : form.getValues('key'),
-      channel_id: editingAdvancedCustom ? channelId || undefined : undefined,
-      base_url: form.getValues('base_url') || '',
-      advanced_custom: form.getValues('advanced_custom'),
-      header_override: form.getValues('header_override'),
-      proxy: form.getValues('proxy'),
-    })
+    const response = await fetchModels(
+      buildModelPreviewRequest(
+        form.getValues(),
+        isEditing ? (channelId ?? undefined) : undefined
+      )
+    )
     if (response.success && response.data) {
       return response.data
     }
@@ -4335,6 +4338,12 @@ export function ChannelMutateDrawer({
                                   )}
                                 />
                               )}
+
+                              <ChannelOpenCodeSetting
+                                control={form.control}
+                                channelType={currentType}
+                                disabled={sensitiveLocked}
+                              />
 
                               <FormField
                                 control={form.control}

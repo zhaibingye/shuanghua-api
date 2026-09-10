@@ -39,3 +39,7 @@
 旧版本会忽略代理地址中的 path、query 和 fragment。为避免升级后中断已有渠道流量，运行时会继续剥离这些遗留后缀，并对同一代理地址每个进程记录一次不含凭证和后缀的警告。该兼容逻辑不会改写数据库；再次保存渠道时必须按上述严格规则修正代理地址。
 
 代理连接使用 30 秒 TCP 拨号超时和 30 秒 KeepAlive；TLS 握手超时为 10 秒。这些超时同样适用于未配置渠道代理的中转请求。
+
+## OpenCode Go 兼容
+
+OpenAI 和 Anthropic 渠道的额外设置支持「OpenCode Go 兼容」开关，用于补充稳定的 `X-Opencode-Session`。该选项存放在渠道的 `settings` JSON 中，详见 [OpenCode Go 兼容说明](opencode_go.md)。

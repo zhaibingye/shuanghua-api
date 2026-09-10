@@ -41,6 +41,24 @@ func TestChannelValidateSettingsRejectsInvalidHTTPTransport(t *testing.T) {
 	}
 }
 
+func TestOpenCodeGoSettingsRoundTripAndChannelValidation(t *testing.T) {
+	for _, kind := range []int{constant.ChannelTypeOpenAI, constant.ChannelTypeAnthropic, constant.ChannelTypeAzure} {
+		channel := &Channel{Type: kind}
+		assert.False(t, channel.GetOtherSettings().OpenCodeGoCompat)
+		channel.SetOtherSettings(dto.ChannelOtherSettings{OpenCodeGoCompat: true, AllowServiceTier: true})
+		assert.True(t, channel.GetOtherSettings().OpenCodeGoCompat)
+		assert.True(t, channel.GetOtherSettings().AllowServiceTier)
+		if kind == constant.ChannelTypeAzure {
+			require.ErrorContains(t, channel.ValidateSettings(), "opencode_go_compat")
+		} else {
+			require.NoError(t, channel.ValidateSettings())
+		}
+		channel.SetOtherSettings(dto.ChannelOtherSettings{AllowServiceTier: true})
+		assert.False(t, channel.GetOtherSettings().OpenCodeGoCompat)
+		require.NoError(t, channel.ValidateSettings())
+	}
+}
+
 func TestAdvancedCustomChannelRequiresModelListRouteOnlyWhenUpdateChecksEnabled(t *testing.T) {
 	inferenceRoute := dto.AdvancedCustomRoute{
 		IncomingPath: "/v1/chat/completions",

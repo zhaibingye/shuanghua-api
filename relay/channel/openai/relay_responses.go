@@ -34,6 +34,8 @@ func OaiResponsesHandler(c *gin.Context, info *relaycommon.RelayInfo, resp *http
 		return nil, types.WithOpenAIError(*oaiError, resp.StatusCode)
 	}
 
+	service.RecordOpenCodeResponse(c, info, responsesResponse.ID)
+
 	// 写入新的 response body
 	service.IOCopyBytesGracefully(c, resp, responseBody)
 
@@ -93,6 +95,9 @@ func OaiResponsesStreamHandler(c *gin.Context, info *relaycommon.RelayInfo, resp
 			logger.LogError(c, "failed to unmarshal stream response: "+err.Error())
 			sr.Error(err)
 			return
+		}
+		if streamResponse.Response != nil {
+			service.RecordOpenCodeResponse(c, info, streamResponse.Response.ID)
 		}
 		sendResponsesStreamData(c, streamResponse, data)
 		switch streamResponse.Type {
