@@ -66,7 +66,7 @@ func TestApplyReasoningModelSuffixRetryClearsStateWhenNewChannelHasNoSuffix(t *t
 		OriginModelName: "claude-3-7-sonnet",
 		Request:         req,
 		ChannelMeta: &relaycommon.ChannelMeta{
-			UpstreamModelName: "claude-3-7-sonnet-thinking",
+			UpstreamModelName: "claude-3-7-sonnet@thinking:on",
 			IsModelMapped:     true,
 		},
 	}

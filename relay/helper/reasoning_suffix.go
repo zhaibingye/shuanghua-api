@@ -20,8 +20,10 @@ import (
 // requests are the DeepCopy the handler will send upstream; they must be
 // synced here because info.Request is the original, not that copy. Explicit
 // model modifiers override request fields; mapped-model modifiers override
-// origin-model modifiers. Pass-through (global or channel) is a no-op so the
-// request body stays byte-identical. c is used only to correlate diagnostics.
+// origin-model modifiers. Mapped targets keep literal legacy suffixes such as
+// -high; only explicit @ modifiers are interpreted on those upstream IDs.
+// Pass-through (global or channel) is a no-op so the request body stays
+// byte-identical. c is used only to correlate diagnostics.
 func ApplyReasoningModelSuffix(c *gin.Context, info *relaycommon.RelayInfo, outbound ...dto.Request) error {
 	if info == nil {
 		return nil
@@ -37,13 +39,13 @@ func ApplyReasoningModelSuffix(c *gin.Context, info *relaycommon.RelayInfo, outb
 	if info.ChannelMeta != nil {
 		upstream = info.UpstreamModelName
 	}
-	originParsed, err := parseRequestModelName(origin, opts)
+	originParsed, err := parseRequestModelName(origin, opts, true)
 	if err != nil {
 		return reasoning.AsClientError(err)
 	}
 	upstreamParsed := originParsed
 	if upstream != origin {
-		upstreamParsed, err = parseRequestModelName(upstream, opts)
+		upstreamParsed, err = parseRequestModelName(upstream, opts, info.ChannelMeta == nil || !info.IsModelMapped)
 		if err != nil {
 			return reasoning.AsClientError(err)
 		}
@@ -121,7 +123,7 @@ func ApplyReasoningModelSuffix(c *gin.Context, info *relaycommon.RelayInfo, outb
 	return nil
 }
 
-func parseRequestModelName(name string, opts *convmeta.Options) (parsedModelModifiers, error) {
+func parseRequestModelName(name string, opts *convmeta.Options, allowLegacySuffix bool) (parsedModelModifiers, error) {
 	if opts.ShouldPreserveThinkingSuffix(name) {
 		return parsedModelModifiers{base: name}, nil
 	}
@@ -129,7 +131,7 @@ func parseRequestModelName(name string, opts *convmeta.Options) (parsedModelModi
 	if err != nil {
 		return parsedModelModifiers{}, err
 	}
-	if opts.ShouldPreserveThinkingSuffix(parsed.base) {
+	if !allowLegacySuffix || opts.ShouldPreserveThinkingSuffix(parsed.base) {
 		return parsed, nil
 	}
 	legacyBase, legacyIntent, legacyFound, err := parseHostModelSuffix(parsed.base, opts)

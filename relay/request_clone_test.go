@@ -9,6 +9,7 @@ import (
 	"testing"
 
 	"github.com/QuantumNous/new-api/common"
+	"github.com/QuantumNous/new-api/constant"
 	relaycommon "github.com/QuantumNous/new-api/relay/common"
 	"github.com/QuantumNous/new-api/relay/helper"
 	"github.com/QuantumNous/new-api/relaykit/dto"
@@ -16,7 +17,129 @@ import (
 	"github.com/jinzhu/copier"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+	"github.com/tidwall/gjson"
 )
+
+func TestGeminiContentSurvivesRequestRelay(t *testing.T) {
+	tests := []struct {
+		name  string
+		input string
+		want  string
+	}{
+		{
+			name: "function history",
+			input: `[{"role":"model","parts":[
+				{"functionCall":{"id":"call_a","name":"lookup","args":{"count":0}},"thoughtSignature":"c2lnbmF0dXJl"},
+				{"functionCall":{"id":"call_b","name":"lookup","args":{"enabled":false}}}
+			]},{"role":"user","parts":[
+				{"functionResponse":{"id":"call_b","name":"lookup","response":{"result":false}}},
+				{"functionResponse":{"id":"call_a","name":"lookup","response":{"result":0}}}
+			]}]`,
+		},
+		{
+			name: "snake case function history",
+			input: `[{"role":"model","parts":[{"function_call":{"id":"call_a","name":"lookup","args":{}},"thought_signature":"c2lnbmF0dXJl"}]},
+				{"role":"user","parts":[{"function_response":{"id":"call_a","name":"lookup","response":{"result":"ok"}}}]}]`,
+			want: `[{"role":"model","parts":[{"functionCall":{"id":"call_a","name":"lookup","args":{}},"thoughtSignature":"c2lnbmF0dXJl"}]},
+				{"role":"user","parts":[{"functionResponse":{"id":"call_a","name":"lookup","response":{"result":"ok"}}}]}]`,
+		},
+		{
+			name: "server side tool history",
+			input: `[{"role":"model","parts":[
+				{"toolCall":{"id":"search_1","toolType":"GOOGLE_SEARCH_WEB","args":{"queries":["weather"]}},"thoughtSignature":"c2lnbmF0dXJl"},
+				{"toolResponse":{"id":"search_1","toolType":"GOOGLE_SEARCH_WEB","response":{"results":[{"title":"forecast","score":0}]}}},
+				{"text":"Found the forecast"}
+			]}]`,
+		},
+		{
+			name: "snake case server side tool history",
+			input: `[{"role":"model","parts":[
+				{"tool_call":{"id":"search_1","tool_type":"GOOGLE_SEARCH_WEB","args":{"query":"weather"}},"thought_signature":"c2lnbmF0dXJl"},
+				{"tool_response":{"id":"search_1","tool_type":"GOOGLE_SEARCH_WEB","response":{"result":false}}}
+			]}]`,
+			want: `[{"role":"model","parts":[
+				{"toolCall":{"id":"search_1","tool_type":"GOOGLE_SEARCH_WEB","args":{"query":"weather"}},"thoughtSignature":"c2lnbmF0dXJl"},
+				{"toolResponse":{"id":"search_1","tool_type":"GOOGLE_SEARCH_WEB","response":{"result":false}}}
+			]}]`,
+		},
+		{
+			name:  "signed empty text",
+			input: `[{"role":"model","parts":[{"text":"","thoughtSignature":"c2lnbmF0dXJl"},{"text":"answer"}]}]`,
+		},
+		{
+			name:  "empty text",
+			input: `[{"role":"user","parts":[{"text":""},{"text":"hello"}]}]`,
+		},
+		{
+			name:  "absent text remains absent",
+			input: `[{"role":"model","parts":[{}, {"thoughtSignature":"c2lnbmF0dXJl"}]}]`,
+		},
+		{
+			name:  "null text is not a data variant",
+			input: `[{"role":"user","parts":[{"text":null}]}]`,
+			want:  `[{"role":"user","parts":[{}]}]`,
+		},
+		{
+			name: "media and code history",
+			input: `[{"role":"user","parts":[
+				{"inlineData":{"mimeType":"image/png","data":"aW1hZ2U="}},
+				{"fileData":{"mimeType":"video/mp4","fileUri":"https://example.com/video.mp4"},"videoMetadata":{"startOffset":"0s"},"mediaResolution":{"level":"MEDIA_RESOLUTION_LOW"}}
+			]},{"role":"model","parts":[
+				{"executableCode":{"language":"PYTHON","code":"print(1)"}},
+				{"codeExecutionResult":{"outcome":"OUTCOME_OK","output":"1"}}
+			]}]`,
+		},
+		{
+			name: "snake case media and code history",
+			input: `[{"role":"user","parts":[
+				{"inline_data":{"mime_type":"image/png","data":"aW1hZ2U="}},
+				{"file_data":{"mime_type":"video/mp4","file_uri":"https://example.com/video.mp4"},"video_metadata":{"startOffset":"0s"},"media_resolution":{"level":"MEDIA_RESOLUTION_LOW"}}
+			]},{"role":"model","parts":[
+				{"executable_code":{"language":"PYTHON","code":"print(1)"}},
+				{"code_execution_result":{"outcome":"OUTCOME_OK","output":"1"}}
+			]}]`,
+			want: `[{"role":"user","parts":[
+				{"inlineData":{"mimeType":"image/png","data":"aW1hZ2U="}},
+				{"fileData":{"mimeType":"video/mp4","fileUri":"https://example.com/video.mp4"},"videoMetadata":{"startOffset":"0s"},"mediaResolution":{"level":"MEDIA_RESOLUTION_LOW"}}
+			]},{"role":"model","parts":[
+				{"executableCode":{"language":"PYTHON","code":"print(1)"}},
+				{"codeExecutionResult":{"outcome":"OUTCOME_OK","output":"1"}}
+			]}]`,
+		},
+	}
+
+	for _, apiType := range []int{constant.APITypeGemini, constant.APITypeNewAPI} {
+		adaptor := GetAdaptor(apiType)
+		t.Run(adaptor.GetChannelName(), func(t *testing.T) {
+			for _, tt := range tests {
+				t.Run(tt.name, func(t *testing.T) {
+					want := tt.want
+					if want == "" {
+						want = tt.input
+					}
+					var source dto.GeminiChatRequest
+					require.NoError(t, common.Unmarshal([]byte(`{"contents":`+tt.input+`}`), &source))
+					request, err := common.DeepCopy(&source)
+					require.NoError(t, err)
+					c, _ := gin.CreateTestContext(httptest.NewRecorder())
+					info := &relaycommon.RelayInfo{ChannelMeta: &relaycommon.ChannelMeta{UpstreamModelName: "gemini-2.5-flash"}}
+					converted, err := adaptor.ConvertGeminiRequest(c, info, request)
+					require.NoError(t, err)
+					encoded, err := common.Marshal(converted)
+					require.NoError(t, err)
+					assert.JSONEq(t, want, gjson.GetBytes(encoded, "contents").Raw)
+
+					// Replaying the history on another turn must remain lossless.
+					var replay dto.GeminiChatRequest
+					require.NoError(t, common.Unmarshal(encoded, &replay))
+					replayed, err := common.Marshal(replay)
+					require.NoError(t, err)
+					assert.JSONEq(t, want, gjson.GetBytes(replayed, "contents").Raw)
+				})
+			}
+		})
+	}
+}
 
 func TestRequestDeepCopyResponses(t *testing.T) {
 	t.Run("nil source", func(t *testing.T) {

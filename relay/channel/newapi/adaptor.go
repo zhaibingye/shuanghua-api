@@ -4,6 +4,8 @@ import (
 	"errors"
 	"io"
 	"net/http"
+	"net/url"
+	"strings"
 
 	"github.com/QuantumNous/new-api/relay/channel"
 	"github.com/QuantumNous/new-api/relay/channel/claude"
@@ -33,7 +35,23 @@ func (a *Adaptor) GetRequestURL(info *relaycommon.RelayInfo) (string, error) {
 	if info.RelayMode == relayconstant.RelayModeAlphaSearch {
 		return relaycommon.GetFullRequestURL(info.ChannelBaseUrl, "/v1/alpha/search", info.ChannelType), nil
 	}
-	return relaycommon.GetFullRequestURL(info.ChannelBaseUrl, info.RequestURLPath, info.ChannelType), nil
+	requestURL := info.RequestURLPath
+	if info.RelayFormat == types.RelayFormatGemini && info.UpstreamModelName != "" {
+		parsed, err := url.Parse(requestURL)
+		if err != nil {
+			return "", err
+		}
+		prefix, modelAction, ok := strings.Cut(parsed.Path, "/models/")
+		if actionIndex := strings.LastIndex(modelAction, ":"); ok && actionIndex >= 0 {
+			// Gemini carries its model in the URL, not the chat body. Use the
+			// final mapped/normalized name while retaining version, action and
+			// query parameters. Keep RequestURLPath intact for channel retries.
+			parsed.Path = prefix + "/models/" + info.UpstreamModelName + modelAction[actionIndex:]
+			parsed.RawPath = ""
+			requestURL = parsed.String()
+		}
+	}
+	return relaycommon.GetFullRequestURL(info.ChannelBaseUrl, requestURL, info.ChannelType), nil
 }
 
 func (a *Adaptor) SetupRequestHeader(c *gin.Context, req *http.Header, info *relaycommon.RelayInfo) error {

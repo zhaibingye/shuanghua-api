@@ -281,8 +281,31 @@ type GeminiFileData struct {
 	FileUri  string `json:"fileUri,omitempty"`
 }
 
+func (f *GeminiFileData) UnmarshalJSON(data []byte) error {
+	type Alias GeminiFileData
+	var aux struct {
+		Alias
+		MimeTypeSnake *string `json:"mime_type"`
+		FileUriSnake  *string `json:"file_uri"`
+	}
+	if err := kitutil.Unmarshal(data, &aux); err != nil {
+		return err
+	}
+	*f = GeminiFileData(aux.Alias)
+	if aux.MimeTypeSnake != nil {
+		f.MimeType = *aux.MimeTypeSnake
+	}
+	if aux.FileUriSnake != nil {
+		f.FileUri = *aux.FileUriSnake
+	}
+	return nil
+}
+
 type GeminiPart struct {
-	Text             string                  `json:"text,omitempty"`
+	Text string `json:"text,omitempty"`
+	// HasText preserves the selected text data variant even when its value is
+	// empty. It is exported so request deep copies retain the wire presence.
+	HasText          bool                    `json:"-"`
 	Thought          bool                    `json:"thought,omitempty"`
 	InlineData       *GeminiInlineData       `json:"inlineData,omitempty"`
 	FunctionCall     *FunctionCall           `json:"functionCall,omitempty"`
@@ -294,32 +317,89 @@ type GeminiPart struct {
 	FileData            *GeminiFileData                `json:"fileData,omitempty"`
 	ExecutableCode      *GeminiPartExecutableCode      `json:"executableCode,omitempty"`
 	CodeExecutionResult *GeminiPartCodeExecutionResult `json:"codeExecutionResult,omitempty"`
+	// Server-side tool records must be replayed verbatim, including their IDs
+	// and provider-specific payloads. They are distinct from client function calls.
+	ToolCall     json.RawMessage `json:"toolCall,omitempty"`
+	ToolResponse json.RawMessage `json:"toolResponse,omitempty"`
 }
 
-// UnmarshalJSON custom unmarshaler for GeminiPart to support snake_case and camelCase for InlineData
+func (p GeminiPart) MarshalJSON() ([]byte, error) {
+	type Alias GeminiPart
+	var text *string
+	if p.HasText || p.Text != "" {
+		text = &p.Text
+	}
+	return kitutil.Marshal(struct {
+		Alias
+		Text *string `json:"text,omitempty"`
+	}{Alias: Alias(p), Text: text})
+}
+
+// UnmarshalJSON accepts both protobuf field names and their JSON camelCase
+// aliases. Losing a data variant here would turn a valid history part into an
+// empty object and cause Gemini's required-oneof-data validation to fail.
 func (p *GeminiPart) UnmarshalJSON(data []byte) error {
-	// Alias to avoid recursion during unmarshalling
 	type Alias GeminiPart
 	var aux struct {
 		Alias
-		InlineDataSnake *GeminiInlineData `json:"inline_data,omitempty"` // snake_case variant
+		Text                     *string                        `json:"text"`
+		InlineDataSnake          *GeminiInlineData              `json:"inline_data"`
+		FunctionCallSnake        *FunctionCall                  `json:"function_call"`
+		FunctionResponseSnake    *GeminiFunctionResponse        `json:"function_response"`
+		ThoughtSignatureSnake    json.RawMessage                `json:"thought_signature"`
+		MediaResolutionSnake     json.RawMessage                `json:"media_resolution"`
+		VideoMetadataSnake       json.RawMessage                `json:"video_metadata"`
+		FileDataSnake            *GeminiFileData                `json:"file_data"`
+		ExecutableCodeSnake      *GeminiPartExecutableCode      `json:"executable_code"`
+		CodeExecutionResultSnake *GeminiPartCodeExecutionResult `json:"code_execution_result"`
+		ToolCallSnake            json.RawMessage                `json:"tool_call"`
+		ToolResponseSnake        json.RawMessage                `json:"tool_response"`
 	}
 
 	if err := kitutil.Unmarshal(data, &aux); err != nil {
 		return err
 	}
 
-	// Assign fields from alias
 	*p = GeminiPart(aux.Alias)
+	if aux.Text != nil {
+		p.Text = *aux.Text
+		p.HasText = true
+	}
 
-	// Prioritize snake_case for InlineData if present
+	// Keep the existing snake_case precedence when both aliases are supplied.
 	if aux.InlineDataSnake != nil {
 		p.InlineData = aux.InlineDataSnake
-	} else if aux.InlineData != nil { // Fallback to camelCase from Alias
-		p.InlineData = aux.InlineData
 	}
-	// Other fields like Text, FunctionCall etc. are already populated via aux.Alias
-
+	if aux.FunctionCallSnake != nil {
+		p.FunctionCall = aux.FunctionCallSnake
+	}
+	if aux.FunctionResponseSnake != nil {
+		p.FunctionResponse = aux.FunctionResponseSnake
+	}
+	if aux.ThoughtSignatureSnake != nil {
+		p.ThoughtSignature = aux.ThoughtSignatureSnake
+	}
+	if aux.MediaResolutionSnake != nil {
+		p.MediaResolution = aux.MediaResolutionSnake
+	}
+	if aux.VideoMetadataSnake != nil {
+		p.VideoMetadata = aux.VideoMetadataSnake
+	}
+	if aux.FileDataSnake != nil {
+		p.FileData = aux.FileDataSnake
+	}
+	if aux.ExecutableCodeSnake != nil {
+		p.ExecutableCode = aux.ExecutableCodeSnake
+	}
+	if aux.CodeExecutionResultSnake != nil {
+		p.CodeExecutionResult = aux.CodeExecutionResultSnake
+	}
+	if aux.ToolCallSnake != nil {
+		p.ToolCall = aux.ToolCallSnake
+	}
+	if aux.ToolResponseSnake != nil {
+		p.ToolResponse = aux.ToolResponseSnake
+	}
 	return nil
 }
 
