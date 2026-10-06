@@ -154,6 +154,7 @@ function ChatRouteComponent() {
   }
 
   return (
+    // eslint-disable-next-line react/iframe-missing-sandbox -- Admin-configured chat applications require their existing origin storage and login flow.
     <iframe
       src={iframeSrc}
       key={iframeSrc}

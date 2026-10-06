@@ -1,6 +1,7 @@
 package helper
 
 import (
+	"github.com/QuantumNous/new-api/relaykit/dto"
 	"net/http/httptest"
 	"testing"
 
@@ -69,7 +70,8 @@ func TestApplySeedanceTaskPriceMediaKitUsesSourceResolution(t *testing.T) {
 		UserGroup:             "default",
 		UsingGroup:            "default",
 		ChannelMeta: &relaycommon.ChannelMeta{
-			ChannelType:       constant.ChannelTypeDoubaoVideoMediaKit,
+			ChannelType:       constant.ChannelTypeTaskPlugin,
+			ChannelSetting:    dto.ChannelSettings{TaskPluginKey: constant.TaskPluginDoubaoMediaKit},
 			UpstreamModelName: "doubao-seedance-2-0-260128",
 		},
 	}
@@ -104,7 +106,8 @@ func TestApplySeedanceTaskPriceMediaKit480pUses720pFinal(t *testing.T) {
 		UserGroup:             "default",
 		UsingGroup:            "default",
 		ChannelMeta: &relaycommon.ChannelMeta{
-			ChannelType:       constant.ChannelTypeDoubaoVideoMediaKit,
+			ChannelType:       constant.ChannelTypeTaskPlugin,
+			ChannelSetting:    dto.ChannelSettings{TaskPluginKey: constant.TaskPluginDoubaoMediaKit},
 			UpstreamModelName: "doubao-seedance-2-0-260128",
 		},
 	}
@@ -138,7 +141,8 @@ func TestApplySeedanceTaskPriceMediaKit720pUses1080pFrom480(t *testing.T) {
 		UserGroup:             "default",
 		UsingGroup:            "default",
 		ChannelMeta: &relaycommon.ChannelMeta{
-			ChannelType:       constant.ChannelTypeDoubaoVideoMediaKit,
+			ChannelType:       constant.ChannelTypeTaskPlugin,
+			ChannelSetting:    dto.ChannelSettings{TaskPluginKey: constant.TaskPluginDoubaoMediaKit},
 			UpstreamModelName: "doubao-seedance-2-0-260128",
 		},
 	}

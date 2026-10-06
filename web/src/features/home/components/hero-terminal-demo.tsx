@@ -1,3 +1,4 @@
+/* eslint-disable react/no-array-index-key -- Static code samples preserve line and token positions. */
 /*
 Copyright (C) 2023-2026 QuantumNous
 
@@ -227,6 +228,7 @@ export function HeroTerminalDemo(props: HeroTerminalDemoProps) {
             const isActive = index === activeIndex
             return (
               <button
+                type='button'
                 key={item.id}
                 onClick={() => handleSelect(index)}
                 className={cn(

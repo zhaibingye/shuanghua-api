@@ -180,17 +180,16 @@ export function PromptInputProvider({
     const incoming = [...files]
     if (incoming.length === 0) return
 
-    setAttachements((prev) =>
-      prev.concat(
-        incoming.map((file) => ({
-          id: nanoid(),
-          type: 'file' as const,
-          url: URL.createObjectURL(file),
-          mediaType: file.type,
-          filename: file.name,
-        }))
-      )
-    )
+    setAttachements((prev) => [
+      ...prev,
+      ...incoming.map((file) => ({
+        id: nanoid(),
+        type: 'file' as const,
+        url: URL.createObjectURL(file),
+        mediaType: file.type,
+        filename: file.name,
+      })),
+    ])
   }, [])
 
   const remove = useCallback((id: string) => {
@@ -552,7 +551,7 @@ export const PromptInput = ({
             filename: file.name,
           })
         }
-        return prev.concat(next)
+        return [...prev, ...next]
       })
     },
     [matchesAccept, maxFiles, maxFileSize, onError, t]
@@ -727,7 +726,7 @@ export const PromptInput = ({
     }
 
     // Convert blob URLs to data URLs asynchronously
-    Promise.all(
+    return Promise.all(
       files.map(async ({ id, ...item }) => {
         if (item.url && item.url.startsWith('blob:')) {
           return {
@@ -842,9 +841,7 @@ export const PromptInputTextarea = ({
     ) {
       e.preventDefault()
       const lastAttachment =
-        attachments.files.length > 0
-          ? attachments.files.at(-1)
-          : undefined
+        attachments.files.length > 0 ? attachments.files.at(-1) : undefined
       if (lastAttachment) {
         attachments.remove(lastAttachment.id)
       }
@@ -889,7 +886,10 @@ export const PromptInputTextarea = ({
 
   return (
     <InputGroupTextarea
-      className={cn('field-sizing-content max-h-48 min-h-16', className)}
+      className={cn(
+        'field-sizing-content max-h-48 min-h-16 break-all',
+        className
+      )}
       name='message'
       onCompositionEnd={() => setIsComposing(false)}
       onCompositionStart={() => setIsComposing(true)}

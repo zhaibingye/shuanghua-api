@@ -176,3 +176,14 @@ func RecordOpenCodeResponse(c *gin.Context, info *relaycommon.RelayInfo, respons
 	}
 	state.responses[key] = true
 }
+
+// OpenCodeSessionID lets a persistent upstream connection carry its handshake
+// session into subsequent per-request contexts, without re-reading bodies.
+func OpenCodeSessionID(c *gin.Context) string {
+	value, _ := c.Get(openCodeSessionContextKey)
+	state, _ := value.(*openCodeRequestSession)
+	if state == nil {
+		return ""
+	}
+	return state.activeID
+}

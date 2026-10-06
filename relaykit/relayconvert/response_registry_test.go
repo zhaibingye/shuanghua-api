@@ -75,10 +75,6 @@ func TestLookupBuiltinResponseConverters(t *testing.T) {
 			from:     types.RelayFormatOpenAIResponses,
 			to:       types.RelayFormatClaude,
 			quality:  ResponseConverterQualityFair,
-			stepConverters: []string{
-				ConverterOpenAIResponsesToOpenAIChat,
-				ConverterOpenAIChatToClaudeMessages,
-			},
 		},
 		{
 			lookupID: responseConverterResponsesToGemini,
@@ -193,7 +189,7 @@ func TestConvertResponseDirectConverters(t *testing.T) {
 	require.NotNil(t, geminiValue.UsageMetadata.BillingUsage.OpenAIUsage)
 }
 
-func TestConvertResponseMultiHopConverters(t *testing.T) {
+func TestConvertResponseDirectAndMultiHopConverters(t *testing.T) {
 	responses := textRegistryResponsesResponse()
 
 	toClaude, err := ConvertResponse(nil, &convmeta.Values{}, types.RelayFormatClaude, responses)
@@ -201,8 +197,7 @@ func TestConvertResponseMultiHopConverters(t *testing.T) {
 	assert.Equal(t, requestConverterResponsesToClaude, toClaude.Converter)
 	assert.Equal(t, ResponseConverterQualityFair, toClaude.Quality)
 	assert.Equal(t, []ResponseStep{
-		{Converter: ConverterOpenAIResponsesToOpenAIChat, From: types.RelayFormatOpenAIResponses, To: types.RelayFormatOpenAI},
-		{Converter: ConverterOpenAIChatToClaudeMessages, From: types.RelayFormatOpenAI, To: types.RelayFormatClaude},
+		{Converter: ConverterOpenAIResponsesToClaudeMessages, From: types.RelayFormatOpenAIResponses, To: types.RelayFormatClaude},
 	}, toClaude.Steps)
 	require.IsType(t, &dto.ClaudeResponse{}, toClaude.Value)
 	claudeValue := toClaude.Value.(*dto.ClaudeResponse)
@@ -210,7 +205,7 @@ func TestConvertResponseMultiHopConverters(t *testing.T) {
 	assert.Equal(t, "text", claudeValue.Content[0].Type)
 	assert.Equal(t, "tool_use", claudeValue.Content[1].Type)
 	assert.Equal(t, "lookup", claudeValue.Content[1].Name)
-	assert.Equal(t, map[string]interface{}{"q": "x"}, claudeValue.Content[1].Input)
+	assert.Equal(t, map[string]any{"q": "x"}, claudeValue.Content[1].Input)
 	assert.Equal(t, 11, toClaude.Usage.TotalTokens)
 
 	toGemini, err := ConvertResponse(nil, &convmeta.Values{ChannelMetaAttached: true, UpstreamModelName: "gemini-test"}, types.RelayFormatGemini, responses)
@@ -228,8 +223,42 @@ func TestConvertResponseMultiHopConverters(t *testing.T) {
 	assert.Equal(t, "hello", geminiValue.Candidates[0].Content.Parts[0].Text)
 	require.NotNil(t, geminiValue.Candidates[0].Content.Parts[1].FunctionCall)
 	assert.Equal(t, "lookup", geminiValue.Candidates[0].Content.Parts[1].FunctionCall.FunctionName)
-	assert.Equal(t, map[string]interface{}{"q": "x"}, geminiValue.Candidates[0].Content.Parts[1].FunctionCall.Arguments)
+	assert.Equal(t, map[string]any{"q": "x"}, geminiValue.Candidates[0].Content.Parts[1].FunctionCall.Arguments)
 	assert.Equal(t, 11, toGemini.Usage.TotalTokens)
+}
+
+func TestConvertResponsePreservesInterleavedResponsesBlocksForClaude(t *testing.T) {
+	responses := &dto.OpenAIResponsesResponse{
+		ID:     "resp_1",
+		Model:  "gpt-test",
+		Status: []byte(`"completed"`),
+		Output: []dto.ResponsesOutput{
+			{Type: "reasoning", Summary: []dto.ResponsesReasoningSummaryPart{{Type: "summary_text", Text: "**Planning file inspection**"}}},
+			{Type: "message", Role: "assistant", Content: []dto.ResponsesOutputContent{{Type: "output_text", Text: "I’ll inspect the starter repository."}}},
+			{Type: "reasoning", Summary: []dto.ResponsesReasoningSummaryPart{{Type: "summary_text", Text: "**Clarifying environment task requirements**"}}},
+			{Type: "message", Role: "assistant", Content: []dto.ResponsesOutputContent{{Type: "output_text", Text: "What would you like me to build?"}}},
+		},
+	}
+
+	result, err := ConvertResponse(nil, nil, types.RelayFormatClaude, responses)
+	require.NoError(t, err)
+	assert.Equal(t, []ResponseStep{
+		{Converter: ConverterOpenAIResponsesToClaudeMessages, From: types.RelayFormatOpenAIResponses, To: types.RelayFormatClaude},
+	}, result.Steps)
+	claudeResponse := result.Value.(*dto.ClaudeResponse)
+	require.Len(t, claudeResponse.Content, 4)
+	assert.Equal(t, []string{"thinking", "text", "thinking", "text"}, []string{
+		claudeResponse.Content[0].Type,
+		claudeResponse.Content[1].Type,
+		claudeResponse.Content[2].Type,
+		claudeResponse.Content[3].Type,
+	})
+	require.NotNil(t, claudeResponse.Content[0].Thinking)
+	require.NotNil(t, claudeResponse.Content[2].Thinking)
+	assert.Equal(t, "**Planning file inspection**", *claudeResponse.Content[0].Thinking)
+	assert.Equal(t, "I’ll inspect the starter repository.", claudeResponse.Content[1].GetText())
+	assert.Equal(t, "**Clarifying environment task requirements**", *claudeResponse.Content[2].Thinking)
+	assert.Equal(t, "What would you like me to build?", claudeResponse.Content[3].GetText())
 }
 
 func TestConvertResponseByIDExecutesMultiHopAndChecksSource(t *testing.T) {
@@ -255,7 +284,7 @@ func TestConvertResponseProviderToOAIChatUsage(t *testing.T) {
 		Model:      "claude-test",
 		StopReason: "end_turn",
 		Content: []dto.ClaudeMediaMessage{
-			{Type: "tool_use", Id: "toolu_1", Name: "lookup", Input: map[string]interface{}{"q": "x"}},
+			{Type: "tool_use", Id: "toolu_1", Name: "lookup", Input: map[string]any{"q": "x"}},
 		},
 		Usage: &dto.ClaudeUsage{
 			InputTokens:              10,
@@ -297,7 +326,7 @@ func TestConvertResponseProviderToOAIChatUsage(t *testing.T) {
 				Content: dto.GeminiChatContent{
 					Parts: []dto.GeminiPart{
 						{Text: "hello"},
-						{FunctionCall: &dto.FunctionCall{FunctionName: "lookup", Arguments: map[string]interface{}{"q": "x"}}},
+						{FunctionCall: &dto.FunctionCall{FunctionName: "lookup", Arguments: map[string]any{"q": "x"}}},
 					},
 				},
 			},
@@ -489,7 +518,7 @@ func TestConvertStreamResponseStatefulDirectConverters(t *testing.T) {
 	require.IsType(t, dto.ChatCompletionsStreamResponse{}, responsesResults[len(responsesResults)-1].Value)
 }
 
-func TestConvertStreamResponseStatefulMultiHopResponsesToClaude(t *testing.T) {
+func TestConvertStreamResponseStatefulDirectResponsesToClaude(t *testing.T) {
 	info := &convmeta.Values{
 		ClaudeConvertInfo: &convmeta.ClaudeConvertInfo{
 			LastMessagesType: convmeta.LastMessageTypeNone,
@@ -509,8 +538,7 @@ func TestConvertStreamResponseStatefulMultiHopResponsesToClaude(t *testing.T) {
 	require.NotEmpty(t, results)
 	assert.Equal(t, requestConverterResponsesToClaude, results[0].Converter)
 	assert.Equal(t, []ResponseStep{
-		{Converter: ConverterOpenAIResponsesToOpenAIChat, From: types.RelayFormatOpenAIResponses, To: types.RelayFormatOpenAI},
-		{Converter: ConverterOpenAIChatToClaudeMessages, From: types.RelayFormatOpenAI, To: types.RelayFormatClaude},
+		{Converter: ConverterOpenAIResponsesToClaudeMessages, From: types.RelayFormatOpenAIResponses, To: types.RelayFormatClaude},
 	}, results[0].Steps)
 
 	var sawTextDelta bool
@@ -670,4 +698,42 @@ func textRegistryResponsesResponse() *dto.OpenAIResponsesResponse {
 
 func respPtr[T any](value T) *T {
 	return &value
+}
+
+func TestConvertChatResponseToResponsesRestoresRecordedCustomTools(t *testing.T) {
+	info := &convmeta.Values{ResponsesTools: &convmeta.ResponsesToolState{CustomToolNames: map[string]struct{}{"exec": {}}}}
+	message := dto.Message{Role: "assistant"}
+	message.SetToolCalls([]dto.ToolCallRequest{{ID: "call_exec", Type: "function", Function: dto.FunctionRequest{Name: "exec", Arguments: `{"input":"ls"}`}}})
+
+	result, err := ConvertResponse(nil, info, types.RelayFormatOpenAIResponses, &dto.OpenAITextResponse{
+		Id:      "chatcmpl_1",
+		Model:   "gpt-test",
+		Choices: []dto.OpenAITextResponseChoice{{Message: message, FinishReason: "tool_calls"}},
+	})
+	require.NoError(t, err)
+	responses, ok := result.Value.(*dto.OpenAIResponsesResponse)
+	require.True(t, ok)
+	require.Len(t, responses.Output, 1)
+	assert.Equal(t, "custom_tool_call", responses.Output[0].Type)
+	assert.Equal(t, `"ls"`, string(responses.Output[0].Input))
+
+	state, err := NewResponseStreamState(types.RelayFormatOpenAI, types.RelayFormatOpenAIResponses, ResponseStreamOptions{ID: "resp_1", Model: "gpt-test"})
+	require.NoError(t, err)
+	index := 0
+	chunks, err := ConvertStreamResponseChunk(nil, info, state, &dto.ChatCompletionsStreamResponse{
+		Id:    "chatcmpl_1",
+		Model: "gpt-test",
+		Choices: []dto.ChatCompletionsStreamResponseChoice{{Delta: dto.ChatCompletionsStreamResponseChoiceDelta{
+			ToolCalls: []dto.ToolCallResponse{{Index: &index, ID: "call_exec", Type: "function", Function: dto.FunctionResponse{Name: "exec", Arguments: `{"input":"ls"}`}}},
+		}}},
+	})
+	require.NoError(t, err)
+	var added *ChatToResponsesStreamEvent
+	for _, chunk := range chunks {
+		if event, ok := chunk.Value.(ChatToResponsesStreamEvent); ok && event.Type == "response.output_item.added" {
+			added = &event
+		}
+	}
+	require.NotNil(t, added)
+	assert.Equal(t, "custom_tool_call", added.Payload.Item.Type)
 }

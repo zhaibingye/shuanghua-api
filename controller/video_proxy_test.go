@@ -84,6 +84,7 @@ func TestVideoProxyForwardsRangeForXAIResult(t *testing.T) {
 	c.Request = httptest.NewRequest(http.MethodGet, "/v1/videos/"+publicTaskID+"/content", nil)
 	c.Request.Header.Set("Range", "bytes=1-3")
 	c.Request.Header.Set("If-Range", `"video-etag"`)
+	c.Set("id", task.UserId)
 	c.Params = []gin.Param{{Key: "task_id", Value: task.TaskID}}
 
 	VideoProxy(c)
@@ -92,7 +93,7 @@ func TestVideoProxyForwardsRangeForXAIResult(t *testing.T) {
 	assert.Equal(t, "bcd", recorder.Body.String())
 	assert.Equal(t, "bytes 1-3/6", recorder.Header().Get("Content-Range"))
 	assert.Equal(t, "bytes", recorder.Header().Get("Accept-Ranges"))
-	assert.Equal(t, "private, max-age=86400", recorder.Header().Get("Cache-Control"))
+	assert.Equal(t, "private, no-store", recorder.Header().Get("Cache-Control"))
 	assert.Contains(t, recorder.Header().Values("Vary"), "Authorization")
 
 	forwardedHeaders := <-requestHeaders

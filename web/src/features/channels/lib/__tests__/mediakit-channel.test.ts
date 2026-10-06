@@ -18,23 +18,20 @@ For commercial licensing, please contact support@quantumnous.com
 */
 import { describe, expect, test } from 'vitest'
 
-import {
-  CHANNEL_TYPE_DOUBAO_VIDEO_MEDIAKIT,
-  CHANNEL_TYPE_OPTIONS,
-} from '../../constants'
+import { CHANNEL_TYPE_TASK_PLUGIN, MEDIAKIT_PLUGIN_KEY } from '../../constants'
 import {
   CHANNEL_FORM_DEFAULT_VALUES,
   channelFormSchema,
   transformFormDataToCreatePayload,
 } from '../channel-form'
-import { getChannelTypeIcon } from '../channel-utils'
 import { composeMediaKitKey, parseMediaKitKey } from '../mediakit-key'
 
 function mediaKitForm() {
   return {
     ...CHANNEL_FORM_DEFAULT_VALUES,
     name: 'Seedance upscale',
-    type: CHANNEL_TYPE_DOUBAO_VIDEO_MEDIAKIT,
+    type: CHANNEL_TYPE_TASK_PLUGIN,
+    task_plugin_key: MEDIAKIT_PLUGIN_KEY,
     base_url: 'https://ark.cn-beijing.volces.com',
     ark_api_key: 'ark-key',
     mediakit_api_key: 'mediakit-key',
@@ -43,23 +40,10 @@ function mediaKitForm() {
 }
 
 describe('DoubaoVideoMediaKit channel', () => {
-  test('is visible in the channel type list next to DoubaoVideo', () => {
-    const option = CHANNEL_TYPE_OPTIONS.find(
-      (item) => item.value === CHANNEL_TYPE_DOUBAO_VIDEO_MEDIAKIT
-    )
-    expect(option).toEqual({
-      value: CHANNEL_TYPE_DOUBAO_VIDEO_MEDIAKIT,
-      label: 'DoubaoVideoMediaKit',
-    })
-    expect(
-      CHANNEL_TYPE_OPTIONS.findIndex((item) => item.value === 54) + 1
-    ).toBe(
-      CHANNEL_TYPE_OPTIONS.findIndex(
-        (item) => item.value === CHANNEL_TYPE_DOUBAO_VIDEO_MEDIAKIT
-      )
-    )
-    expect(getChannelTypeIcon(CHANNEL_TYPE_DOUBAO_VIDEO_MEDIAKIT)).toBe(
-      'Doubao'
+  test('preserves the explicit plugin binding in the stored settings', () => {
+    const payload = transformFormDataToCreatePayload(mediaKitForm())
+    expect(JSON.parse(payload.channel.setting ?? '{}').task_plugin_key).toBe(
+      MEDIAKIT_PLUGIN_KEY
     )
   })
 

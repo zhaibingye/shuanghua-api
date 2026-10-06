@@ -812,9 +812,9 @@ export function buildRateLimits(model: PricingModel): RateLimit[] {
   const baseSeed = hashStringToSeed(`${model.model_name}:rl`)
   const isHeavy = cat === 'image' || cat === 'video'
   const isLight = cat === 'embedding'
-  const baseRpm = isHeavy ? 60 : isLight ? 5_000 : 500
-  const baseTpm = isHeavy ? 0 : isLight ? 1_000_000 : 200_000
-  const baseRpd = isHeavy ? 1_000 : isLight ? 100_000 : 10_000
+  let [baseRpm, baseTpm, baseRpd] = [500, 200_000, 10_000]
+  if (isHeavy) [baseRpm, baseTpm, baseRpd] = [60, 0, 1_000]
+  else if (isLight) [baseRpm, baseTpm, baseRpd] = [5_000, 1_000_000, 100_000]
 
   return [...targets]
     .sort((a, b) => a.localeCompare(b))
@@ -834,7 +834,8 @@ export function buildRateLimits(model: PricingModel): RateLimit[] {
 export function formatRateLimit(value: number): string {
   if (value <= 0) return '—'
   if (value >= 1_000_000) return `${(value / 1_000_000).toFixed(1)}M`
-  if (value >= 1_000)
-    {return `${(value / 1_000).toFixed(value >= 10_000 ? 0 : 1)}K`}
+  if (value >= 1_000) {
+    return `${(value / 1_000).toFixed(value >= 10_000 ? 0 : 1)}K`
+  }
   return value.toLocaleString()
 }

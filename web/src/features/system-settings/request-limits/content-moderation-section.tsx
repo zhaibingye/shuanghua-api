@@ -136,16 +136,8 @@ export function ContentModerationSection(props: ContentModerationSectionProps) {
     ModerationKeyTestResult[] | null
   >(null)
 
-  const {
-    open: verificationOpen,
-    methods: verificationMethods,
-    state: verificationState,
-    executeVerification,
-    withVerification,
-    cancel: cancelVerification,
-    setCode: setVerificationCode,
-    switchMethod: switchVerificationMethod,
-  } = useSecureVerification()
+  const verification = useSecureVerification()
+  const requestVerification = verification.requestVerification
 
   const query = useQuery({
     queryKey: ['content-moderation-settings'],
@@ -212,14 +204,14 @@ export function ContentModerationSection(props: ContentModerationSectionProps) {
 
   const handleRevealKey = useCallback(async () => {
     try {
-      await withVerification(fetchKey, {
-        scope: 'channel.key.read',
-        preferredMethod: 'passkey',
+      const proof = await requestVerification({
+        scope: 'moderation.key.read',
         title: t('Verify to view moderation key'),
         description: t(
           'Use Passkey or 2FA to confirm your identity before revealing this moderation key.'
         ),
       })
+      if (proof) await fetchKey(proof.proof_token)
     } catch (error) {
       if (
         !(error instanceof Error) ||
@@ -232,7 +224,7 @@ export function ContentModerationSection(props: ContentModerationSectionProps) {
         )
       }
     }
-  }, [fetchKey, t, withVerification])
+  }, [fetchKey, t, requestVerification])
 
   const handleTestKeys = useCallback(async () => {
     const values = form.getValues()
@@ -478,7 +470,8 @@ export function ContentModerationSection(props: ContentModerationSectionProps) {
                           onClick={handleTestKeys}
                           disabled={
                             isTestingKeys ||
-                            (field.value.trim() === '' && !effectivelyConfigured)
+                            (field.value.trim() === '' &&
+                              !effectivelyConfigured)
                           }
                         >
                           {isTestingKeys ? (
@@ -502,7 +495,10 @@ export function ContentModerationSection(props: ContentModerationSectionProps) {
                         {...field}
                         onChange={(e) => {
                           field.onChange(e)
-                          if (e.target.value.trim() !== '' && isMarkedForClear) {
+                          if (
+                            e.target.value.trim() !== '' &&
+                            isMarkedForClear
+                          ) {
                             setIsMarkedForClear(false)
                           }
                         }}
@@ -560,11 +556,9 @@ export function ContentModerationSection(props: ContentModerationSectionProps) {
                               variant='outline'
                               size='sm'
                               onClick={handleRevealKey}
-                              disabled={
-                                isKeyLoading || verificationState.loading
-                              }
+                              disabled={isKeyLoading || verification.isActive}
                             >
-                              {isKeyLoading || verificationState.loading ? (
+                              {isKeyLoading || verification.isActive ? (
                                 <Loader2 className='mr-2 h-4 w-4 animate-spin' />
                               ) : (
                                 <Eye className='mr-2 h-4 w-4' />
@@ -958,20 +952,7 @@ export function ContentModerationSection(props: ContentModerationSectionProps) {
         </SettingsForm>
       </Form>
 
-      <SecureVerificationDialog
-        open={verificationOpen}
-        onOpenChange={(nextOpen) => {
-          if (!nextOpen) cancelVerification()
-        }}
-        methods={verificationMethods}
-        state={verificationState}
-        onVerify={async (method, code) => {
-          await executeVerification(method, code)
-        }}
-        onCancel={cancelVerification}
-        onCodeChange={setVerificationCode}
-        onMethodChange={switchVerificationMethod}
-      />
+      <SecureVerificationDialog {...verification.dialogProps} />
     </SettingsSection>
   )
 }

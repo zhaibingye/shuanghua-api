@@ -29,6 +29,6 @@ export function getPreviewText(
     .replaceAll(/[#*_]/g, '') // Remove Markdown formatting symbols
     .trim()
   return plainText.length > maxLength
-    ? `${plainText.substring(0, maxLength)  }...`
+    ? `${plainText.substring(0, maxLength)}...`
     : plainText
 }

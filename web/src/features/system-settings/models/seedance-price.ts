@@ -67,10 +67,11 @@ export const DEFAULT_SEEDANCE_SUPER_RESOLUTION: SeedanceSuperResolutionPrice = {
   '720_to_1080': 0.1,
 }
 
-const LEGACY_OFFICIAL_SEEDANCE_SUPER_RESOLUTION: SeedanceSuperResolutionPrice = {
-  '480_to_720': 0.02,
-  '720_to_1080': 0.04,
-}
+const LEGACY_OFFICIAL_SEEDANCE_SUPER_RESOLUTION: SeedanceSuperResolutionPrice =
+  {
+    '480_to_720': 0.02,
+    '720_to_1080': 0.04,
+  }
 
 export function seedanceTokensPerSecond(resolution: SeedanceResolution) {
   const size = SEEDANCE_PIXELS[resolution]
@@ -159,8 +160,10 @@ function migrateLegacySeedanceSuperResolution(
   price: SeedanceSuperResolutionPrice
 ): SeedanceSuperResolutionPrice {
   if (
-    price['480_to_720'] === LEGACY_OFFICIAL_SEEDANCE_SUPER_RESOLUTION['480_to_720'] &&
-    price['720_to_1080'] === LEGACY_OFFICIAL_SEEDANCE_SUPER_RESOLUTION['720_to_1080']
+    price['480_to_720'] ===
+      LEGACY_OFFICIAL_SEEDANCE_SUPER_RESOLUTION['480_to_720'] &&
+    price['720_to_1080'] ===
+      LEGACY_OFFICIAL_SEEDANCE_SUPER_RESOLUTION['720_to_1080']
   ) {
     return { ...DEFAULT_SEEDANCE_SUPER_RESOLUTION }
   }

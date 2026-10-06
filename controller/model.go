@@ -10,6 +10,7 @@ import (
 	"github.com/QuantumNous/new-api/common"
 	"github.com/QuantumNous/new-api/constant"
 	"github.com/QuantumNous/new-api/model"
+	"github.com/QuantumNous/new-api/pkg/jsplugin"
 	"github.com/QuantumNous/new-api/relay"
 	"github.com/QuantumNous/new-api/relay/channel/ai360"
 	"github.com/QuantumNous/new-api/relay/channel/lingyiwanwu"
@@ -34,7 +35,7 @@ var channelId2Models map[int][]string
 
 func init() {
 	// https://platform.openai.com/docs/models/model-endpoint-compatibility
-	for i := 0; i < constant.APITypeDummy; i++ {
+	for i := range constant.APITypeDummy {
 		if i == constant.APITypeAIProxyLibrary {
 			continue
 		}
@@ -111,43 +112,28 @@ func init() {
 	}
 	channelId2Models = make(map[int][]string)
 	for i := 1; i < constant.ChannelTypeDummy; i++ {
-		var models []string
 		apiType, success := common.ChannelType2APIType(i)
-		if success && apiType != constant.APITypeAIProxyLibrary {
-			meta := &relaycommon.RelayInfo{ChannelMeta: &relaycommon.ChannelMeta{
-				ChannelType: i,
-			}}
-			adaptor := relay.GetAdaptor(apiType)
-			if adaptor != nil {
-				adaptor.Init(meta)
-				models = appendUniqueStrings(models, adaptor.GetModelList()...)
+		if !success || apiType == constant.APITypeAIProxyLibrary {
+			if plugin, ok := jsplugin.DefaultRegistry.GetByChannelType(i); ok {
+				channelId2Models[i] = append([]string(nil), plugin.Meta.Models...)
 			}
+			continue
 		}
-		if taskAdaptor := relay.GetTaskAdaptor(constant.TaskPlatform(strconv.Itoa(i))); taskAdaptor != nil {
-			models = appendUniqueStrings(models, taskAdaptor.GetModelList()...)
-		}
-		if len(models) > 0 {
-			channelId2Models[i] = models
+		meta := &relaycommon.RelayInfo{ChannelMeta: &relaycommon.ChannelMeta{
+			ChannelType: i,
+		}}
+		adaptor := relay.GetAdaptor(apiType)
+		adaptor.Init(meta)
+		channelId2Models[i] = adaptor.GetModelList()
+		if len(channelId2Models[i]) == 0 {
+			if plugin, ok := jsplugin.DefaultRegistry.GetByChannelType(i); ok {
+				channelId2Models[i] = append([]string(nil), plugin.Meta.Models...)
+			}
 		}
 	}
 	openAIModels = lo.UniqBy(openAIModels, func(m dto.OpenAIModels) string {
 		return m.Id
 	})
-}
-
-func appendUniqueStrings(dst []string, values ...string) []string {
-	seen := make(map[string]struct{}, len(dst)+len(values))
-	for _, value := range dst {
-		seen[value] = struct{}{}
-	}
-	for _, value := range values {
-		if _, exists := seen[value]; exists {
-			continue
-		}
-		seen[value] = struct{}{}
-		dst = append(dst, value)
-	}
-	return dst
 }
 
 func channelOwnerName(channelType int) string {
@@ -302,7 +288,7 @@ func getUserModels(c *gin.Context) ([]dto.OpenAIModels, error) {
 	models := service.GetGroupsEnabledModels(ownerGroups)
 	for _, modelName := range models {
 		if modelLimitEnable {
-			matchingName := ratio_setting.FormatMatchingModelName(modelName)
+			matchingName := ratio_setting.RoutingMatchModelName(modelName)
 			if !tokenModelLimit[modelName] && !tokenModelLimit[matchingName] {
 				continue
 			}
@@ -383,9 +369,18 @@ func ChannelListModels(c *gin.Context) {
 }
 
 func DashboardListModels(c *gin.Context) {
+	modelsByChannel := make(map[int][]string, len(channelId2Models))
+	for channelType, models := range channelId2Models {
+		modelsByChannel[channelType] = append([]string(nil), models...)
+	}
+	for channelType := 1; channelType <= constant.ChannelTypeDummy; channelType++ {
+		if plugin, ok := jsplugin.DefaultRegistry.GetByChannelType(channelType); ok {
+			modelsByChannel[channelType] = append([]string(nil), plugin.Meta.Models...)
+		}
+	}
 	c.JSON(200, gin.H{
 		"success": true,
-		"data":    channelId2Models,
+		"data":    modelsByChannel,
 	})
 }
 

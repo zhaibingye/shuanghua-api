@@ -41,6 +41,11 @@ func setupModerationTestDB(t *testing.T) {
 	require.NoError(t, db.AutoMigrate(
 		&model.Option{},
 		&model.Log{},
+		&model.AuditLog{},
+		&model.AuthFlow{},
+		&model.UserSession{},
+		&model.PasskeyCredential{},
+		&model.TwoFA{},
 		&model.User{},
 		&model.ModerationEvent{},
 		&model.ModerationUserRecord{},
@@ -252,8 +257,9 @@ func TestContentModerationAPIKeyPersistenceAcrossRestartAndReveal(t *testing.T) 
 	keyContext.Request = httptest.NewRequest(http.MethodPost, "/api/moderation/key", nil)
 	keyContext.Set("id", 1)
 	keyContext.Set("role", 100)
+	authorizeModerationKey(t, keyContext)
 	GetContentModerationKey(keyContext)
-	require.Equal(t, http.StatusOK, keyRecorder.Code)
+	require.Equal(t, http.StatusOK, keyRecorder.Code, keyRecorder.Body.String())
 
 	var keyResp struct {
 		Success bool `json:"success"`
@@ -584,8 +590,9 @@ func TestUpdateContentModerationSettingsAcceptsMultipleAPIKeys(t *testing.T) {
 	keyC.Request = httptest.NewRequest(http.MethodPost, "/api/moderation/key", nil)
 	keyC.Set("id", 1)
 	keyC.Set("role", 100)
+	authorizeModerationKey(t, keyC)
 	GetContentModerationKey(keyC)
-	require.Equal(t, http.StatusOK, keyRecorder.Code)
+	require.Equal(t, http.StatusOK, keyRecorder.Code, keyRecorder.Body.String())
 	var keyResp struct {
 		Data struct {
 			Key string `json:"key"`
@@ -833,4 +840,23 @@ func TestUpdateContentModerationSettingsBlockSeverity(t *testing.T) {
 	UpdateContentModerationSettings(badC)
 	assert.Equal(t, http.StatusBadRequest, badRecorder.Code)
 	assert.Contains(t, badRecorder.Body.String(), "block severity must be critical, high, medium, or low")
+}
+
+// Reveal keys only with a live root session and a consumed, scoped second-factor proof.
+func authorizeModerationKey(t *testing.T, c *gin.Context) {
+	t.Helper()
+	require.NoError(t, model.DB.Model(&model.User{}).Where("id = ?", 1).Updates(map[string]any{
+		"role": common.RoleRootUser, "status": common.UserStatusEnabled, "auth_version": 1,
+	}).Error)
+	require.NoError(t, model.PublishUserAuthCache(1))
+	require.NoError(t, model.DB.Create(&model.TwoFA{UserId: 1, IsEnabled: true, Secret: "test-enrolled-secret"}).Error)
+	bundle, err := service.CreateLoginSession(1, "password", "127.0.0.1", "moderation-test")
+	require.NoError(t, err)
+	identity, err := service.ParseAccessToken(bundle.AccessToken)
+	require.NoError(t, err)
+	c.Set("session_id", identity.SessionID)
+	c.Set("auth_version", identity.UserAuthVersion)
+	c.Set("session_version", identity.SessionVersion)
+	proof := issueSecurityEnrollmentProof(t, identity, service.VerificationOperation{Scope: service.VerificationScopeModerationKeyRead}, service.VerificationMethodTwoFA)
+	c.Request.Header.Set("X-Security-Proof", proof)
 }

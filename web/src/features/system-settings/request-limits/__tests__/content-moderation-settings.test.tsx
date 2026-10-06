@@ -36,14 +36,12 @@ vi.mock('../../api', () => mocks)
 vi.mock('@/features/auth/secure-verification', () => ({
   SecureVerificationDialog: () => null,
   useSecureVerification: () => ({
-    open: false,
-    methods: { has2FA: false, hasPasskey: false, passkeySupported: false },
-    state: { method: null, loading: false, code: '' },
-    executeVerification: vi.fn(),
-    withVerification: vi.fn((fn: (token?: string) => Promise<unknown>) => fn()),
+    requestVerification: vi.fn(async () => ({
+      proof_token: 'moderation-proof',
+    })),
+    isActive: false,
+    dialogProps: {},
     cancel: vi.fn(),
-    setCode: vi.fn(),
-    switchMethod: vi.fn(),
   }),
 }))
 
@@ -196,10 +194,14 @@ describe('content moderation settings', () => {
     vi.spyOn(window, 'confirm').mockReturnValue(true)
 
     const { actionsContainer } = renderSettings(configuredResponse)
-    const clearButton = await screen.findByRole('button', { name: 'Clear keys' })
+    const clearButton = await screen.findByRole('button', {
+      name: 'Clear keys',
+    })
     fireEvent.click(clearButton)
 
-    expect(await screen.findByText('Keys will be cleared on save')).toBeInTheDocument()
+    expect(
+      await screen.findByText('Keys will be cleared on save')
+    ).toBeInTheDocument()
 
     const saveButton = await screen.findByRole('button', {
       name: 'Save content moderation settings',
@@ -207,7 +209,9 @@ describe('content moderation settings', () => {
     fireEvent.click(saveButton)
 
     await waitFor(() => {
-      expect(mocks.updateContentModerationSettings.mock.calls[0]?.[0]).toMatchObject({
+      expect(
+        mocks.updateContentModerationSettings.mock.calls[0]?.[0]
+      ).toMatchObject({
         clear_api_key: true,
       })
     })
@@ -229,10 +233,14 @@ describe('content moderation settings', () => {
     })
 
     const { actionsContainer } = renderSettings(configuredResponse)
-    const revealButton = await screen.findByRole('button', { name: 'Reveal keys' })
+    const revealButton = await screen.findByRole('button', {
+      name: 'Reveal keys',
+    })
     fireEvent.click(revealButton)
 
-    const loadButton = await screen.findByRole('button', { name: 'Load keys to editor' })
+    const loadButton = await screen.findByRole('button', {
+      name: 'Load keys to editor',
+    })
     fireEvent.click(loadButton)
 
     const textarea = await screen.findByLabelText('Moderation API keys')
@@ -249,7 +257,9 @@ describe('content moderation settings', () => {
     fireEvent.click(saveButton)
 
     await waitFor(() => {
-      expect(mocks.updateContentModerationSettings.mock.calls[0]?.[0]).toMatchObject({
+      expect(
+        mocks.updateContentModerationSettings.mock.calls[0]?.[0]
+      ).toMatchObject({
         block_severity: 'critical',
       })
     })

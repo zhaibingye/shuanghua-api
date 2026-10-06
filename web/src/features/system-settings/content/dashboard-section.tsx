@@ -155,9 +155,9 @@ export function DashboardSection({ defaultValues }: DashboardSectionProps) {
                   <FormLabel>{t('Default time granularity')}</FormLabel>
                   <Select
                     items={granularityOptions.map((option) => ({
-                        value: option.value,
-                        label: t(option.label),
-                      }))}
+                      value: option.value,
+                      label: t(option.label),
+                    }))}
                     onValueChange={field.onChange}
                     value={field.value}
                     disabled={!isEnabled}

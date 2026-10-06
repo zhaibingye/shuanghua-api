@@ -29,7 +29,7 @@ interface DataTableBulkActionsProps {
 export function DataTableBulkActions({ table }: DataTableBulkActionsProps) {
   return (
     <BulkActionsToolbar table={table} entityName='user'>
-      <></>
+      {null}
     </BulkActionsToolbar>
   )
 }

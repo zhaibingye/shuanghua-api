@@ -910,3 +910,18 @@ func TestMaybeAutoDisableRespectsOverride(t *testing.T) {
 	require.NoError(t, model.DB.First(&refreshedUser, user.Id).Error)
 	assert.Equal(t, common.UserStatusEnabled, refreshedUser.Status, "user should remain enabled because effective count is 1 < 3")
 }
+
+func TestModerationCapturesWebSocketTextWithoutWritingToClient(t *testing.T) {
+	recorder := httptest.NewRecorder()
+	c, _ := gin.CreateTestContext(recorder)
+	BeginModerationCapture(c, nil)
+	CaptureModerationEvent(c, []byte(`{"type":"response.output_text.delta","delta":"first "}`))
+	CaptureModerationEvent(c, []byte(`{"type":"response.output_text.delta","delta":"second"}`))
+	capture, ok := common.GetContextKeyType[*ModerationCapture](c, moderationResponseWriterKey)
+	require.True(t, ok)
+	assert.Contains(t, string(capture.Bytes()), "first ")
+	assert.Contains(t, string(capture.Bytes()), "second")
+	assert.Empty(t, recorder.Body.String())
+	capture.Capture(make([]byte, moderationMaxRequestBytes*2))
+	assert.Len(t, capture.Bytes(), moderationMaxRequestBytes)
+}

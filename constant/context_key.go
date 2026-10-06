@@ -15,7 +15,8 @@ const (
 	ContextKeyTokenKey               ContextKey = "token_key"
 	ContextKeyTokenId                ContextKey = "token_id"
 	ContextKeyTokenGroup             ContextKey = "token_group"
-	ContextKeyTokenSpecificChannelId ContextKey = "specific_channel_id"
+	ContextKeyOriginTasks            ContextKey = "origin_tasks"
+	ContextKeyChannelConstraints     ContextKey = "channel_constraints"
 	ContextKeyTokenModelLimitEnabled ContextKey = "token_model_limit_enabled"
 	ContextKeyTokenModelLimit        ContextKey = "token_model_limit"
 	ContextKeyTokenCrossGroupRetry   ContextKey = "token_cross_group_retry"
@@ -65,8 +66,9 @@ const (
 	ContextKeyAdminRejectReason ContextKey = "admin_reject_reason"
 
 	// ContextKeyLanguage stores the user's language preference for i18n
-	ContextKeyLanguage ContextKey = "language"
-	ContextKeyIsStream ContextKey = "is_stream"
+	ContextKeyLanguage             ContextKey = "language"
+	ContextKeyIsStream             ContextKey = "is_stream"
+	ContextKeyResponseStreamStatus ContextKey = "response_stream_status"
 
 	// ContextKeyAuditLogged marks that the current request has already recorded
 	// a manage/operation audit log inside the handler. When set, the admin-audit
@@ -78,4 +80,8 @@ const (
 	// when post-flight is enabled, the assistant output after the response.
 	ContextKeyModerationRequestContent ContextKey = "moderation_request_content"
 	ContextKeyModerationCapture        ContextKey = "moderation_capture"
+	// ContextKeyTokenAuditParams contains only the API token operation's safe metadata.
+	ContextKeyTokenAuditParams ContextKey = "token_audit_params"
+	// ContextKeyTokenAuditSucceeded disambiguates token responses that exceed the audit buffer.
+	ContextKeyTokenAuditSucceeded ContextKey = "token_audit_succeeded"
 )

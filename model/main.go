@@ -27,6 +27,19 @@ var commonFalseVal string
 var logKeyCol string
 var logGroupCol string
 
+// jsonScanBytes 归一化 json 列的驱动返回值:不同驱动/协议模式下同一列可能
+// 以 []byte 或 string 返回,静默丢弃 string 会导致字段被清零而不报错。
+func jsonScanBytes(value any) []byte {
+	switch v := value.(type) {
+	case []byte:
+		return v
+	case string:
+		return []byte(v)
+	default:
+		return nil
+	}
+}
+
 func initCol() {
 	// init common column names
 	if common.UsingMainDatabase(common.DatabaseTypePostgreSQL) {
@@ -138,10 +151,12 @@ func chooseDB(envName string, isLog bool) (*gorm.DB, common.DatabaseType, error)
 		if strings.HasPrefix(dsn, "postgres://") || strings.HasPrefix(dsn, "postgresql://") {
 			// Use PostgreSQL
 			common.SysLog("using PostgreSQL as database")
-			db, err := gorm.Open(postgres.New(postgres.Config{
+			// 同时关闭 pgx 隐式与 GORM 显式预处理语句:命名 prepared statement 与
+			// 事务池代理(PgBouncer/Neon/Supabase)不兼容,会触发 FATAL 08P01/42P05。
+			db, err := gorm.Open(postgresMigrationDialector{postgres.Dialector{Config: &postgres.Config{
 				DSN:                  dsn,
-				PreferSimpleProtocol: true, // disables implicit prepared statement usage
-			}), newGormConfig(true))
+				PreferSimpleProtocol: true,
+			}}}, newGormConfig(false))
 			return db, common.DatabaseTypePostgreSQL, err
 		}
 		if strings.HasPrefix(dsn, "local") {
@@ -159,7 +174,7 @@ func chooseDB(envName string, isLog bool) (*gorm.DB, common.DatabaseType, error)
 				dsn += "?parseTime=true"
 			}
 		}
-		db, err := gorm.Open(mysql.Open(dsn), newGormConfig(true))
+		db, err := gorm.Open(mysqlMigrationDialector{mysql.Dialector{Config: &mysql.Config{DSN: dsn}}}, newGormConfig(true))
 		return db, common.DatabaseTypeMySQL, err
 	}
 	// Use SQLite
@@ -176,43 +191,51 @@ func InitDB() (err error) {
 		db, dbType, openErr = chooseDB("SQL_DSN", false)
 		return openErr
 	})
-	if err != nil {
-		return err
-	}
-	common.SetMainDatabaseType(dbType)
-	if os.Getenv("LOG_SQL_DSN") == "" {
-		common.SetLogDatabaseType(dbType)
-	}
-	initCol()
-	if common.DebugEnabled {
-		db = db.Debug()
-	}
-	DB = db
-	// MySQL charset/collation startup check: ensure Chinese-capable charset
-	if common.UsingMainDatabase(common.DatabaseTypeMySQL) {
-		if err := checkMySQLChineseSupport(DB); err != nil {
-			panic(err)
+	if err == nil {
+		common.SetMainDatabaseType(dbType)
+		if os.Getenv("LOG_SQL_DSN") == "" {
+			common.SetLogDatabaseType(dbType)
 		}
-	}
-	if err := ensureUserQuotaColumns(DB, common.MainDatabaseType()); err != nil {
-		return err
-	}
-	sqlDB, err := DB.DB()
-	if err != nil {
-		return err
-	}
-	sqlDB.SetMaxIdleConns(common.GetEnvOrDefault("SQL_MAX_IDLE_CONNS", 100))
-	sqlDB.SetMaxOpenConns(common.GetEnvOrDefault("SQL_MAX_OPEN_CONNS", 1000))
-	sqlDB.SetConnMaxLifetime(time.Second * time.Duration(common.GetEnvOrDefault("SQL_MAX_LIFETIME", 60)))
+		initCol()
+		if common.DebugEnabled {
+			db = db.Debug()
+		}
+		DB = db
+		// MySQL charset/collation startup check: ensure Chinese-capable charset
+		if common.UsingMainDatabase(common.DatabaseTypeMySQL) {
+			if err := checkMySQLChineseSupport(DB); err != nil {
+				panic(err)
+			}
+		}
+		if err := ensureUserQuotaColumns(DB, common.MainDatabaseType()); err != nil {
+			return err
+		}
+		sqlDB, err := DB.DB()
+		if err != nil {
+			return err
+		}
+		sqlDB.SetMaxIdleConns(common.GetEnvOrDefault("SQL_MAX_IDLE_CONNS", 100))
+		sqlDB.SetMaxOpenConns(common.GetEnvOrDefault("SQL_MAX_OPEN_CONNS", 1000))
+		sqlDB.SetConnMaxLifetime(time.Second * time.Duration(common.GetEnvOrDefault("SQL_MAX_LIFETIME", 60)))
 
-	if !common.IsMasterNode {
-		return nil
+		if !common.IsMasterNode {
+			// Only the master node migrates. A node that cannot read the deadline
+			// keeps rejecting legacy access tokens instead of refusing to start.
+			if err := EnsureLegacyAccessTokenRetireAt(common.GetTimestamp()); err != nil {
+				common.SysError("initialize legacy access token deadline: " + err.Error())
+			}
+			return nil
+		}
+		if common.UsingMainDatabase(common.DatabaseTypeMySQL) {
+			//_, _ = sqlDB.Exec("ALTER TABLE channels MODIFY model_mapping TEXT;") // TODO: delete this line when most users have upgraded
+		}
+		common.SysLog("database migration started")
+		err = migrateDB()
+		return err
+	} else {
+		common.FatalLog(err)
 	}
-	if common.UsingMainDatabase(common.DatabaseTypeMySQL) {
-		//_, _ = sqlDB.Exec("ALTER TABLE channels MODIFY model_mapping TEXT;") // TODO: delete this line when most users have upgraded
-	}
-	common.SysLog("database migration started")
-	return migrateDB()
+	return err
 }
 
 func InitLogDB() (err error) {
@@ -220,6 +243,9 @@ func InitLogDB() (err error) {
 		LOG_DB = DB
 		common.SetLogDatabaseType(common.MainDatabaseType())
 		initCol()
+		if common.IsMasterNode {
+			return MigrateAuditLogs()
+		}
 		return
 	}
 	var db *gorm.DB
@@ -229,34 +255,37 @@ func InitLogDB() (err error) {
 		db, dbType, openErr = chooseDB("LOG_SQL_DSN", true)
 		return openErr
 	})
-	if err != nil {
-		return err
-	}
-	common.SetLogDatabaseType(dbType)
-	initCol()
-	if common.DebugEnabled {
-		db = db.Debug()
-	}
-	LOG_DB = db
-	// If log DB is MySQL, also ensure Chinese-capable charset
-	if common.UsingLogDatabase(common.DatabaseTypeMySQL) {
-		if err := checkMySQLChineseSupport(LOG_DB); err != nil {
-			panic(err)
+	if err == nil {
+		common.SetLogDatabaseType(dbType)
+		initCol()
+		if common.DebugEnabled {
+			db = db.Debug()
 		}
-	}
-	sqlDB, err := LOG_DB.DB()
-	if err != nil {
-		return err
-	}
-	sqlDB.SetMaxIdleConns(common.GetEnvOrDefault("SQL_MAX_IDLE_CONNS", 100))
-	sqlDB.SetMaxOpenConns(common.GetEnvOrDefault("SQL_MAX_OPEN_CONNS", 1000))
-	sqlDB.SetConnMaxLifetime(time.Second * time.Duration(common.GetEnvOrDefault("SQL_MAX_LIFETIME", 60)))
+		LOG_DB = db
+		// If log DB is MySQL, also ensure Chinese-capable charset
+		if common.UsingLogDatabase(common.DatabaseTypeMySQL) {
+			if err := checkMySQLChineseSupport(LOG_DB); err != nil {
+				panic(err)
+			}
+		}
+		sqlDB, err := LOG_DB.DB()
+		if err != nil {
+			return err
+		}
+		sqlDB.SetMaxIdleConns(common.GetEnvOrDefault("SQL_MAX_IDLE_CONNS", 100))
+		sqlDB.SetMaxOpenConns(common.GetEnvOrDefault("SQL_MAX_OPEN_CONNS", 1000))
+		sqlDB.SetConnMaxLifetime(time.Second * time.Duration(common.GetEnvOrDefault("SQL_MAX_LIFETIME", 60)))
 
-	if !common.IsMasterNode {
-		return nil
+		if !common.IsMasterNode {
+			return nil
+		}
+		common.SysLog("database migration started")
+		err = migrateLOGDB()
+		return err
+	} else {
+		common.FatalLog(err)
 	}
-	common.SysLog("database migration started")
-	return migrateLOGDB()
+	return err
 }
 
 var userQuotaColumns = []string{"quota", "used_quota", "aff_quota", "aff_history"}
@@ -309,11 +338,20 @@ func migrateDB() error {
 	if err := migrateModerationUniqueConstraints(DB); err != nil {
 		return err
 	}
+	if err := migrateTokenKeyUniqueness(DB); err != nil {
+		return err
+	}
+	if err := migratePrefillGroupUniqueness(DB); err != nil {
+		return err
+	}
 	// Migrate price_amount column from float/double to decimal for existing tables
 	migrateSubscriptionPlanPriceAmount()
 	// Migrate model_limits column from varchar to text for existing tables
 	if err := migrateTokenModelLimitsToText(); err != nil {
 		return err
+	}
+	if err := migrateOptionPrimaryKey(DB); err != nil {
+		common.SysError("failed to migrate options primary key: " + err.Error())
 	}
 
 	err := DB.AutoMigrate(
@@ -325,6 +363,7 @@ func migrateDB() error {
 		&ExternalIdentityClaim{},
 		&PasskeyCredential{},
 		&Option{},
+		&LoginEncryptionKey{},
 		&Redemption{},
 		&Ability{},
 		&Log{},
@@ -332,6 +371,7 @@ func migrateDB() error {
 		&TopUp{},
 		&QuotaData{},
 		&Task{},
+		&TaskPlugin{},
 		&Model{},
 		&Vendor{},
 		&PrefillGroup{},
@@ -356,6 +396,7 @@ func migrateDB() error {
 		&SystemTaskLock{},
 		&CasbinRule{},
 		&AuthzRole{},
+		&UserAccessToken{},
 	)
 	if err != nil {
 		return err
@@ -366,8 +407,17 @@ func migrateDB() error {
 	if err := migrateModerationUserRecordOverrideAt(DB); err != nil {
 		return err
 	}
+	if err := migrateForkTaskPlugins(DB); err != nil {
+		return err
+	}
+	if err := EnsureInviteStatisticsSynced(); err != nil {
+		return err
+	}
 	if err := InitializeUserAuthVersions(); err != nil {
 		return err
+	}
+	if err := EnsureLegacyAccessTokenRetireAt(common.GetTimestamp()); err != nil {
+		return fmt.Errorf("initialize legacy access token deadline: %w", err)
 	}
 	if err := InitializeExternalIdentityClaims(); err != nil {
 		return err
@@ -381,99 +431,13 @@ func migrateDB() error {
 			return err
 		}
 	}
-	if err := EnsureInviteStatisticsSynced(); err != nil {
-		return err
-	}
-	return nil
-}
-
-func migrateDBFast() error {
-
-	var wg sync.WaitGroup
-
-	migrations := []struct {
-		model interface{}
-		name  string
-	}{
-		{&Channel{}, "Channel"},
-		{&Token{}, "Token"},
-		{&User{}, "User"},
-		{&UserSession{}, "UserSession"},
-		{&AuthFlow{}, "AuthFlow"},
-		{&ExternalIdentityClaim{}, "ExternalIdentityClaim"},
-		{&PasskeyCredential{}, "PasskeyCredential"},
-		{&Option{}, "Option"},
-		{&Redemption{}, "Redemption"},
-		{&Ability{}, "Ability"},
-		{&Log{}, "Log"},
-		{&Midjourney{}, "Midjourney"},
-		{&TopUp{}, "TopUp"},
-		{&QuotaData{}, "QuotaData"},
-		{&Task{}, "Task"},
-		{&Model{}, "Model"},
-		{&Vendor{}, "Vendor"},
-		{&PrefillGroup{}, "PrefillGroup"},
-		{&Setup{}, "Setup"},
-		{&TwoFA{}, "TwoFA"},
-		{&TwoFABackupCode{}, "TwoFABackupCode"},
-		{&Checkin{}, "Checkin"},
-		{&InviteRebate{}, "InviteRebate"},
-		{&SubscriptionOrder{}, "SubscriptionOrder"},
-		{&UserSubscription{}, "UserSubscription"},
-		{&SubscriptionPreConsumeRecord{}, "SubscriptionPreConsumeRecord"},
-		{&CustomOAuthProvider{}, "CustomOAuthProvider"},
-		{&UserOAuthBinding{}, "UserOAuthBinding"},
-		{&PerfMetric{}, "PerfMetric"},
-		{&SystemInstance{}, "SystemInstance"},
-		{&SystemTask{}, "SystemTask"},
-		{&SystemTaskLock{}, "SystemTaskLock"},
-	}
-	// 动态计算migration数量，确保errChan缓冲区足够大
-	errChan := make(chan error, len(migrations))
-
-	for _, m := range migrations {
-		wg.Add(1)
-		go func(model interface{}, name string) {
-			defer wg.Done()
-			if err := DB.AutoMigrate(model); err != nil {
-				errChan <- fmt.Errorf("failed to migrate %s: %v", name, err)
-			}
-		}(m.model, m.name)
-	}
-
-	// Wait for all migrations to complete
-	wg.Wait()
-	close(errChan)
-
-	// Check for any errors
-	for err := range errChan {
-		if err != nil {
-			return err
-		}
-	}
-	if err := InitializeUserAuthVersions(); err != nil {
-		return err
-	}
-	if err := InitializeExternalIdentityClaims(); err != nil {
-		return err
-	}
-	if common.UsingMainDatabase(common.DatabaseTypeSQLite) {
-		if err := ensureSubscriptionPlanTableSQLite(); err != nil {
-			return err
-		}
-	} else {
-		if err := DB.AutoMigrate(&SubscriptionPlan{}); err != nil {
-			return err
-		}
-	}
-	if err := EnsureInviteStatisticsSynced(); err != nil {
-		return err
-	}
-	common.SysLog("database migrated")
 	return nil
 }
 
 func migrateLOGDB() error {
+	if err := MigrateAuditLogs(); err != nil {
+		return err
+	}
 	if common.UsingLogDatabase(common.DatabaseTypeClickHouse) {
 		return migrateClickHouseLogDB()
 	}

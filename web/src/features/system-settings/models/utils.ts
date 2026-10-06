@@ -72,7 +72,7 @@ function extractErrorPosition(
     const lines = jsonString.substring(0, position).split('\n')
     return {
       line: lines.length,
-      column: (lines[lines.length - 1] ?? '').length + 1,
+      column: (lines.at(-1) ?? '').length + 1,
       position,
     }
   }

@@ -2,6 +2,7 @@ package helper
 
 import (
 	"encoding/json"
+	"fmt"
 	"strconv"
 	"strings"
 
@@ -31,9 +32,13 @@ func ApplySeedanceTaskPrice(c *gin.Context, info *relaycommon.RelayInfo) (bool, 
 	groupRatioInfo := HandleGroupRatio(c, info)
 	billingResolution, durationSeconds, hasVideo := seedanceRequestFacts(c)
 	outputResolution := strings.TrimSpace(info.VideoOutputResolution)
-	superResolution := info.ChannelType == constant.ChannelTypeDoubaoVideoMediaKit
+	superResolution := info.ChannelSetting.BindsTaskPlugin(constant.TaskPluginDoubaoMediaKit)
 	if superResolution && outputResolution == "" {
-		outputResolution = billingResolution
+		source, target, ok := ratio_setting.SeedanceMediaKitPolicy(billingResolution)
+		if !ok {
+			return false, fmt.Errorf("invalid MediaKit resolution")
+		}
+		billingResolution, outputResolution = source, target
 	}
 
 	quota, snap, clamp, ok := ratio_setting.EstimateSeedanceQuota(ratio_setting.SeedanceQuoteInput{
@@ -79,12 +84,26 @@ func seedanceRequestFacts(c *gin.Context) (resolution string, durationSeconds fl
 	durationSeconds = 0
 	req, err := relaycommon.GetTaskRequest(c)
 	if err != nil {
-		return resolution, durationSeconds, false
+		value, _ := c.Get("task_request")
+		raw, ok := value.(map[string]any)
+		if !ok {
+			return resolution, durationSeconds, false
+		}
+		req.Metadata, _ = raw["metadata"].(map[string]any)
+		durationSeconds = metadataFloat(raw, "seconds")
+		if durationSeconds == 0 {
+			durationSeconds = metadataFloat(raw, "duration")
+		}
+		if value := metadataString(raw, "resolution"); value != "" {
+			resolution = value
+		}
 	}
 	if value := metadataString(req.Metadata, "resolution"); value != "" {
 		resolution = value
 	}
-	durationSeconds = float64(req.Duration)
+	if req.Duration != 0 {
+		durationSeconds = float64(req.Duration)
+	}
 	if durationSeconds == 0 && strings.TrimSpace(req.Seconds) != "" {
 		if parsed, convErr := strconv.Atoi(strings.TrimSpace(req.Seconds)); convErr == nil {
 			durationSeconds = float64(parsed)

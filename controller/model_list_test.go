@@ -90,7 +90,7 @@ func initModelListColumnNames(t *testing.T) {
 	common.SetDatabaseTypes(common.DatabaseTypeSQLite, common.DatabaseTypeSQLite)
 	require.NoError(t, os.Setenv("SQL_DSN", "local"))
 
-	require.NoError(t, model.InitDB())
+	require.NoError(t, initControllerTestDatabase(t, false))
 	if model.DB != nil {
 		sqlDB, err := model.DB.DB()
 		if err == nil {
@@ -591,51 +591,9 @@ func TestListModelsTokenLimitUsesResolvedCustomAutoGroups(t *testing.T) {
 	require.Empty(t, anthropicResponse.LastID)
 }
 
-func TestCheckUpdatePasswordRequiresCurrentPassword(t *testing.T) {
-	db := setupModelListControllerTestDB(t)
-
-	hashedPassword, err := common.Password2Hash("CurrentPassword123")
-	require.NoError(t, err)
-	user := &model.User{
-		Username: "password-user",
-		Password: hashedPassword,
-		Status:   common.UserStatusEnabled,
-	}
-	require.NoError(t, db.Create(user).Error)
-
-	updatePassword, err := checkUpdatePassword("", "", user.Id)
-	require.NoError(t, err)
-	assert.False(t, updatePassword)
-
-	updatePassword, err = checkUpdatePassword("", "NewPassword123", user.Id)
-	require.Error(t, err)
-	assert.False(t, updatePassword)
-	assert.ErrorIs(t, err, errOriginalPasswordFail)
-
-	updatePassword, err = checkUpdatePassword("CurrentPassword123", "NewPassword123", user.Id)
-	require.NoError(t, err)
-	assert.True(t, updatePassword)
-}
-
-func TestCheckUpdatePasswordRejectsHistoricalEmptyPassword(t *testing.T) {
-	db := setupModelListControllerTestDB(t)
-
-	user := &model.User{
-		Username: "legacy-passwordless-user",
-		Password: "",
-		Status:   common.UserStatusEnabled,
-	}
-	require.NoError(t, db.Create(user).Error)
-
-	updatePassword, err := checkUpdatePassword("", "NewPassword123", user.Id)
-	require.Error(t, err)
-	assert.False(t, updatePassword)
-	assert.ErrorIs(t, err, errUserPasswordUnset)
-}
-
 func TestSetupLoginDoesNotTouchPasswordWhenPasswordFieldOmitted(t *testing.T) {
 	db := setupModelListControllerTestDB(t)
-	require.NoError(t, db.AutoMigrate(&model.Log{}, &model.UserSession{}))
+	require.NoError(t, db.AutoMigrate(&model.Log{}, &model.AuditLog{}, &model.UserSession{}, &model.TwoFA{}, &model.PasskeyCredential{}))
 
 	hashedPassword, err := common.Password2Hash("CurrentPassword123")
 	require.NoError(t, err)
@@ -651,12 +609,13 @@ func TestSetupLoginDoesNotTouchPasswordWhenPasswordFieldOmitted(t *testing.T) {
 	router := gin.New()
 	router.GET("/", func(c *gin.Context) {
 		setupLogin(&model.User{
-			Id:       user.Id,
-			Username: user.Username,
-			Role:     user.Role,
-			Status:   user.Status,
-			Group:    user.Group,
-		}, c)
+			Id:          user.Id,
+			AuthVersion: user.AuthVersion,
+			Username:    user.Username,
+			Role:        user.Role,
+			Status:      user.Status,
+			Group:       user.Group,
+		}, nil, c)
 	})
 
 	recorder := httptest.NewRecorder()

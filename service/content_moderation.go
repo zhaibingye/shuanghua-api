@@ -127,38 +127,20 @@ func NewModerationCapture(writer gin.ResponseWriter) *ModerationCapture {
 	}
 }
 
-func (w *ModerationCapture) Write(data []byte) (int, error) {
-	if w.buf.Len() < w.maxSize {
-		remain := w.maxSize - w.buf.Len()
-		if remain >= len(data) {
-			w.buf.Write(data)
-		} else {
-			w.buf.Write(data[:remain])
-		}
+// Capture records a bounded protocol payload without writing to the client.
+func (w *ModerationCapture) Capture(data []byte) {
+	if remaining := w.maxSize - w.buf.Len(); remaining > 0 {
+		w.buf.Write(data[:min(len(data), remaining)])
 	}
+}
+
+func (w *ModerationCapture) Write(data []byte) (int, error) {
+	w.Capture(data)
 	return w.ResponseWriter.Write(data)
 }
-
-func (w *ModerationCapture) WriteString(data string) (int, error) {
-	return w.Write([]byte(data))
-}
-
+func (w *ModerationCapture) WriteString(data string) (int, error) { return w.Write([]byte(data)) }
 func (w *ModerationCapture) ReadFrom(reader io.Reader) (int64, error) {
-	if rf, ok := w.ResponseWriter.(io.ReaderFrom); ok {
-		var tee bytes.Buffer
-		n, err := rf.ReadFrom(io.TeeReader(reader, &tee))
-		data := tee.Bytes()
-		if w.buf.Len() < w.maxSize {
-			remain := w.maxSize - w.buf.Len()
-			if remain >= len(data) {
-				w.buf.Write(data)
-			} else {
-				w.buf.Write(data[:remain])
-			}
-		}
-		return n, err
-	}
-	return io.Copy(w, reader)
+	return io.Copy(struct{ io.Writer }{w}, reader)
 }
 
 func (w *ModerationCapture) Unwrap() http.ResponseWriter {
@@ -1727,4 +1709,54 @@ func StartContentModerationCleanup() {
 			}
 		}
 	}()
+}
+
+// PrepareContentModeration applies the same policy to HTTP and each Responses
+// WebSocket generation. Channel selection, whitelist and preflight decisions
+// happen before reserving quota or contacting the provider.
+func PrepareContentModeration(c *gin.Context, info *relaycommon.RelayInfo) *types.NewAPIError {
+	if info == nil {
+		return nil
+	}
+	config := setting.GetContentModerationSetting()
+	if !config.Enabled || config.IsUserWhitelisted(info.UserId) || !IsModerationRequestSupported(info.Request) ||
+		strings.HasSuffix(c.Request.URL.Path, ":countTokens") || strings.HasSuffix(c.Request.URL.Path, "/responses/compact") {
+		return nil
+	}
+	channelID := moderationChannelID(c, info)
+	if !config.ShouldModerateChannel(channelID) {
+		return nil
+	}
+	if !config.HasAPIKey() || strings.TrimSpace(config.Model) == "" || ValidateContentModerationURL(config.BaseURL) != nil {
+		return types.NewErrorWithStatusCode(errors.New("content moderation is enabled but not configured"), types.ErrorCodeContentModerationUnavailable, http.StatusServiceUnavailable, types.ErrOptionWithSkipRetry())
+	}
+	if info.UserId <= 0 {
+		return types.NewErrorWithStatusCode(errors.New("content moderation requires an authenticated user"), types.ErrorCodeContentModerationUnavailable, http.StatusBadRequest, types.ErrOptionWithSkipRetry())
+	}
+	SetModerationRequestContent(c, info.Request)
+	if config.PreflightEnabled {
+		content, _ := GetModerationRequestContent(c)
+		if err := PreflightModerationRequest(c, content, config); err != nil {
+			code, status := types.ErrorCodeContentModerationBlocked, http.StatusForbidden
+			if !errors.Is(err, model.ErrModerationBlocked) {
+				code, status = types.ErrorCodeContentModerationUnavailable, http.StatusServiceUnavailable
+			}
+			return types.NewErrorWithStatusCode(err, code, status, types.ErrOptionWithSkipRetry())
+		}
+	}
+	if config.PostflightEnabled {
+		BeginModerationCapture(c, info.Request)
+	}
+	return nil
+}
+
+// CaptureModerationEvent reuses the SSE parser for Responses WebSocket events.
+func CaptureModerationEvent(c *gin.Context, payload []byte) {
+	capture, _ := common.GetContextKeyType[*ModerationCapture](c, moderationResponseWriterKey)
+	if capture == nil {
+		return
+	}
+	capture.Capture([]byte("data: "))
+	capture.Capture(payload)
+	capture.Capture([]byte("\n\n"))
 }

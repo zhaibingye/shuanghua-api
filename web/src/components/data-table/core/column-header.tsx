@@ -51,6 +51,9 @@ export function DataTableColumnHeader<TData, TValue>({
     return <div className={cn(className)}>{title}</div>
   }
 
+  let SortIcon = CaretSortIcon
+  if (column.getIsSorted() === 'desc') SortIcon = ArrowDownIcon
+  else if (column.getIsSorted() === 'asc') SortIcon = ArrowUpIcon
   return (
     <div className={cn('flex items-center space-x-2', className)}>
       <DropdownMenu>
@@ -64,13 +67,7 @@ export function DataTableColumnHeader<TData, TValue>({
           }
         >
           <span>{title}</span>
-          {column.getIsSorted() === 'desc' ? (
-            <ArrowDownIcon className='ms-2 h-4 w-4' />
-          ) : column.getIsSorted() === 'asc' ? (
-            <ArrowUpIcon className='ms-2 h-4 w-4' />
-          ) : (
-            <CaretSortIcon className='ms-2 h-4 w-4' />
-          )}
+          <SortIcon className='ms-2 h-4 w-4' />
         </DropdownMenuTrigger>
         <DropdownMenuContent align='start'>
           <DropdownMenuItem onClick={() => column.toggleSorting(false)}>

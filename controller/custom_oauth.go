@@ -2,6 +2,7 @@ package controller
 
 import (
 	"context"
+	"github.com/QuantumNous/new-api/i18n"
 	"net/http"
 	"net/url"
 	"strconv"
@@ -9,7 +10,7 @@ import (
 	"time"
 
 	"github.com/QuantumNous/new-api/common"
-	"github.com/QuantumNous/new-api/i18n"
+	"github.com/QuantumNous/new-api/middleware"
 	"github.com/QuantumNous/new-api/model"
 	"github.com/QuantumNous/new-api/oauth"
 	"github.com/QuantumNous/new-api/service"
@@ -514,25 +515,48 @@ func GetUserOAuthBindingsByAdmin(c *gin.Context) {
 
 // UnbindCustomOAuth unbinds a custom OAuth provider from the current user
 func UnbindCustomOAuth(c *gin.Context) {
-	userId := c.GetInt("id")
-	if userId == 0 {
-		common.ApiErrorI18n(c, i18n.MsgAuthNotLoggedIn)
+	identity, ok := middleware.GetStepUpIdentity(c)
+	if !ok {
+		writeSecurityOperationError(c, service.ErrAuthTokenInvalid)
 		return
 	}
 
 	providerIdStr := c.Param("provider_id")
 	providerId, err := strconv.Atoi(providerIdStr)
+	if err != nil || providerId <= 0 {
+		common.ApiErrorMsg(c, "无效的提供商 ID")
+		return
+	}
+
+	succeeded, notificationFailed := false, false
+	defer func() {
+		recordUserSecurityAudit(c, identity.UserID, "user.binding_unbind", map[string]any{"provider_id": providerId, "success": succeeded, "notification_failed": notificationFailed})
+	}()
+	context, err := common.Marshal(service.AccountUnbindingContext{ProviderID: providerId})
 	if err != nil {
-		common.ApiErrorI18n(c, i18n.MsgCustomOAuthInvalidProviderId)
+		writeSecurityOperationError(c, err)
 		return
 	}
-
-	if err := model.DeleteUserOAuthBinding(userId, providerId); err != nil {
-		common.ApiError(c, err)
+	if middleware.RequireSecurityProof(c, service.VerificationOperation{Scope: service.VerificationScopeAccountUnbind, Context: context}) == nil {
 		return
 	}
+	if err := service.UnbindAccountOAuth(identity, providerId); err != nil {
+		writeSecurityOperationError(c, err)
+		return
+	}
+	succeeded = true
+	user, err := model.GetUserById(identity.UserID, false)
+	if err != nil {
+		writeSecurityOperationError(c, err)
+		return
+	}
+	notificationFailed = service.NotifyAccountSecurityChange(user.Email, "Login account unlinked") != nil
 
-	common.ApiSuccessI18n(c, i18n.MsgCustomOAuthUnbindSuccess, nil)
+	c.JSON(http.StatusOK, gin.H{
+		"success": true,
+		"message": "解绑成功",
+		"data":    gin.H{"notification_warning": notificationFailed},
+	})
 }
 
 func UnbindCustomOAuthByAdmin(c *gin.Context) {
@@ -557,8 +581,12 @@ func UnbindCustomOAuthByAdmin(c *gin.Context) {
 
 	providerIdStr := c.Param("provider_id")
 	providerId, err := strconv.Atoi(providerIdStr)
-	if err != nil {
-		common.ApiErrorI18n(c, i18n.MsgCustomOAuthInvalidProviderId)
+	if err != nil || providerId <= 0 {
+		common.ApiErrorMsg(c, "invalid provider id")
+		return
+	}
+	authorization := requireAdminUserProof(c, service.VerificationScopeAdminUserBindingClear, service.AdminUserBindingContext{UserID: userId, ProviderID: providerId})
+	if authorization == nil {
 		return
 	}
 
@@ -567,5 +595,14 @@ func UnbindCustomOAuthByAdmin(c *gin.Context) {
 		return
 	}
 
-	common.ApiSuccessI18n(c, i18n.MsgCustomOAuthUnbindSuccess, nil)
+	recordManageAuditFor(c, userId, "user.binding_clear", map[string]any{
+		"bindingType":         "custom_oauth",
+		"provider_id":         providerId,
+		"username":            targetUser.Username,
+		"verification_method": authorization.Method,
+	})
+	c.JSON(http.StatusOK, gin.H{
+		"success": true,
+		"message": "success",
+	})
 }

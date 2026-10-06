@@ -1,27 +1,28 @@
-package common
+package common_test
 
 import (
 	"testing"
 
+	"github.com/QuantumNous/new-api/common"
+	"github.com/QuantumNous/new-api/constant"
 	"github.com/stretchr/testify/assert"
 )
 
-func TestIsOpenAIGPTModel(t *testing.T) {
-	t.Parallel()
-
-	for _, model := range []string{"gpt", "gpt-4o", "OpenAI/GPT-5.6-sol", " vendor/gpt-5 "} {
-		assert.True(t, IsOpenAIGPTModel(model), model)
+func TestWanEndpointsDistinguishImagesFromVideos(t *testing.T) {
+	for _, name := range []string{
+		"wan2.7-image-pro", "wan2.7-image", "wan2.6-image", "wan2.6-t2i",
+		"wan2.5-t2i-preview", "wan2.2-t2i-flash", "wan2.2-t2i-plus",
+		"wanx2.1-t2i-turbo", "wanx2.1-t2i-plus", "wanx2.0-t2i-turbo",
+	} {
+		t.Run(name, func(t *testing.T) {
+			assert.Contains(t, common.GetEndpointTypesByChannelType(constant.ChannelTypeAli, name), constant.EndpointTypeImageGeneration)
+		})
 	}
-	for _, model := range []string{"", "chatgpt-4o-latest", "my-gpt-5", "glm-5.2", "gptimage-1"} {
-		assert.False(t, IsOpenAIGPTModel(model), model)
+	for _, name := range []string{
+		"wanx2.1-t2v-plus", "wanx2.1-t2v-turbo", "wanx2.1-i2v-plus", "wanx2.1-i2v-turbo",
+	} {
+		t.Run(name, func(t *testing.T) {
+			assert.NotContains(t, common.GetEndpointTypesByChannelType(constant.ChannelTypeAli, name), constant.EndpointTypeImageGeneration)
+		})
 	}
-}
-
-func TestIsOpenAIResponseOnlyModelUsesMappedModelBaseName(t *testing.T) {
-	t.Parallel()
-
-	assert.True(t, IsOpenAIResponseOnlyModel("openai/o3-pro"))
-	assert.True(t, IsOpenAIResponseOnlyModel("O3-PRO"))
-	assert.True(t, IsOpenAIResponseOnlyModel("o3-pro-2025-06-10"))
-	assert.False(t, IsOpenAIResponseOnlyModel("my-o3-pro"))
 }

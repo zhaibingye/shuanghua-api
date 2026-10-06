@@ -138,7 +138,7 @@ func TestConvertGeminiRequestUsesChatConverterForXAI(t *testing.T) {
 		Contents: []dto.GeminiChatContent{{Role: "user", Parts: []dto.GeminiPart{{Text: "hello"}}}},
 		GenerationConfig: dto.GeminiChatGenerationConfig{
 			TopK:           &topK,
-			ThinkingConfig: &dto.GeminiThinkingConfig{IncludeThoughts: true, ThinkingLevel: "high"},
+			ThinkingConfig: &dto.GeminiThinkingConfig{IncludeThoughts: common.GetPointer(true), ThinkingLevel: "high"},
 		},
 	})
 	require.NoError(t, err)

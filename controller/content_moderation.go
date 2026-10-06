@@ -3,6 +3,7 @@ package controller
 import (
 	"context"
 	"errors"
+	"github.com/QuantumNous/new-api/middleware"
 	"io"
 	"net/http"
 	"net/url"
@@ -236,6 +237,9 @@ func UpdateContentModerationSettings(c *gin.Context) {
 // GetContentModerationKey returns the configured content moderation API key.
 // Protected by SecureVerificationRequired middleware to match channel key security.
 func GetContentModerationKey(c *gin.Context) {
+	if middleware.RequireSecurityProof(c, service.VerificationOperation{Scope: service.VerificationScopeModerationKeyRead}) == nil {
+		return
+	}
 	recordManageAudit(c, "moderation.key_view", nil)
 	config := setting.GetContentModerationSetting()
 	c.JSON(http.StatusOK, gin.H{
