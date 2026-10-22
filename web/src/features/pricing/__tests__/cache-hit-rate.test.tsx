@@ -91,6 +91,11 @@ it.each([
 
     await userEvent.click(screen.getByRole('tab', { name: 'Performance' }))
     const performance = screen.getByRole('group', { name: 'Performance' })
+    expect(
+      within(performance).getByText(
+        'Cache read / total input tokens from reported usage in the last 24 hours'
+      )
+    ).toBeVisible()
     expect(within(performance).getByText(display)).toBeVisible()
     for (const label of [
       'TPS',

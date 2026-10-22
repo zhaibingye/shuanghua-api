@@ -87,6 +87,11 @@ it.each([
     cacheRate = rate
     const view = await renderSummary()
     expect(await screen.findByText(display)).toBeVisible()
+    expect(
+      screen.getByText(
+        'Cache read / total input tokens from reported usage in the last 24 hours'
+      )
+    ).toBeVisible()
     for (const label of [
       'Historical Usage',
       'Request Count',

@@ -7603,6 +7603,24 @@
     "Zhipu V4": "Zhipu V4",
     "Zoom": "Zoom",
     "Cache hit rate": "Cache hit rate",
-    "Input tokens served from cache in the last 24 hours": "Input tokens served from cache in the last 24 hours"
+    "Cache read / total input tokens from reported usage in the last 24 hours": "Cache read / total input tokens from reported usage in the last 24 hours",
+    "Configure a Resend API key before enabling Resend": "Configure a Resend API key before enabling Resend",
+    "Email sending method": "Email sending method",
+    "Email sending method must be SMTP or Resend": "Email sending method must be SMTP or Resend",
+    "Enter a valid sender email address": "Enter a valid sender email address",
+    "Invalid Resend delivery response": "Invalid Resend delivery response",
+    "Cache usage is recorded only after the upgrade; historical data is not backfilled.": "Cache usage is recorded only after the upgrade; historical data is not backfilled.",
+    "Only the selected method sends email. The other method keeps its settings.": "Only the selected method sends email. The other method keeps its settings.",
+    "Resend API key": "Resend API key",
+    "Resend API key is not configured or invalid": "Resend API key is not configured or invalid",
+    "Resend email delivery failed (HTTP {{status}})": "Resend email delivery failed (HTTP {{status}})",
+    "Resend key configuration status is read-only": "Resend key configuration status is read-only",
+    "Resend request failed": "Resend request failed",
+    "Resend sender address is not configured or invalid": "Resend sender address is not configured or invalid",
+    "Sender email address": "Sender email address",
+    "Sender name": "Sender name",
+    "Sender name must not contain line breaks or null characters": "Sender name must not contain line breaks or null characters",
+    "The name recipients see. Leave blank to use the site name.": "The name recipients see. Leave blank to use the site name.",
+    "The domain must be verified in Resend": "The domain must be verified in Resend"
   }
 }

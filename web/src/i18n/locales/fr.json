@@ -7603,6 +7603,24 @@
     "Zhipu V4": "Zhipu V4",
     "Zoom": "Zoom",
     "Cache hit rate": "Taux de succès du cache",
-    "Input tokens served from cache in the last 24 hours": "Part des tokens d’entrée servis depuis le cache sur les dernières 24 heures"
+    "Cache read / total input tokens from reported usage in the last 24 hours": "Tokens lus en cache / tokens d’entrée totaux des usages déclarés au cours des dernières 24 heures",
+    "Configure a Resend API key before enabling Resend": "Configurez une clé API Resend avant d’activer Resend",
+    "Email sending method": "Mode d’envoi des e-mails",
+    "Email sending method must be SMTP or Resend": "Le mode d’envoi des e-mails doit être SMTP ou Resend",
+    "Enter a valid sender email address": "Saisissez une adresse d’expéditeur valide",
+    "Invalid Resend delivery response": "La réponse d’envoi de Resend est invalide",
+    "Cache usage is recorded only after the upgrade; historical data is not backfilled.": "L’utilisation du cache est enregistrée uniquement après la mise à niveau ; les données historiques ne sont pas complétées.",
+    "Only the selected method sends email. The other method keeps its settings.": "Seul le mode sélectionné envoie les e-mails. L’autre mode conserve ses paramètres.",
+    "Resend API key": "Clé API Resend",
+    "Resend API key is not configured or invalid": "La clé API Resend est absente ou invalide",
+    "Resend email delivery failed (HTTP {{status}})": "Resend n’a pas pu envoyer l’e-mail (HTTP {{status}})",
+    "Resend key configuration status is read-only": "L’état de configuration de la clé Resend ne peut pas être modifié",
+    "Resend request failed": "La requête vers Resend a échoué",
+    "Resend sender address is not configured or invalid": "L’adresse d’expéditeur Resend est absente ou invalide",
+    "Sender email address": "Adresse e-mail de l’expéditeur",
+    "Sender name": "Nom de l’expéditeur",
+    "Sender name must not contain line breaks or null characters": "Le nom ne doit contenir ni saut de ligne ni caractère nul",
+    "The name recipients see. Leave blank to use the site name.": "Nom affiché aux destinataires. Laissez vide pour utiliser le nom du site.",
+    "The domain must be verified in Resend": "Le domaine doit être vérifié dans Resend"
   }
 }

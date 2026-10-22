@@ -7603,6 +7603,24 @@
     "Zhipu V4": "Zhipu V4",
     "Zoom": "Zoom",
     "Cache hit rate": "Доля попаданий в кеш",
-    "Input tokens served from cache in the last 24 hours": "Доля входных токенов из кеша за последние 24 часа"
+    "Cache read / total input tokens from reported usage in the last 24 hours": "Токены из кэша / все входные токены по переданным данным использования за последние 24 часа",
+    "Configure a Resend API key before enabling Resend": "Настройте API-ключ Resend перед включением Resend",
+    "Email sending method": "Способ отправки почты",
+    "Email sending method must be SMTP or Resend": "Способ отправки почты может быть только SMTP или Resend",
+    "Enter a valid sender email address": "Введите корректный адрес отправителя",
+    "Invalid Resend delivery response": "Resend вернул некорректный ответ об отправке",
+    "Cache usage is recorded only after the upgrade; historical data is not backfilled.": "Использование кэша учитывается только после обновления; исторические данные не заполняются.",
+    "Only the selected method sends email. The other method keeps its settings.": "Почта отправляется только выбранным способом. Настройки другого способа сохраняются.",
+    "Resend API key": "API-ключ Resend",
+    "Resend API key is not configured or invalid": "API-ключ Resend не задан или недействителен",
+    "Resend email delivery failed (HTTP {{status}})": "Resend не смог отправить письмо (HTTP {{status}})",
+    "Resend key configuration status is read-only": "Состояние настройки ключа Resend нельзя изменить",
+    "Resend request failed": "Не удалось выполнить запрос к Resend",
+    "Resend sender address is not configured or invalid": "Адрес отправителя Resend не задан или недействителен",
+    "Sender email address": "Адрес отправителя",
+    "Sender name": "Имя отправителя",
+    "Sender name must not contain line breaks or null characters": "Имя отправителя не должно содержать переносы строк или нулевые символы",
+    "The name recipients see. Leave blank to use the site name.": "Имя, которое увидят получатели. Оставьте пустым для использования названия сайта.",
+    "The domain must be verified in Resend": "Домен должен быть подтверждён в Resend"
   }
 }

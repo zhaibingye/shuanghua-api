@@ -203,7 +203,9 @@ export function ModelDetailsPerformance(props: { model: PricingModel }) {
           icon={Database}
           label={t('Cache hit rate')}
           value={formatCacheHitRate(metricsQuery.data?.data.cache_hit_rate)}
-          hint={t('Input tokens served from cache in the last 24 hours')}
+          hint={t(
+            'Cache read / total input tokens from reported usage in the last 24 hours'
+          )}
         />
       </div>
 

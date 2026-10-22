@@ -7603,6 +7603,24 @@
     "Zhipu V4": "Zhipu V 4",
     "Zoom": "ズーム",
     "Cache hit rate": "キャッシュヒット率",
-    "Input tokens served from cache in the last 24 hours": "過去24時間にキャッシュから読み取った入力トークンの割合"
+    "Cache read / total input tokens from reported usage in the last 24 hours": "過去24時間の報告された使用量におけるキャッシュ読み取りトークン / 合計入力トークン",
+    "Configure a Resend API key before enabling Resend": "Resend を有効にする前に API キーを設定してください",
+    "Email sending method": "メール送信方法",
+    "Email sending method must be SMTP or Resend": "メール送信方法は SMTP または Resend のみです",
+    "Enter a valid sender email address": "有効な送信者メールアドレスを入力してください",
+    "Invalid Resend delivery response": "Resend から返された送信結果が無効です",
+    "Cache usage is recorded only after the upgrade; historical data is not backfilled.": "キャッシュ使用量はアップグレード後から記録され、過去のデータは補完されません。",
+    "Only the selected method sends email. The other method keeps its settings.": "選択した方法でのみメールを送信します。もう一方の方法の設定は保持されます。",
+    "Resend API key": "Resend API キー",
+    "Resend API key is not configured or invalid": "Resend API キーが未設定か無効です",
+    "Resend email delivery failed (HTTP {{status}})": "Resend でメールを送信できませんでした（HTTP {{status}}）",
+    "Resend key configuration status is read-only": "Resend キーの設定状態は変更できません",
+    "Resend request failed": "Resend へのリクエストに失敗しました",
+    "Resend sender address is not configured or invalid": "Resend の送信元アドレスが未設定か無効です",
+    "Sender email address": "送信者メールアドレス",
+    "Sender name": "送信者名",
+    "Sender name must not contain line breaks or null characters": "送信者名に改行やヌル文字は使用できません",
+    "The name recipients see. Leave blank to use the site name.": "受信者に表示される名前です。空欄の場合はサイト名を使用します。",
+    "The domain must be verified in Resend": "ドメインは Resend で認証済みである必要があります"
   }
 }
