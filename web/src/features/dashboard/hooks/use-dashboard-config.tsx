@@ -20,6 +20,8 @@ import {
   Hash,
   Coins,
   Layers,
+  Download,
+  Upload,
   Gauge,
   Zap,
   Flame,
@@ -69,6 +71,22 @@ export function useModelStatCardsConfig(): StatCardConfig[] {
       icon: Layers,
       iconTone: 'chart-4',
       getValue: (stat) => stat?.tpm ?? 0,
+    },
+    {
+      key: 'cacheRead',
+      title: t('Cache Read'),
+      description: t('Statistical tokens'),
+      icon: Download,
+      iconTone: 'chart-3',
+      getValue: (stat) => stat?.cacheRead ?? 0,
+    },
+    {
+      key: 'cacheCreation',
+      title: t('Cache Write'),
+      description: t('Statistical tokens'),
+      icon: Upload,
+      iconTone: 'chart-5',
+      getValue: (stat) => stat?.cacheCreation ?? 0,
     },
     {
       key: 'avgRpm',
@@ -131,7 +149,9 @@ export function useSummaryCardsConfig(totals: {
       key: 'cacheHitRate',
       title: t('Cache hit rate'),
       value: totals.cacheHitRateDisplay,
-      description: t('Input tokens served from cache in the last 24 hours'),
+      description: t(
+        'Cache read / total input tokens from reported usage in the last 24 hours'
+      ),
       icon: Database,
     },
   ]

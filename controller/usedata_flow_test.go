@@ -19,6 +19,9 @@ func TestGetUserQuotaDatesCacheRateUsesCurrentUserAndRolling24Hours(t *testing.T
 	require.NoError(t, model.DB.AutoMigrate(&model.Log{}))
 	now := time.Now().Unix()
 	require.NoError(t, model.LOG_DB.Create(&[]model.Log{
+		// Unknown and estimated logs must not suppress a measured cache rate.
+		{UserId: 91001, CreatedAt: now - 3600, Type: model.LogTypeConsume, PromptTokens: 100, Other: `{}`},
+		{UserId: 91001, CreatedAt: now - 3600, Type: model.LogTypeConsume, PromptTokens: 100, Other: `{"cache_tokens":0,"admin_info":{"usage_billing_path":"local"}}`},
 		// This request is in the actual last 24h, before the chart's 23h start.
 		{UserId: 91001, CreatedAt: now - 23*3600 - 1800, Type: model.LogTypeConsume, PromptTokens: 1000, Other: `{"cache_tokens":950}`},
 		{UserId: 91002, CreatedAt: now - 3600, Type: model.LogTypeConsume, PromptTokens: 1000, Other: `{"cache_tokens":0}`},

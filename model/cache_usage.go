@@ -65,7 +65,9 @@ func cacheTokensFromLog(promptTokens int64, rawOther string) (input, read float6
 }
 
 // GetCacheHitRate weights cache reads by total input tokens, never by request
-// count or output tokens. Streaming rows keeps the memory cost independent of
+// count or output tokens. Only logs with reported, valid token usage contribute
+// to either total; unrelated, estimated or malformed logs cannot erase known
+// samples or dilute them into zero hits. Streaming rows keeps memory independent of
 // traffic volume and avoids database-specific JSON operators. Existing logs
 // are included immediately; no migration or historical backfill is needed.
 func GetCacheHitRate(ctx context.Context, filter CacheUsageFilter) (rate *float64, err error) {
@@ -99,7 +101,6 @@ func GetCacheHitRate(ctx context.Context, filter CacheUsageFilter) (rate *float6
 	}
 	defer func() { err = errors.Join(err, rows.Close()) }()
 	var totalInput, totalRead float64
-	unknown := false
 	for rows.Next() {
 		var prompt int64
 		var other string
@@ -107,14 +108,16 @@ func GetCacheHitRate(ctx context.Context, filter CacheUsageFilter) (rate *float6
 			return nil, err
 		}
 		input, read, known := cacheTokensFromLog(prompt, other)
-		unknown = unknown || !known
+		if !known {
+			continue
+		}
 		totalInput += input
 		totalRead += read
 	}
 	if err := rows.Err(); err != nil {
 		return nil, err
 	}
-	if unknown || totalInput <= 0 || math.IsInf(totalInput, 0) || math.IsInf(totalRead, 0) {
+	if totalInput <= 0 || math.IsInf(totalInput, 0) || math.IsInf(totalRead, 0) {
 		return nil, nil
 	}
 	value := totalRead / totalInput * 100

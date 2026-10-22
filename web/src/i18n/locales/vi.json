@@ -7603,6 +7603,24 @@
     "Zhipu V4": "Zhipu V4",
     "Zoom": "Zoom",
     "Cache hit rate": "Tỷ lệ trúng bộ nhớ đệm",
-    "Input tokens served from cache in the last 24 hours": "Tỷ lệ token đầu vào được đọc từ bộ nhớ đệm trong 24 giờ qua"
+    "Cache read / total input tokens from reported usage in the last 24 hours": "Token đọc từ bộ nhớ đệm / tổng token đầu vào từ mức sử dụng được báo cáo trong 24 giờ qua",
+    "Configure a Resend API key before enabling Resend": "Cấu hình khóa API Resend trước khi bật Resend",
+    "Email sending method": "Phương thức gửi email",
+    "Email sending method must be SMTP or Resend": "Phương thức gửi email chỉ có thể là SMTP hoặc Resend",
+    "Enter a valid sender email address": "Nhập địa chỉ email người gửi hợp lệ",
+    "Invalid Resend delivery response": "Kết quả gửi do Resend trả về không hợp lệ",
+    "Cache usage is recorded only after the upgrade; historical data is not backfilled.": "Mức sử dụng bộ nhớ đệm chỉ được ghi nhận sau khi nâng cấp; dữ liệu lịch sử không được bổ sung.",
+    "Only the selected method sends email. The other method keeps its settings.": "Chỉ phương thức đã chọn được dùng để gửi email. Cấu hình của phương thức còn lại vẫn được giữ.",
+    "Resend API key": "Khóa API Resend",
+    "Resend API key is not configured or invalid": "Khóa API Resend chưa được cấu hình hoặc không hợp lệ",
+    "Resend email delivery failed (HTTP {{status}})": "Resend không gửi được email (HTTP {{status}})",
+    "Resend key configuration status is read-only": "Không thể thay đổi trạng thái cấu hình khóa Resend",
+    "Resend request failed": "Yêu cầu tới Resend thất bại",
+    "Resend sender address is not configured or invalid": "Địa chỉ người gửi Resend chưa được cấu hình hoặc không hợp lệ",
+    "Sender email address": "Địa chỉ email người gửi",
+    "Sender name": "Tên người gửi",
+    "Sender name must not contain line breaks or null characters": "Tên người gửi không được chứa ký tự xuống dòng hoặc ký tự rỗng",
+    "The name recipients see. Leave blank to use the site name.": "Tên hiển thị với người nhận. Để trống để dùng tên trang web.",
+    "The domain must be verified in Resend": "Tên miền phải được xác minh trên Resend"
   }
 }

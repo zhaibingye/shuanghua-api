@@ -103,8 +103,14 @@ func TestCacheHitRateDatabaseMatrix(t *testing.T) {
 				{UserId: 1, ModelName: "model-a", Group: "default", CreatedAt: 800, Type: LogTypeConsume, PromptTokens: 10000, Other: `{"cache_tokens":0}`},
 				{UserId: 1, ModelName: "model-a", Group: "default", CreatedAt: 2100, Type: LogTypeConsume, PromptTokens: 10000, Other: `{"cache_tokens":0}`},
 				{UserId: 1, ModelName: "model-a", Group: "default", CreatedAt: 1400, Type: LogTypeError, PromptTokens: 10000, Other: `{"cache_tokens":0}`},
-				{UserId: 3, ModelName: "unknown", Group: "default", CreatedAt: 1500, Type: LogTypeConsume, PromptTokens: 100, Other: `{}`},
+				{UserId: 3, ModelName: "known", Group: "default", CreatedAt: 1500, Type: LogTypeConsume, PromptTokens: 100, Other: `{}`},
 				{UserId: 3, ModelName: "known", Group: "default", CreatedAt: 1600, Type: LogTypeConsume, PromptTokens: 1000, Other: `{"cache_tokens":950}`},
+				{UserId: 3, ModelName: "known", Group: "default", CreatedAt: 1700, Type: LogTypeConsume, PromptTokens: 100, Other: `{"cache_tokens":0,"admin_info":{"local_count_tokens":true}}`},
+				{UserId: 3, ModelName: "known", Group: "default", CreatedAt: 1750, Type: LogTypeConsume, PromptTokens: 100, Other: `{"cache_tokens":-1}`},
+				{UserId: 3, ModelName: "known", Group: "default", CreatedAt: 1800, Type: LogTypeConsume, PromptTokens: 100, Other: `{`},
+				{UserId: 5, ModelName: "unknown", Group: "default", CreatedAt: 1500, Type: LogTypeConsume, PromptTokens: 100, Other: `{}`},
+				{UserId: 6, ModelName: "zero", Group: "default", CreatedAt: 1500, Type: LogTypeConsume, PromptTokens: 100, Other: `{}`},
+				{UserId: 6, ModelName: "zero", Group: "default", CreatedAt: 1600, Type: LogTypeConsume, PromptTokens: 100, Other: `{"cache_tokens":0}`},
 			}
 			require.NoError(t, db.Create(&logs).Error)
 			for _, tc := range []struct {
@@ -122,7 +128,10 @@ func TestCacheHitRateDatabaseMatrix(t *testing.T) {
 				{"empty allowed groups exposes nothing", 0, "model-a", "", []string{}, nil},
 				{"no data remains unknown", 4, "", "", nil, nil},
 				{"measured zero hits", 1, "model-b", "", nil, new(0.0)},
-				{"missing upstream telemetry remains unknown", 3, "", "", nil, nil},
+				{"mixed user telemetry retains measured rate", 3, "", "", nil, new(95.0)},
+				{"mixed model telemetry retains measured rate", 0, "known", "", []string{"default"}, new(95.0)},
+				{"only missing telemetry remains unknown", 5, "", "", nil, nil},
+				{"mixed telemetry retains measured zero", 6, "", "", nil, new(0.0)},
 			} {
 				t.Run(tc.name, func(t *testing.T) {
 					rate, err := GetCacheHitRate(context.Background(), CacheUsageFilter{UserID: tc.userID, ModelName: tc.model, Group: tc.group, AllowedGroups: tc.groups, StartTimestamp: 900, EndTimestamp: 2000})

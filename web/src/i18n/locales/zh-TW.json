@@ -7603,6 +7603,24 @@
     "Zhipu V4": "智譜 V4",
     "Zoom": "縮放",
     "Cache hit rate": "快取命中率",
-    "Input tokens served from cache in the last 24 hours": "近 24 小時輸入 Token 的快取命中比例"
+    "Cache read / total input tokens from reported usage in the last 24 hours": "近24小時有效用量中的快取讀取 Token / 總輸入 Token",
+    "Configure a Resend API key before enabling Resend": "請先設定 Resend API 金鑰，再啟用 Resend",
+    "Email sending method": "郵件傳送方式",
+    "Email sending method must be SMTP or Resend": "郵件傳送方式只能是 SMTP 或 Resend",
+    "Enter a valid sender email address": "請輸入有效的寄件信箱地址",
+    "Invalid Resend delivery response": "Resend 回傳的傳送結果無效",
+    "Cache usage is recorded only after the upgrade; historical data is not backfilled.": "快取用量僅從升級後開始記錄，歷史資料不回填。",
+    "Only the selected method sends email. The other method keeps its settings.": "只用所選方式傳送郵件，另一種方式的設定會保留。",
+    "Resend API key": "Resend API 金鑰",
+    "Resend API key is not configured or invalid": "Resend API 金鑰未設定或無效",
+    "Resend email delivery failed (HTTP {{status}})": "Resend 傳送郵件失敗（HTTP {{status}}）",
+    "Resend key configuration status is read-only": "Resend 金鑰的設定狀態不能手動修改",
+    "Resend request failed": "請求 Resend 失敗",
+    "Resend sender address is not configured or invalid": "Resend 寄件信箱未設定或無效",
+    "Sender email address": "寄件信箱地址",
+    "Sender name": "寄件人名稱",
+    "Sender name must not contain line breaks or null characters": "寄件人名稱不能包含換行符號或空字元",
+    "The name recipients see. Leave blank to use the site name.": "收件人看到的寄件人名稱，留空使用網站名稱。",
+    "The domain must be verified in Resend": "網域須已在 Resend 完成驗證"
   }
 }
