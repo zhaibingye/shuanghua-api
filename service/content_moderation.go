@@ -11,7 +11,6 @@ import (
 	"net/http"
 	"net/url"
 	"slices"
-	"sort"
 	"strings"
 	"sync"
 	"time"
@@ -45,7 +44,7 @@ var (
 	ErrInvalidModerationUserRequest   = errors.New("invalid moderation user request")
 	moderationResponseWriterKey       = constant.ContextKeyModerationCapture
 
-	moderationFingerprintCache     *cachex.HybridCache[string]
+	moderationFingerprintCache     *cachex.HybridCache[moderationDecision]
 	moderationFingerprintCacheOnce sync.Once
 )
 
@@ -760,40 +759,24 @@ func executeOpenAIModerationCall(ctx context.Context, config setting.ContentMode
 			return emptyResult, respBytes, errors.New("moderation provider returned no results")
 		}
 
-		merged := decoded.Results[0]
-		mergedCategories := make(map[string]bool, len(merged.Categories))
-		for k, v := range merged.Categories {
-			mergedCategories[k] = v
+		merged := openAIModerationResult{
+			Categories:     make(map[string]bool),
+			CategoryScores: make(map[string]float64),
 		}
-		mergedScores := make(map[string]float64)
-		srcScores := merged.CategoryScores
-		if srcScores == nil {
-			srcScores = merged.Scores
-		}
-		for k, v := range srcScores {
-			mergedScores[k] = v
-		}
-		merged.Categories = mergedCategories
-		merged.CategoryScores = mergedScores
-
-		for i := 1; i < len(decoded.Results); i++ {
-			r := decoded.Results[i]
-			if r.Flagged {
-				merged.Flagged = true
+		for _, result := range decoded.Results {
+			merged.Flagged = merged.Flagged || result.Flagged
+			for category, flagged := range result.Categories {
+				merged.Categories[category] = merged.Categories[category] || flagged
 			}
-			rScores := r.CategoryScores
-			if rScores == nil {
-				rScores = r.Scores
+			scores := result.CategoryScores
+			if scores == nil {
+				scores = result.Scores
 			}
-			for cat, flagged := range r.Categories {
-				if flagged {
-					merged.Categories[cat] = true
+			for category, score := range scores {
+				if score < 0 || score > 1 {
+					return emptyResult, respBytes, errors.New("moderation provider returned a score outside [0, 1]")
 				}
-			}
-			for cat, score := range rScores {
-				if score > merged.CategoryScores[cat] {
-					merged.CategoryScores[cat] = score
-				}
+				merged.CategoryScores[category] = max(merged.CategoryScores[category], score)
 			}
 		}
 		return merged, respBytes, nil
@@ -861,12 +844,7 @@ func callNativeModeration(ctx context.Context, config setting.ContentModerationS
 }
 
 func callModerationContent(ctx context.Context, config setting.ContentModerationSetting, content ModerationRequestContent) (openAIModerationResult, []byte, error) {
-	modelName := strings.TrimSpace(config.Model)
-	if modelName == "" {
-		modelName = setting.DefaultContentModerationModel
-	}
-	isOmni := strings.Contains(strings.ToLower(modelName), "omni") || modelName == setting.DefaultContentModerationModel
-	if len(content.ImageURLs) > 0 && isOmni {
+	if len(content.ImageURLs) > 0 {
 		var items []openAIModerationInputItem
 		if u := sanitizeModerationText(content.UserPrompt); u != "" {
 			items = append(items, openAIModerationInputItem{Type: "text", Text: u})
@@ -883,62 +861,61 @@ func callModerationContent(ctx context.Context, config setting.ContentModeration
 			return executeOpenAIModerationCall(ctx, config, items)
 		}
 	}
-	if u := sanitizeModerationText(content.UserPrompt); u != "" {
-		return callNativeModeration(ctx, config, u)
+	if strings.TrimSpace(content.UserPrompt) != "" {
+		return callNativeModeration(ctx, config, content.UserPrompt)
 	}
 	return openAIModerationResult{Flagged: false}, nil, nil
 }
 
-func moderationDecisionFromNativeResult(result openAIModerationResult, blockSeverity string) moderationDecision {
-	scores := result.CategoryScores
-	if scores == nil {
-		scores = result.Scores
-	}
+func moderationDecisionFromNativeResult(result openAIModerationResult, config setting.ContentModerationSetting) moderationDecision {
 	categories := make([]string, 0)
 	maxScore := 0.0
 	for category, flagged := range result.Categories {
-		if flagged {
-			categories = append(categories, category)
+		if !flagged {
+			continue
 		}
-		if scores != nil {
-			if s, ok := scores[category]; ok && s > maxScore {
-				maxScore = s
-			}
+		categories = append(categories, category)
+		maxScore = max(maxScore, result.CategoryScores[category])
+	}
+	slices.Sort(categories)
+	// Compatible providers may return the overall flag without category flags.
+	if result.Flagged && len(categories) == 0 {
+		for _, score := range result.CategoryScores {
+			maxScore = max(maxScore, score)
 		}
 	}
-	sort.Strings(categories)
-	severity := "none"
-	if maxScore >= 0.9 {
-		severity = setting.ModerationSeverityCritical
-	} else if maxScore >= 0.75 {
-		severity = setting.ModerationSeverityHigh
-	} else if maxScore >= 0.5 {
-		severity = setting.ModerationSeverityMedium
-	} else if len(categories) > 0 {
-		severity = setting.ModerationSeverityLow
-	}
-	decision := model.ModerationEventDecisionAllow
-	reasonCode := ""
-	if (result.Flagged || len(categories) > 0) && setting.ShouldBlockSeverity(severity, blockSeverity) {
-		decision = model.ModerationEventDecisionBlock
-		if len(categories) > 0 {
-			reasonCode = categories[0]
-		} else {
-			reasonCode = "flagged"
-		}
-	} else if len(categories) > 0 {
-		reasonCode = categories[0]
-	}
-	return moderationDecision{
-		Decision:   decision,
+	decision := moderationDecision{
+		Decision:   model.ModerationEventDecisionAllow,
 		Actor:      model.ModerationEventActorUser,
-		Severity:   severity,
+		Severity:   "none",
 		Categories: categories,
 		Confidence: maxScore,
-		ReasonCode: reasonCode,
 	}
+	if !result.Flagged && len(categories) == 0 {
+		return decision
+	}
+	thresholds := config.ResolvedScoreThresholds()
+	switch {
+	case maxScore >= thresholds.Critical:
+		decision.Severity = setting.ModerationSeverityCritical
+	case maxScore >= thresholds.High:
+		decision.Severity = setting.ModerationSeverityHigh
+	case maxScore >= thresholds.Medium:
+		decision.Severity = setting.ModerationSeverityMedium
+	default:
+		decision.Severity = setting.ModerationSeverityLow
+	}
+	decision.ReasonCode = "flagged"
+	if len(categories) > 0 {
+		decision.ReasonCode = categories[0]
+	}
+	if config.ShouldBlock(decision.Severity) {
+		decision.Decision = model.ModerationEventDecisionBlock
+	}
+	return decision
 }
 
+// Keep content identity independent of policy for explicit operator resolutions.
 func moderationContentFingerprint(content ModerationRequestContent) string {
 	var builder strings.Builder
 	builder.WriteString(strings.TrimSpace(content.UserPrompt))
@@ -950,17 +927,17 @@ func moderationContentFingerprint(content ModerationRequestContent) string {
 	return hex.EncodeToString(common.Sha256Raw([]byte(builder.String())))
 }
 
-func getModerationFingerprintCache() *cachex.HybridCache[string] {
+func getModerationFingerprintCache() *cachex.HybridCache[moderationDecision] {
 	moderationFingerprintCacheOnce.Do(func() {
-		moderationFingerprintCache = cachex.NewHybridCache[string](cachex.HybridCacheConfig[string]{
-			Namespace: cachex.Namespace("moderation_fp_v1"),
+		moderationFingerprintCache = cachex.NewHybridCache[moderationDecision](cachex.HybridCacheConfig[moderationDecision]{
+			Namespace: cachex.Namespace("moderation_fp_v2"),
 			Redis:     common.RDB,
 			RedisEnabled: func() bool {
 				return common.RedisEnabled && common.RDB != nil
 			},
-			RedisCodec: cachex.StringCodec{},
-			Memory: func() *hot.HotCache[string, string] {
-				return hot.NewHotCache[string, string](hot.LRU, moderationFingerprintCacheCap).
+			RedisCodec: cachex.JSONCodec[moderationDecision]{},
+			Memory: func() *hot.HotCache[string, moderationDecision] {
+				return hot.NewHotCache[string, moderationDecision](hot.LRU, moderationFingerprintCacheCap).
 					WithTTL(moderationAllowCacheTTL).
 					WithJanitor().
 					Build()
@@ -968,26 +945,6 @@ func getModerationFingerprintCache() *cachex.HybridCache[string] {
 		})
 	})
 	return moderationFingerprintCache
-}
-
-func lookupModerationFingerprint(fp string) string {
-	if fp == "" {
-		return ""
-	}
-	value, found, err := getModerationFingerprintCache().Get(fp)
-	if err != nil || !found {
-		return ""
-	}
-	return value
-}
-
-func storeModerationFingerprint(fp, decision string, ttl time.Duration) {
-	if fp == "" || decision == "" || ttl <= 0 {
-		return
-	}
-	if err := getModerationFingerprintCache().SetWithTTL(fp, decision, ttl); err != nil {
-		common.SysError("failed to cache content moderation fingerprint: " + err.Error())
-	}
 }
 
 func resetModerationFingerprintCache() {
@@ -1004,35 +961,60 @@ func PreflightModerationRequest(ctx context.Context, content ModerationRequestCo
 	if content.IsEmpty() {
 		return nil
 	}
-	fp := moderationContentFingerprint(content)
-	switch lookupModerationFingerprint(fp) {
-	case "allow":
+	cache := getModerationFingerprintCache()
+	fingerprint := moderationContentFingerprint(content)
+	// A deliberate operator resolution keeps its existing 24-hour scope even
+	// when the automatic classification policy changes.
+	resolution, resolved, resolutionErr := cache.Get("resolved:" + fingerprint)
+	if resolutionErr == nil && resolved && resolution.Decision == model.ModerationEventDecisionAllow {
 		return nil
-	case "block":
-		return model.ErrModerationBlocked
 	}
-
-	result, _, err := callModerationContent(ctx, config, content)
+	// Include the policy and provider in the cache identity so configuration
+	// changes take effect immediately, including across gateway instances.
+	policyContent, err := common.Marshal(struct {
+		Content         ModerationRequestContent
+		BaseURL         string
+		Model           string
+		BlockSeverity   string
+		ScoreThresholds setting.ModerationScoreThresholds
+		RetentionDays   int
+	}{
+		Content:         content,
+		BaseURL:         config.BaseURL,
+		Model:           config.Model,
+		BlockSeverity:   config.BlockSeverity,
+		ScoreThresholds: config.ResolvedScoreThresholds(),
+		RetentionDays:   config.ViolationRetentionDays,
+	})
 	if err != nil {
-		if config.FailureMode == "open" {
-			return nil
+		return fmt.Errorf("encode moderation cache identity: %w", err)
+	}
+	cacheKey := hex.EncodeToString(common.Sha256Raw(policyContent))
+	decision, found, cacheErr := cache.Get(cacheKey)
+	if cacheErr != nil || !found {
+		result, _, err := callModerationContent(ctx, config, content)
+		if err != nil {
+			if config.FailureMode == "open" {
+				return nil
+			}
+			return fmt.Errorf("content moderation preflight unavailable: %w", err)
 		}
-		return fmt.Errorf("content moderation preflight unavailable: %w", err)
+		decision = moderationDecisionFromNativeResult(result, config)
+		ttl := moderationAllowCacheTTL
+		if decision.Decision == model.ModerationEventDecisionBlock {
+			ttl = config.GetViolationRetentionDuration()
+		}
+		if err := cache.SetWithTTL(cacheKey, decision, ttl); err != nil {
+			common.SysError(common.LogText("failed to cache content moderation fingerprint: %v", err))
+		}
 	}
-	if !result.Flagged {
-		storeModerationFingerprint(fp, "allow", moderationAllowCacheTTL)
-		return nil
-	}
-
-	decision := moderationDecisionFromNativeResult(result, config.BlockSeverity)
-	if ginCtx, ok := ctx.(*gin.Context); ok {
-		recordModerationEventFromContext(ginCtx, content, "", decision, model.ModerationEventSourcePreflight, config)
+	// Caching avoids another upstream call, not the current user's audit trail.
+	if ginCtx, ok := ctx.(*gin.Context); ok && decision.Severity != "none" {
+		recordModerationEventFromContext(ginCtx, content, "", decision, model.ModerationEventSourcePreflight, config, fingerprint)
 	}
 	if decision.Decision == model.ModerationEventDecisionBlock {
-		storeModerationFingerprint(fp, "block", config.GetViolationRetentionDuration())
 		return model.ErrModerationBlocked
 	}
-	storeModerationFingerprint(fp, "allow", moderationAllowCacheTTL)
 	return nil
 }
 
@@ -1067,10 +1049,13 @@ func FinalizeModeration(c *gin.Context, info *relaycommon.RelayInfo, relayErr *t
 		ctx, cancel := context.WithTimeout(context.Background(), time.Duration(cfg.TimeoutSeconds)*time.Second)
 		defer cancel()
 		result, _, err := callNativeModeration(ctx, cfg, reply)
-		if err != nil || !result.Flagged {
+		if err != nil {
 			return
 		}
-		decision := moderationDecisionFromNativeResult(result, cfg.BlockSeverity)
+		decision := moderationDecisionFromNativeResult(result, cfg)
+		if decision.Severity == "none" {
+			return
+		}
 		decision.Actor = model.ModerationEventActorAssistant
 		now := common.GetTimestamp()
 		expiresAt := now + int64(cfg.GetViolationRetentionDuration().Seconds())
@@ -1122,7 +1107,7 @@ func marshalModerationCategories(categories []string) string {
 	return string(raw)
 }
 
-func recordModerationEventFromContext(c *gin.Context, content ModerationRequestContent, assistantReply string, decision moderationDecision, source string, config setting.ContentModerationSetting) {
+func recordModerationEventFromContext(c *gin.Context, content ModerationRequestContent, assistantReply string, decision moderationDecision, source string, config setting.ContentModerationSetting, fingerprint string) {
 	if c == nil {
 		return
 	}
@@ -1136,7 +1121,6 @@ func recordModerationEventFromContext(c *gin.Context, content ModerationRequestC
 	}
 	now := common.GetTimestamp()
 	expiresAt := now + int64(config.GetViolationRetentionDuration().Seconds())
-	fp := moderationContentFingerprint(content)
 	modelName := common.GetContextKeyString(c, constant.ContextKeyOriginalModel)
 	if modelName == "" {
 		modelName = config.Model
@@ -1160,7 +1144,7 @@ func recordModerationEventFromContext(c *gin.Context, content ModerationRequestC
 		ReasonCode:         decision.ReasonCode,
 		UserExcerpt:        moderationExcerpt(content.UserPrompt, len(content.ImageURLs)),
 		AssistantExcerpt:   moderationExcerpt(assistantReply, 0),
-		ContentFingerprint: fp,
+		ContentFingerprint: fingerprint,
 		ImageCount:         len(content.ImageURLs),
 		Status:             model.ModerationEventActive,
 		CreatedAt:          now,
@@ -1671,7 +1655,10 @@ func ResolveModerationEvent(eventID, adminID int64, status, reason string) error
 		return err
 	}
 	if event.ContentFingerprint != "" {
-		storeModerationFingerprint(event.ContentFingerprint, "allow", moderationAllowCacheTTL)
+		decision := moderationDecision{Decision: model.ModerationEventDecisionAllow, Severity: "none"}
+		if err := getModerationFingerprintCache().SetWithTTL("resolved:"+event.ContentFingerprint, decision, moderationAllowCacheTTL); err != nil {
+			common.SysError(common.LogText("failed to cache content moderation resolution: %v", err))
+		}
 	}
 	action := model.ModerationAction{
 		AdminID: int(adminID),

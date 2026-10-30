@@ -14,6 +14,206 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
+func TestResponsesFinishMatchesAcrossResponseModes(t *testing.T) {
+	for _, tc := range []struct {
+		name   string
+		status string
+		reason string
+		tool   bool
+		chat   string
+		claude string
+		gemini string
+	}{
+		{"length", "incomplete", "max_output_tokens", false, "length", "max_tokens", "MAX_TOKENS"},
+		{"filtered", "incomplete", "content_filter", false, "content_filter", "refusal", "SAFETY"},
+		{"tool", "completed", "", true, "tool_calls", "tool_use", "STOP"},
+	} {
+		for _, target := range []struct {
+			format types.RelayFormat
+			finish string
+		}{
+			{types.RelayFormatOpenAI, tc.chat},
+			{types.RelayFormatClaude, tc.claude},
+			{types.RelayFormatGemini, tc.gemini},
+		} {
+			t.Run(tc.name+"/"+string(target.format), func(t *testing.T) {
+				status, err := kitutil.Marshal(tc.status)
+				require.NoError(t, err)
+				response := &dto.OpenAIResponsesResponse{
+					ID: "resp_finish", Status: status,
+					IncompleteDetails: &dto.IncompleteDetails{Reason: tc.reason},
+					Output:            []dto.ResponsesOutput{{Type: "message", Content: []dto.ResponsesOutputContent{{Type: "output_text", Text: "partial"}}}},
+					Usage:             &dto.Usage{InputTokens: 4, OutputTokens: 2, TotalTokens: 6},
+				}
+				if tc.tool {
+					response.Output = []dto.ResponsesOutput{{Type: "function_call", CallId: "call_lookup", Name: "lookup", Arguments: []byte(`"{}"`)}}
+				}
+				result, err := ConvertResponse(t.Context(), nil, target.format, response)
+				require.NoError(t, err)
+				assert.Equal(t, target.finish, convertedFinishReason(t, result.Value))
+
+				for _, eventType := range []string{"response." + tc.status, "response.done"} {
+					state, err := NewResponseStreamState(types.RelayFormatOpenAIResponses, target.format, ResponseStreamOptions{IncludeUsage: true})
+					require.NoError(t, err)
+					results, err := ConvertStreamResponseChunk(t.Context(), nil, state, &dto.ResponsesStreamResponse{Type: eventType, Response: response})
+					require.NoError(t, err)
+					final, err := FinalizeStreamResponse(t.Context(), nil, state)
+					require.NoError(t, err)
+					results = append(results, final...)
+					var finishes []string
+					for _, chunk := range results {
+						if finish := convertedFinishReason(t, chunk.Value); finish != "" {
+							finishes = append(finishes, finish)
+						}
+					}
+					assert.Equal(t, []string{target.finish}, finishes, eventType)
+					require.NotNil(t, state.Usage())
+					assert.Equal(t, 6, state.Usage().TotalTokens)
+				}
+			})
+		}
+	}
+}
+
+func TestResponsesToolStreamEmitsMetadataOnce(t *testing.T) {
+	for _, mode := range []string{"full stream", "terminal only", "late name"} {
+		t.Run(mode, func(t *testing.T) {
+			state, err := NewResponseStreamState(types.RelayFormatOpenAIResponses, types.RelayFormatOpenAI, ResponseStreamOptions{})
+			require.NoError(t, err)
+			item := dto.ResponsesOutput{Type: "function_call", ID: "fc_lookup", CallId: "call_lookup", Name: "lookup", Arguments: []byte(`"{\"q\":\"x\"}"`)}
+			var events []*dto.ResponsesStreamResponse
+			if mode != "terminal only" {
+				added := item
+				added.Arguments = []byte(`""`)
+				if mode == "late name" {
+					added.Name = ""
+				}
+				events = append(events,
+					&dto.ResponsesStreamResponse{Type: "response.output_item.added", OutputIndex: respPtr(0), Item: &added},
+					&dto.ResponsesStreamResponse{Type: "response.function_call_arguments.delta", OutputIndex: respPtr(0), Delta: `{"q":`},
+					&dto.ResponsesStreamResponse{Type: "response.function_call_arguments.delta", OutputIndex: respPtr(0), Delta: `"x"}`},
+					&dto.ResponsesStreamResponse{Type: "response.function_call_arguments.done", OutputIndex: respPtr(0), Arguments: respPtr(`{"q":"x"}`)},
+					&dto.ResponsesStreamResponse{Type: "response.output_item.done", OutputIndex: respPtr(0), Item: &item},
+				)
+			}
+			events = append(events, &dto.ResponsesStreamResponse{Type: "response.completed", Response: &dto.OpenAIResponsesResponse{Status: []byte(`"completed"`), Output: []dto.ResponsesOutput{item}}})
+			var results []ResponseResult
+			for _, event := range events {
+				chunks, err := ConvertStreamResponseChunk(t.Context(), nil, state, event)
+				require.NoError(t, err)
+				results = append(results, chunks...)
+			}
+			final, err := FinalizeStreamResponse(t.Context(), nil, state)
+			require.NoError(t, err)
+			results = append(results, final...)
+			var name, id, arguments strings.Builder
+			for _, result := range results {
+				chunk, ok := result.Value.(dto.ChatCompletionsStreamResponse)
+				require.True(t, ok, "unexpected stream response type %T", result.Value)
+				for _, choice := range chunk.Choices {
+					for _, tool := range choice.Delta.ToolCalls {
+						name.WriteString(tool.Function.Name)
+						id.WriteString(tool.ID)
+						arguments.WriteString(tool.Function.Arguments)
+					}
+				}
+			}
+			assert.Equal(t, "lookup", name.String())
+			assert.Equal(t, "call_lookup", id.String())
+			assert.JSONEq(t, `{"q":"x"}`, arguments.String())
+		})
+	}
+}
+
+func TestToolResponseConvertsToSuccessfulGeminiFinish(t *testing.T) {
+	for _, tc := range []struct {
+		name     string
+		response any
+	}{
+		{
+			name: "chat",
+			response: &dto.OpenAITextResponse{Choices: []dto.OpenAITextResponseChoice{{
+				FinishReason: "tool_calls",
+				Message: dto.Message{
+					Role:      "assistant",
+					ToolCalls: []byte(`[{"id":"call_lookup","type":"function","function":{"name":"lookup","arguments":"{\"q\":\"x\"}"}}]`),
+				},
+			}}},
+		},
+		{
+			name: "responses",
+			response: &dto.OpenAIResponsesResponse{
+				Status: []byte(`"completed"`),
+				Output: []dto.ResponsesOutput{{Type: "function_call", CallId: "call_lookup", Name: "lookup", Arguments: []byte(`"{\"q\":\"x\"}"`)}},
+			},
+		},
+		{
+			name: "claude",
+			response: &dto.ClaudeResponse{
+				StopReason: "tool_use",
+				Content:    []dto.ClaudeMediaMessage{{Type: "tool_use", Id: "call_lookup", Name: "lookup", Input: map[string]any{"q": "x"}}},
+			},
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			result, err := ConvertResponse(t.Context(), nil, types.RelayFormatGemini, tc.response)
+			require.NoError(t, err)
+			out, ok := result.Value.(*dto.GeminiChatResponse)
+			require.True(t, ok, "unexpected response type %T", result.Value)
+			require.Len(t, out.Candidates, 1)
+			assert.Equal(t, "STOP", convertedFinishReason(t, out))
+			require.Len(t, out.Candidates[0].Content.Parts, 1)
+			call := out.Candidates[0].Content.Parts[0].FunctionCall
+			require.NotNil(t, call)
+			assert.Equal(t, "lookup", call.FunctionName)
+			assert.Equal(t, map[string]any{"q": "x"}, call.Arguments)
+		})
+	}
+}
+
+func TestMalformedGeminiToolCallIsConversionError(t *testing.T) {
+	response := terminalTestGeminiChunk("", "MALFORMED_FUNCTION_CALL", false)
+	for _, target := range []types.RelayFormat{types.RelayFormatOpenAI, types.RelayFormatClaude, types.RelayFormatOpenAIResponses} {
+		t.Run(string(target), func(t *testing.T) {
+			_, err := ConvertResponse(t.Context(), nil, target, response)
+			require.ErrorContains(t, err, "MALFORMED_FUNCTION_CALL")
+			state, err := NewResponseStreamState(types.RelayFormatGemini, target, ResponseStreamOptions{})
+			require.NoError(t, err)
+			_, err = ConvertStreamResponseChunk(t.Context(), nil, state, response)
+			require.ErrorContains(t, err, "MALFORMED_FUNCTION_CALL")
+		})
+	}
+}
+
+func convertedFinishReason(t *testing.T, value any) string {
+	t.Helper()
+	switch response := value.(type) {
+	case *dto.OpenAITextResponse:
+		require.Len(t, response.Choices, 1)
+		return response.Choices[0].FinishReason
+	case dto.ChatCompletionsStreamResponse:
+		for _, choice := range response.Choices {
+			if choice.FinishReason != nil {
+				return *choice.FinishReason
+			}
+		}
+	case *dto.ClaudeResponse:
+		if response.Delta != nil && response.Delta.StopReason != nil {
+			return *response.Delta.StopReason
+		}
+		return response.StopReason
+	case *dto.GeminiChatResponse:
+		for _, candidate := range response.Candidates {
+			if candidate.FinishReason != nil {
+				return *candidate.FinishReason
+			}
+		}
+	default:
+		require.FailNow(t, "unexpected response type", "%T", value)
+	}
+	return ""
+}
+
 func TestLookupBuiltinResponseConverters(t *testing.T) {
 	tests := []struct {
 		lookupID string

@@ -92,10 +92,7 @@ func FromStream(event *dto.ResponsesStreamResponse, state *ir.StreamState) ([]ir
 		if event.Item == nil || event.Item.Type != "function_call" {
 			return events, nil
 		}
-		idx, opened := state.EnsureTool(sourceIndex, event.Item.CallId, event.Item.Name)
-		if tool := state.ToolCalls[idx]; tool != nil && tool.ProviderItemID == "" {
-			tool.ProviderItemID = event.Item.ID
-		}
+		_, opened := ensureResponsesSourceTool(state, sourceIndex, event.Item)
 		return append(events, opened...), nil
 	case "response.function_call_arguments.delta":
 		idx, opened := state.EnsureTool(sourceIndex, "", "")
@@ -118,7 +115,15 @@ func FromStream(event *dto.ResponsesStreamResponse, state *ir.StreamState) ([]ir
 		}
 		return append(events, itemEvents...), nil
 	case "response.completed", "response.done", "response.incomplete":
+		status := strings.TrimPrefix(event.Type, "response.")
+		reason := ""
 		if event.Response != nil {
+			if len(event.Response.Status) > 0 {
+				status = kitutil.JsonRawMessageToString(event.Response.Status)
+			}
+			if event.Response.IncompleteDetails != nil {
+				reason = event.Response.IncompleteDetails.Reason
+			}
 			for outputIndex := range event.Response.Output {
 				itemEvents, err := completedResponsesItemEvents(state, outputIndex, &event.Response.Output[outputIndex])
 				if err != nil {
@@ -134,9 +139,9 @@ func FromStream(event *dto.ResponsesStreamResponse, state *ir.StreamState) ([]ir
 				})
 			}
 		}
-		finish := ir.FinishStop
-		if event.Type == "response.incomplete" {
-			finish = ir.FinishLength
+		finish := ir.FinishFromResponses(status, reason)
+		if finish == ir.FinishStop && len(state.ToolIndex) > 0 {
+			finish = ir.FinishTool
 		}
 		state.SetFinish(finish, "")
 		return events, nil
@@ -186,11 +191,8 @@ func completedResponsesItemEvents(state *ir.StreamState, sourceIndex int, item *
 		}
 		return completedResponsesItemEvents(state, sourceIndex, &converted)
 	case "function_call":
-		idx, opened := state.EnsureTool(sourceIndex, item.CallId, item.Name)
+		idx, opened := ensureResponsesSourceTool(state, sourceIndex, item)
 		events = append(events, opened...)
-		if len(opened) == 0 && item.Name != "" {
-			events = append(events, ir.Event{Kind: ir.EventBlockDelta, Index: idx, Block: &ir.Block{Kind: ir.BlockKindToolUse, ToolUse: &ir.ToolUseBlock{ID: state.ToolCalls[idx].ID, Name: item.Name}}, Delta: &ir.BlockDelta{}})
-		}
 		arguments := item.ArgumentsString()
 		if delta := suffixDelta(state.ResponsesSourceArguments[sourceIndex], arguments); delta != "" {
 			state.ResponsesSourceArguments = appendSourceFragment(state.ResponsesSourceArguments, sourceIndex, delta)
@@ -199,6 +201,25 @@ func completedResponsesItemEvents(state *ir.StreamState, sourceIndex int, item *
 		events = append(events, state.StopBlock(idx)...)
 	}
 	return events, nil
+}
+
+func ensureResponsesSourceTool(state *ir.StreamState, sourceIndex int, item *dto.ResponsesOutput) (int, []ir.Event) {
+	index, exists := state.ToolIndex[sourceIndex]
+	if !exists {
+		return state.EnsureTool(sourceIndex, item.CallId, item.Name)
+	}
+	// Completion snapshots repeat the same metadata. Only a previously missing
+	// name is a new delta; the call ID was already emitted when the block opened.
+	tool := state.ToolCalls[index]
+	if tool.Name != "" || item.Name == "" {
+		return index, nil
+	}
+	tool.Name = item.Name
+	return index, []ir.Event{{
+		Kind: ir.EventBlockDelta, Index: index,
+		Block: &ir.Block{Kind: ir.BlockKindToolUse, ToolUse: &ir.ToolUseBlock{Name: item.Name}},
+		Delta: &ir.BlockDelta{},
+	}}
 }
 
 func ensureResponsesSourceBlock(state *ir.StreamState, sourceIndex int, kind ir.BlockKind) (int, []ir.Event) {

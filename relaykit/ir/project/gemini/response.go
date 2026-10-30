@@ -17,6 +17,9 @@ func FromResponse(resp *dto.GeminiChatResponse) (*ir.Response, error) {
 		if candidate.FinishReason != nil {
 			out.ProviderFinish = *candidate.FinishReason
 			out.Finish = ir.FinishFromGemini(*candidate.FinishReason)
+			if out.Finish == ir.FinishError {
+				return nil, fmt.Errorf("upstream Gemini response failed: %s", *candidate.FinishReason)
+			}
 		}
 		blocks, err := blocksFromGeminiParts(candidate.Content.Parts)
 		if err != nil {

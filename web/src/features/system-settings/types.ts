@@ -39,6 +39,7 @@ export type ContentModerationSettings = {
   base_url: string
   model: string
   block_severity?: 'critical' | 'high' | 'medium' | 'low'
+  score_thresholds?: { medium: number; high: number; critical: number }
   preflight_enabled?: boolean
   postflight_enabled?: boolean
   failure_mode?: 'open' | 'closed'

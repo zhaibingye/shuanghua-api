@@ -70,12 +70,18 @@ import {
 } from '../api'
 import {
   SettingsForm,
+  SettingsFormGrid,
   SettingsSwitchContent,
   SettingsSwitchItem,
 } from '../components/settings-form-layout'
 import { SettingsPageFormActions } from '../components/settings-page-context'
 import { SettingsSection } from '../components/settings-section'
 import type { ModerationKeyTestResult } from '../types'
+
+const scoreThresholdSchema = z
+  .number({ error: 'Moderation score thresholds must be between 0 and 1' })
+  .min(0, 'Moderation score thresholds must be between 0 and 1')
+  .max(1, 'Moderation score thresholds must be between 0 and 1')
 
 const contentModerationSchema = z.object({
   enabled: z.boolean(),
@@ -86,6 +92,22 @@ const contentModerationSchema = z.object({
   api_key: z.string().max(32768),
   model: z.string().max(128),
   block_severity: z.enum(['critical', 'high', 'medium', 'low']),
+  score_thresholds: z
+    .object({
+      medium: scoreThresholdSchema,
+      high: scoreThresholdSchema,
+      critical: scoreThresholdSchema,
+    })
+    .refine((value) => value.medium < value.high, {
+      path: ['high'],
+      message:
+        'Moderation score thresholds must satisfy medium < high < critical',
+    })
+    .refine((value) => value.high < value.critical, {
+      path: ['critical'],
+      message:
+        'Moderation score thresholds must satisfy medium < high < critical',
+    }),
   preflight_enabled: z.boolean(),
   postflight_enabled: z.boolean(),
   failure_mode: z.enum(['open', 'closed']),
@@ -109,6 +131,7 @@ const fallbackValues: ContentModerationFormValues = {
   api_key: '',
   model: 'omni-moderation-latest',
   block_severity: 'critical',
+  score_thresholds: { medium: 0.5, high: 0.75, critical: 0.9 },
   preflight_enabled: true,
   postflight_enabled: false,
   failure_mode: 'closed',
@@ -171,6 +194,8 @@ export function ContentModerationSection(props: ContentModerationSectionProps) {
       api_key: '',
       model: data.model || 'omni-moderation-latest',
       block_severity: data.block_severity ?? 'critical',
+      score_thresholds:
+        data.score_thresholds ?? fallbackValues.score_thresholds,
       preflight_enabled: data.preflight_enabled ?? true,
       postflight_enabled: data.postflight_enabled ?? false,
       failure_mode: data.failure_mode ?? 'closed',
@@ -699,15 +724,15 @@ export function ContentModerationSection(props: ContentModerationSectionProps) {
                     items={[
                       {
                         value: 'critical',
-                        label: t('Critical (score ≥ 0.90, default)'),
+                        label: t('Critical risk'),
                       },
                       {
                         value: 'high',
-                        label: t('High (score ≥ 0.75)'),
+                        label: t('High risk'),
                       },
                       {
                         value: 'medium',
-                        label: t('Medium (score ≥ 0.50)'),
+                        label: t('Medium risk'),
                       },
                       {
                         value: 'low',
@@ -724,14 +749,10 @@ export function ContentModerationSection(props: ContentModerationSectionProps) {
                     </FormControl>
                     <SelectContent alignItemWithTrigger={false}>
                       <SelectItem value='critical'>
-                        {t('Critical (score ≥ 0.90, default)')}
+                        {t('Critical risk')}
                       </SelectItem>
-                      <SelectItem value='high'>
-                        {t('High (score ≥ 0.75)')}
-                      </SelectItem>
-                      <SelectItem value='medium'>
-                        {t('Medium (score ≥ 0.50)')}
-                      </SelectItem>
+                      <SelectItem value='high'>{t('High risk')}</SelectItem>
+                      <SelectItem value='medium'>{t('Medium risk')}</SelectItem>
                       <SelectItem value='low'>
                         {t('Low (any violation score)')}
                       </SelectItem>
@@ -745,6 +766,49 @@ export function ContentModerationSection(props: ContentModerationSectionProps) {
                 </FormItem>
               )}
             />
+
+            <SettingsFormGrid className='lg:grid-cols-3'>
+              {(
+                [
+                  { name: 'medium', label: t('Medium risk score threshold') },
+                  { name: 'high', label: t('High risk score threshold') },
+                  {
+                    name: 'critical',
+                    label: t('Critical risk score threshold'),
+                  },
+                ] as const
+              ).map((threshold) => (
+                <FormField
+                  key={threshold.name}
+                  control={form.control}
+                  name={`score_thresholds.${threshold.name}`}
+                  render={({ field }) => (
+                    <FormItem>
+                      <FormLabel>{threshold.label}</FormLabel>
+                      <FormControl>
+                        <Input
+                          {...field}
+                          type='number'
+                          min={0}
+                          max={1}
+                          step='any'
+                          value={Number.isNaN(field.value) ? '' : field.value}
+                          onChange={(event) =>
+                            field.onChange(event.target.valueAsNumber)
+                          }
+                        />
+                      </FormControl>
+                      <FormMessage />
+                    </FormItem>
+                  )}
+                />
+              ))}
+            </SettingsFormGrid>
+            <p className='text-muted-foreground text-sm'>
+              {t(
+                'Scores range from 0 to 1. Thresholds must increase from medium to high to critical. A score equal to a threshold is included.'
+              )}
+            </p>
 
             <FormField
               control={form.control}

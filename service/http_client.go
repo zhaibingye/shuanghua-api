@@ -310,75 +310,33 @@ func configureProxyTransport(transport *http.Transport, proxyURL *url.URL) error
 	}
 }
 
-func newTransportFactory(proxyURL *url.URL, tlsConfig *tls.Config) (func() *http.Transport, error) {
-	// Validate proxy configuration once before creating shard transports.
-	if proxyURL != nil {
-		probe := newRelayHTTPTransport()
-		if err := configureProxyTransport(probe, proxyURL); err != nil {
-			return nil, err
-		}
-	}
-	return func() *http.Transport {
-		transport := newRelayHTTPTransport()
-		if proxyURL != nil {
-			_ = configureProxyTransport(transport, proxyURL)
-		} else {
-			transport.Proxy = http.ProxyFromEnvironment
-		}
-		if tlsConfig != nil {
-			transport.TLSClientConfig = tlsConfig.Clone()
-		}
-		return transport
-	}, nil
-}
-
-func newHTTPClientFromPolicy(policy HTTPTransportPolicy, proxyURL *url.URL, tlsConfig *tls.Config) (*http.Client, error) {
+// newHTTPClientFromTransport applies policy once, then clones the configured
+// transport for independent connection pools. Proxy validation happens before
+// this step so no shard can silently lose its proxy configuration.
+func newHTTPClientFromTransport(policy HTTPTransportPolicy, transport *http.Transport) *http.Client {
 	if policy.TLSInsecureSkipVerify {
-		tlsConfig = common.InsecureTLSConfig
+		transport.TLSClientConfig = common.InsecureTLSConfig.Clone()
 	}
-	factory, err := newTransportFactory(proxyURL, tlsConfig)
-	if err != nil {
-		return nil, err
-	}
-	return newHTTPClientFromTransportFactory(policy, factory), nil
-}
-
-func newHTTPClientFromTransportFactory(policy HTTPTransportPolicy, factory func() *http.Transport) *http.Client {
-	if policy.Shards < 1 {
-		policy.Shards = 1
-	}
-	if policy.Protocol == dto.HTTPProtocolHTTP1 || policy.Shards == 1 {
-		transport := factory()
-		applyHTTPTransportPolicy(transport, policy)
+	applyHTTPTransportPolicy(transport, policy)
+	if policy.Protocol == dto.HTTPProtocolHTTP1 || policy.Shards <= 1 {
 		return newRelayHTTPClient(transport)
 	}
-	shardedFactory := func() *http.Transport {
-		transport := factory()
-		applyHTTPTransportPolicy(transport, policy)
-		return transport
-	}
-	return newRelayHTTPClient(newShardedRoundTripper(policy, shardedFactory))
+	return newRelayHTTPClient(newShardedRoundTripper(policy, transport.Clone))
 }
 
 func newDirectHTTPClient(policy HTTPTransportPolicy, tlsConfig *tls.Config) *http.Client {
-	client, err := newHTTPClientFromPolicy(policy, nil, tlsConfig)
-	if err != nil {
-		// Direct clients cannot fail proxy configuration.
-		transport := newRelayHTTPTransport()
-		applyHTTPTransportPolicy(transport, policy)
-		return newRelayHTTPClient(transport)
+	transport := newRelayHTTPTransport()
+	transport.Proxy = http.ProxyFromEnvironment
+	if tlsConfig != nil {
+		transport.TLSClientConfig = tlsConfig.Clone()
 	}
-	return client
+	return newHTTPClientFromTransport(policy, transport)
 }
 
 // newHTTPClientWithPolicyAndTLS is a test seam that builds a never-used transport
 // stack with the given policy and TLS config (for httptest certificate trust).
 func newHTTPClientWithPolicyAndTLS(policy HTTPTransportPolicy, tlsConfig *tls.Config) *http.Client {
 	return newDirectHTTPClient(policy, tlsConfig)
-}
-
-func newProxyHTTPClient(proxyURL *url.URL) (*http.Client, error) {
-	return newHTTPClientFromPolicy(defaultHTTPTransportPolicy(), proxyURL, nil)
 }
 
 // GetHttpClientWithProxy returns the default client or a cached proxy-enabled client.
@@ -410,7 +368,11 @@ func GetHttpClientWithProxySettings(rawProxyURL string, settings dto.ChannelSett
 		warnLegacyProxyURLOnce(config)
 	}
 	return proxyClients.getOrCreate(trimmedProxyURL, config, policy, func() (*http.Client, error) {
-		return newHTTPClientFromPolicy(policy, config.parsedURL, nil)
+		transport := newRelayHTTPTransport()
+		if err := configureProxyTransport(transport, config.parsedURL); err != nil {
+			return nil, err
+		}
+		return newHTTPClientFromTransport(policy, transport), nil
 	})
 }
 

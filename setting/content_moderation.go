@@ -3,6 +3,7 @@ package setting
 import (
 	"errors"
 	"fmt"
+	"math"
 	"slices"
 	"strconv"
 	"strings"
@@ -23,6 +24,7 @@ const (
 	ContentModerationPostflightOption             = "ContentModerationPostflight"
 	ContentModerationFailureModeOption            = "ContentModerationFailureMode"
 	ContentModerationBlockSeverityOption          = "ContentModerationBlockSeverity"
+	ContentModerationScoreThresholdsOption        = "ContentModerationScoreThresholds"
 	ContentModerationTimeoutSecondsOption         = "ContentModerationTimeoutSeconds"
 	ContentModerationMaxRetriesOption             = "ContentModerationMaxRetries"
 	ContentModerationAutoDisableViolationsOption  = "ContentModerationAutoDisableViolations"
@@ -66,12 +68,42 @@ type ContentModerationSetting struct {
 	APIKeys                []string
 	Model                  string
 	BlockSeverity          string
+	ScoreThresholds        *ModerationScoreThresholds
 	PreflightEnabled       bool
 	PostflightEnabled      bool
 	FailureMode            string
 	TimeoutSeconds         int
 	MaxRetries             int
 	AutoDisableViolations  int
+}
+
+type ModerationScoreThresholds struct {
+	Medium   float64 `json:"medium"`
+	High     float64 `json:"high"`
+	Critical float64 `json:"critical"`
+}
+
+func DefaultModerationScoreThresholds() ModerationScoreThresholds {
+	return ModerationScoreThresholds{Medium: 0.5, High: 0.75, Critical: 0.9}
+}
+
+func (s ModerationScoreThresholds) Validate() error {
+	for _, score := range []float64{s.Medium, s.High, s.Critical} {
+		if math.IsNaN(score) || math.IsInf(score, 0) || score < 0 || score > 1 {
+			return common.NewMessage("Moderation score thresholds must be between 0 and 1")
+		}
+	}
+	if s.Medium >= s.High || s.High >= s.Critical {
+		return common.NewMessage("Moderation score thresholds must satisfy medium < high < critical")
+	}
+	return nil
+}
+
+func (s ContentModerationSetting) ResolvedScoreThresholds() ModerationScoreThresholds {
+	if s.ScoreThresholds == nil {
+		return DefaultModerationScoreThresholds()
+	}
+	return *s.ScoreThresholds
 }
 
 func GetContentModerationSetting() ContentModerationSetting {
@@ -143,6 +175,17 @@ func GetContentModerationSetting() ContentModerationSetting {
 		failureMode = DefaultContentModerationFailureMode
 	}
 	blockSeverity := NormalizeBlockSeverity(optionString(ContentModerationBlockSeverityOption, DefaultContentModerationBlockSeverity))
+	thresholds := DefaultModerationScoreThresholds()
+	if raw := optionString(ContentModerationScoreThresholdsOption, ""); raw != "" {
+		err := common.UnmarshalJsonStr(raw, &thresholds)
+		if err == nil {
+			err = thresholds.Validate()
+		}
+		if err != nil {
+			common.SysError(common.LogText("invalid content moderation score thresholds: %v", err))
+			thresholds = DefaultModerationScoreThresholds()
+		}
+	}
 	autoDisable := optionInt(ContentModerationAutoDisableViolationsOption, DefaultContentModerationAutoDisableViolations)
 	if autoDisable < 0 || autoDisable > 1000 {
 		autoDisable = DefaultContentModerationAutoDisableViolations
@@ -159,6 +202,7 @@ func GetContentModerationSetting() ContentModerationSetting {
 		APIKeys:                apiKeys,
 		Model:                  modelName,
 		BlockSeverity:          blockSeverity,
+		ScoreThresholds:        &thresholds,
 		PreflightEnabled:       preflightEnabled,
 		PostflightEnabled:      postflightEnabled,
 		FailureMode:            failureMode,

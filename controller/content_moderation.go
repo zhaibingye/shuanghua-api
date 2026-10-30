@@ -21,41 +21,43 @@ import (
 )
 
 type contentModerationSettingsResponse struct {
-	Enabled                bool   `json:"enabled"`
-	Channels               string `json:"channels"`
-	ChannelIDs             []int  `json:"channel_ids"`
-	UserWhitelist          string `json:"user_whitelist"`
-	UserWhitelistIDs       []int  `json:"user_whitelist_ids"`
-	ViolationRetentionDays int    `json:"violation_retention_days"`
-	BaseURL                string `json:"base_url"`
-	Model                  string `json:"model"`
-	BlockSeverity          string `json:"block_severity"`
-	PreflightEnabled       bool   `json:"preflight_enabled"`
-	PostflightEnabled      bool   `json:"postflight_enabled"`
-	FailureMode            string `json:"failure_mode"`
-	TimeoutSeconds         int    `json:"timeout_seconds"`
-	MaxRetries             int    `json:"max_retries"`
-	AutoDisableViolations  int    `json:"auto_disable_violations"`
-	APIKeyConfigured       bool   `json:"api_key_configured"`
-	APIKeyCount            int    `json:"api_key_count"`
+	Enabled                bool                              `json:"enabled"`
+	Channels               string                            `json:"channels"`
+	ChannelIDs             []int                             `json:"channel_ids"`
+	UserWhitelist          string                            `json:"user_whitelist"`
+	UserWhitelistIDs       []int                             `json:"user_whitelist_ids"`
+	ViolationRetentionDays int                               `json:"violation_retention_days"`
+	BaseURL                string                            `json:"base_url"`
+	Model                  string                            `json:"model"`
+	BlockSeverity          string                            `json:"block_severity"`
+	ScoreThresholds        setting.ModerationScoreThresholds `json:"score_thresholds"`
+	PreflightEnabled       bool                              `json:"preflight_enabled"`
+	PostflightEnabled      bool                              `json:"postflight_enabled"`
+	FailureMode            string                            `json:"failure_mode"`
+	TimeoutSeconds         int                               `json:"timeout_seconds"`
+	MaxRetries             int                               `json:"max_retries"`
+	AutoDisableViolations  int                               `json:"auto_disable_violations"`
+	APIKeyConfigured       bool                              `json:"api_key_configured"`
+	APIKeyCount            int                               `json:"api_key_count"`
 }
 
 type contentModerationSettingsRequest struct {
-	Enabled                bool   `json:"enabled"`
-	Channels               string `json:"channels"`
-	UserWhitelist          string `json:"user_whitelist"`
-	ViolationRetentionDays int    `json:"violation_retention_days"`
-	BaseURL                string `json:"base_url"`
-	APIKey                 string `json:"api_key"`
-	ClearAPIKey            bool   `json:"clear_api_key"`
-	Model                  string `json:"model"`
-	BlockSeverity          string `json:"block_severity"`
-	PreflightEnabled       *bool  `json:"preflight_enabled"`
-	PostflightEnabled      *bool  `json:"postflight_enabled"`
-	FailureMode            string `json:"failure_mode"`
-	TimeoutSeconds         int    `json:"timeout_seconds"`
-	MaxRetries             int    `json:"max_retries"`
-	AutoDisableViolations  int    `json:"auto_disable_violations"`
+	Enabled                bool                               `json:"enabled"`
+	Channels               string                             `json:"channels"`
+	UserWhitelist          string                             `json:"user_whitelist"`
+	ViolationRetentionDays int                                `json:"violation_retention_days"`
+	BaseURL                string                             `json:"base_url"`
+	APIKey                 string                             `json:"api_key"`
+	ClearAPIKey            bool                               `json:"clear_api_key"`
+	Model                  string                             `json:"model"`
+	BlockSeverity          string                             `json:"block_severity"`
+	ScoreThresholds        *setting.ModerationScoreThresholds `json:"score_thresholds"`
+	PreflightEnabled       *bool                              `json:"preflight_enabled"`
+	PostflightEnabled      *bool                              `json:"postflight_enabled"`
+	FailureMode            string                             `json:"failure_mode"`
+	TimeoutSeconds         int                                `json:"timeout_seconds"`
+	MaxRetries             int                                `json:"max_retries"`
+	AutoDisableViolations  int                                `json:"auto_disable_violations"`
 }
 
 func GetContentModerationSettings(c *gin.Context) {
@@ -81,6 +83,7 @@ func GetContentModerationSettings(c *gin.Context) {
 			BaseURL:                config.BaseURL,
 			Model:                  config.Model,
 			BlockSeverity:          config.BlockSeverity,
+			ScoreThresholds:        config.ResolvedScoreThresholds(),
 			PreflightEnabled:       config.PreflightEnabled,
 			PostflightEnabled:      config.PostflightEnabled,
 			FailureMode:            config.FailureMode,
@@ -94,9 +97,24 @@ func GetContentModerationSettings(c *gin.Context) {
 }
 
 func UpdateContentModerationSettings(c *gin.Context) {
-	var request contentModerationSettingsRequest
+	currentConfig := setting.GetContentModerationSetting()
+	thresholds := currentConfig.ResolvedScoreThresholds()
+	request := contentModerationSettingsRequest{ScoreThresholds: &thresholds}
 	if err := common.DecodeJson(c.Request.Body, &request); err != nil {
 		c.JSON(http.StatusBadRequest, gin.H{"success": false, "message": "invalid content moderation settings"})
+		return
+	}
+	if request.ScoreThresholds == nil {
+		common.ApiErrorStatus(c, http.StatusBadRequest, common.NewMessage("Moderation score thresholds are required"))
+		return
+	}
+	if err := request.ScoreThresholds.Validate(); err != nil {
+		common.ApiErrorStatus(c, http.StatusBadRequest, err)
+		return
+	}
+	thresholdJSON, err := common.Marshal(request.ScoreThresholds)
+	if err != nil {
+		common.ApiErrorStatus(c, http.StatusInternalServerError, err)
 		return
 	}
 	modelName := strings.TrimSpace(request.Model)
@@ -180,7 +198,6 @@ func UpdateContentModerationSettings(c *gin.Context) {
 			return
 		}
 	}
-	currentConfig := setting.GetContentModerationSetting()
 	isClearingKey := request.ClearAPIKey && len(parsedKeys) == 0
 	if request.Enabled {
 		hasKey := (len(parsedKeys) > 0) || (!isClearingKey && currentConfig.HasAPIKey())
@@ -206,6 +223,7 @@ func UpdateContentModerationSettings(c *gin.Context) {
 		setting.ContentModerationBaseURLOption:                baseURL,
 		setting.ContentModerationModelOption:                  modelName,
 		setting.ContentModerationBlockSeverityOption:          blockSeverity,
+		setting.ContentModerationScoreThresholdsOption:        string(thresholdJSON),
 		setting.ContentModerationPreflightOption:              strconv.FormatBool(*request.PreflightEnabled),
 		setting.ContentModerationPostflightOption:             strconv.FormatBool(*request.PostflightEnabled),
 		setting.ContentModerationFailureModeOption:            failureMode,
@@ -223,9 +241,10 @@ func UpdateContentModerationSettings(c *gin.Context) {
 		c.JSON(http.StatusInternalServerError, gin.H{"success": false, "message": err.Error()})
 		return
 	}
-	recordManageAudit(c, "moderation.settings_update", map[string]interface{}{
+	recordManageAudit(c, "moderation.settings_update", map[string]any{
 		"model":                    modelName,
 		"block_severity":           blockSeverity,
+		"score_thresholds":         request.ScoreThresholds,
 		"enabled":                  request.Enabled,
 		"channels":                 normalizedChannels,
 		"user_whitelist":           normalizedUserWhitelist,

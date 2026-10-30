@@ -53,17 +53,6 @@ func irResponseConverter(from, target types.RelayFormat) ResponseConverterFunc {
 		if normalized.Model == "" {
 			normalized.Model = convmeta.UpstreamModelName(info)
 		}
-		if from == types.RelayFormatOpenAIResponses {
-			native, err := asOAIResponsesResponse(response)
-			if err != nil {
-				return nil, nil, err
-			}
-			finish, incomplete := ResponsesFinishReasonFromStatus(native)
-			if !incomplete {
-				finish = "stop"
-			}
-			normalized.Finish = ir.FinishFromChat(finish)
-		}
 		for i := range normalized.Blocks {
 			if use := normalized.Blocks[i].ToolUse; use != nil && use.ID == "" {
 				use.ID = ir.CanonicalToolCallID(normalized.ID, i, "")

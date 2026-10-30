@@ -7,6 +7,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 	"unicode/utf8"
@@ -82,7 +83,7 @@ func TestCallNativeModerationOpenAIFormat(t *testing.T) {
 	assert.True(t, result.Categories["hate"])
 	assert.Equal(t, 0.92, result.CategoryScores["hate"])
 
-	decision := moderationDecisionFromNativeResult(result, "critical")
+	decision := moderationDecisionFromNativeResult(result, setting.ContentModerationSetting{BlockSeverity: "critical"})
 	assert.Equal(t, "block", decision.Decision)
 	assert.Equal(t, "critical", decision.Severity)
 	assert.Contains(t, decision.Categories, "hate")
@@ -263,10 +264,102 @@ func TestPreflightModerationRequestSeverityThresholds(t *testing.T) {
 	highConfig := defaultConfig
 	highConfig.BlockSeverity = "high"
 
-	resetModerationFingerprintCache()
+	// A policy change must not reuse the earlier allow decision for this input.
+	assert.ErrorIs(t, PreflightModerationRequest(context.Background(), ModerationRequestContent{UserPrompt: "prompt with high risk"}, highConfig), model.ErrModerationBlocked)
 	assert.NoError(t, PreflightModerationRequest(context.Background(), ModerationRequestContent{UserPrompt: "second medium prompt"}, highConfig))
 	assert.ErrorIs(t, PreflightModerationRequest(context.Background(), ModerationRequestContent{UserPrompt: "second high prompt"}, highConfig), model.ErrModerationBlocked)
 	assert.ErrorIs(t, PreflightModerationRequest(context.Background(), ModerationRequestContent{UserPrompt: "second critical prompt"}, highConfig), model.ErrModerationBlocked)
+}
+
+func TestModerationDecisionCustomScoreThresholds(t *testing.T) {
+	config := setting.ContentModerationSetting{
+		BlockSeverity:   "critical",
+		ScoreThresholds: &setting.ModerationScoreThresholds{Medium: 0.6, High: 0.8, Critical: 0.95},
+	}
+	for _, tc := range []struct {
+		score    float64
+		severity string
+		decision string
+	}{
+		{0, "low", "allow"}, {0.599, "low", "allow"},
+		{0.6, "medium", "allow"}, {0.799, "medium", "allow"},
+		{0.8, "high", "allow"}, {0.949, "high", "allow"},
+		{0.95, "critical", "block"}, {1, "critical", "block"},
+	} {
+		t.Run(fmt.Sprintf("score_%g", tc.score), func(t *testing.T) {
+			result := openAIModerationResult{Flagged: true, Categories: map[string]bool{"violence": true}, CategoryScores: map[string]float64{"violence": tc.score}}
+			decision := moderationDecisionFromNativeResult(result, config)
+			assert.Equal(t, tc.severity, decision.Severity)
+			assert.Equal(t, tc.decision, decision.Decision)
+			assert.Equal(t, tc.score, decision.Confidence)
+		})
+	}
+	result := openAIModerationResult{Categories: map[string]bool{"violence": true, "hate": false}, CategoryScores: map[string]float64{"violence": 0.8, "hate": 0.99}}
+	decision := moderationDecisionFromNativeResult(result, config)
+	assert.Equal(t, "high", decision.Severity, "an unflagged category must not inflate violation severity")
+	assert.Equal(t, 0.8, decision.Confidence)
+	assert.Equal(t, []string{"violence"}, decision.Categories)
+}
+
+func TestPreflightModerationCacheTracksScoreThresholdsAndModel(t *testing.T) {
+	resetModerationFingerprintCache()
+	t.Cleanup(resetModerationFingerprintCache)
+	var calls atomic.Int32
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		calls.Add(1)
+		// A category flag is authoritative even if a compatible provider's
+		// overall flag is inconsistent with it.
+		_, _ = w.Write([]byte(`{"results":[{"flagged":false,"categories":{"violence":true},"category_scores":{"violence":0.95}}]}`))
+	}))
+	defer server.Close()
+	config := setting.ContentModerationSetting{
+		PreflightEnabled: true, BaseURL: server.URL, Model: "omni-moderation-latest", APIKey: "test-key",
+		BlockSeverity: "critical", TimeoutSeconds: 2, MaxRetries: 1,
+		ScoreThresholds: &setting.ModerationScoreThresholds{Medium: 0.5, High: 0.8, Critical: 0.96},
+	}
+	content := ModerationRequestContent{UserPrompt: "policy-sensitive input"}
+	for range 2 {
+		require.NoError(t, PreflightModerationRequest(context.Background(), content, config))
+	}
+	assert.EqualValues(t, 1, calls.Load())
+	config.ScoreThresholds = &setting.ModerationScoreThresholds{Medium: 0.5, High: 0.8, Critical: 0.95}
+	for range 2 {
+		require.ErrorIs(t, PreflightModerationRequest(context.Background(), content, config), model.ErrModerationBlocked)
+	}
+	assert.EqualValues(t, 2, calls.Load())
+	config.Model = "custom-moderation-alias"
+	require.ErrorIs(t, PreflightModerationRequest(context.Background(), content, config), model.ErrModerationBlocked)
+	assert.EqualValues(t, 3, calls.Load())
+}
+
+func TestModerationProviderScoreNormalization(t *testing.T) {
+	for _, tc := range []struct {
+		name    string
+		results string
+		invalid bool
+	}{
+		{name: "legacy scores", results: `[{"flagged":true,"categories":{"violence":true},"scores":{"violence":0.95}}]`},
+		{name: "multiple results", results: `[{"flagged":false,"categories":{"violence":false},"category_scores":{"violence":0.1}},{"flagged":true,"categories":{"violence":true},"category_scores":{"violence":0.95}}]`},
+		{name: "negative score", results: `[{"flagged":true,"category_scores":{"violence":-0.1}}]`, invalid: true},
+		{name: "score above one", results: `[{"flagged":true,"category_scores":{"violence":1.1}}]`, invalid: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				_, _ = fmt.Fprintf(w, `{"results":%s}`, tc.results)
+			}))
+			defer server.Close()
+			config := setting.ContentModerationSetting{BaseURL: server.URL, Model: "omni-moderation-latest", TimeoutSeconds: 2, MaxRetries: 1}
+			result, _, err := callNativeModeration(context.Background(), config, "input")
+			if tc.invalid {
+				require.ErrorContains(t, err, "score outside [0, 1]")
+				return
+			}
+			require.NoError(t, err)
+			assert.True(t, result.Flagged)
+			assert.True(t, result.Categories["violence"])
+			assert.Equal(t, 0.95, result.CategoryScores["violence"])
+		})
+	}
 }
 
 func TestSanitizeModerationTextRuneSafe(t *testing.T) {
@@ -313,7 +406,7 @@ func TestCallModerationContentMultiModal(t *testing.T) {
 	result, _, err := callModerationContent(context.Background(), setting.ContentModerationSetting{
 		BaseURL:        server.URL + "/v1",
 		APIKey:         "test-key",
-		Model:          "omni-moderation-latest",
+		Model:          "custom-moderation-alias",
 		TimeoutSeconds: 5,
 		MaxRetries:     1,
 	}, ModerationRequestContent{

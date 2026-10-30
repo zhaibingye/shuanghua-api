@@ -3,6 +3,7 @@ package helper
 import (
 	"bufio"
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -11,6 +12,8 @@ import (
 	"sync"
 	"sync/atomic"
 	"testing"
+	"testing/iotest"
+	"testing/synctest"
 	"time"
 
 	"github.com/QuantumNous/new-api/constant"
@@ -582,4 +585,136 @@ func TestNewStreamScannerCallerLimit(t *testing.T) {
 	require.True(t, scanner.Scan())
 	assert.Equal(t, "data: ok", scanner.Text())
 	require.NoError(t, scanner.Err())
+}
+
+func TestStreamScannerHandlerBufferedCompletionDoesNotMaskHandlerFailure(t *testing.T) {
+	for _, ending := range []string{"", "data: [DONE]\n"} {
+		t.Run(fmt.Sprintf("ending=%q", ending), func(t *testing.T) {
+			synctest.Test(t, func(t *testing.T) {
+				c, resp, info := setupStreamTest(t, strings.NewReader("data: first\ndata: second\n"+ending))
+				failure := errors.New("cannot process first chunk")
+				var received []string
+				StreamScannerHandler(c, resp, info, func(data string, sr *StreamResult) {
+					// Let upstream finish while this callback is still processing.
+					synctest.Wait()
+					received = append(received, data)
+					sr.Stop(failure)
+				})
+				assert.Equal(t, []string{"first"}, received)
+				assert.Equal(t, relaycommon.StreamEndReasonHandlerStop, info.StreamStatus.EndReason)
+				assert.ErrorIs(t, info.StreamStatus.EndError, failure)
+			})
+		})
+	}
+}
+
+func TestStreamScannerHandlerPreservesDonePrefixPayload(t *testing.T) {
+	c, resp, info := setupStreamTest(t, strings.NewReader("data: [DONE] is text\ndata: next\ndata: [DONE]\ndata: ignored\n"))
+	var received []string
+	StreamScannerHandler(c, resp, info, func(data string, sr *StreamResult) {
+		received = append(received, data)
+	})
+	assert.Equal(t, []string{"[DONE] is text", "next"}, received)
+	assert.Equal(t, relaycommon.StreamEndReasonDone, info.StreamStatus.EndReason)
+}
+
+func TestStreamScannerHandlerReadErrorAfterData(t *testing.T) {
+	failure := errors.New("upstream read failed")
+	body := io.MultiReader(strings.NewReader("data: first\n"), iotest.ErrReader(failure))
+	c, resp, info := setupStreamTest(t, body)
+	var received []string
+	StreamScannerHandler(c, resp, info, func(data string, sr *StreamResult) {
+		received = append(received, data)
+	})
+	assert.Equal(t, []string{"first"}, received)
+	assert.Equal(t, relaycommon.StreamEndReasonScannerErr, info.StreamStatus.EndReason)
+	assert.ErrorIs(t, info.StreamStatus.EndError, failure)
+}
+
+func TestStreamScannerHandlerFailureClosesBlockedUpstream(t *testing.T) {
+	for _, failure := range []string{"stop", "panic", "cancel"} {
+		t.Run(failure, func(t *testing.T) {
+			synctest.Test(t, func(t *testing.T) {
+				pr, pw := io.Pipe()
+				t.Cleanup(func() { _ = pr.Close(); _ = pw.Close() })
+				c, resp, info := setupStreamTest(t, pr)
+				resp.Body = pr
+				ctx, cancel := context.WithCancel(c.Request.Context())
+				defer cancel()
+				c.Request = c.Request.WithContext(ctx)
+				go func() { _, _ = io.WriteString(pw, "data: first\ndata: queued\n") }()
+				var received []string
+				want := relaycommon.StreamEndReasonHandlerStop
+				StreamScannerHandler(c, resp, info, func(data string, sr *StreamResult) {
+					received = append(received, data)
+					synctest.Wait()
+					switch failure {
+					case "panic":
+						want = relaycommon.StreamEndReasonPanic
+						panic("handler failure")
+					case "cancel":
+						want = relaycommon.StreamEndReasonClientGone
+						cancel()
+						synctest.Wait()
+						// Disconnect must close upstream before this callback returns.
+						_, err := io.WriteString(pw, "data: after disconnect\n")
+						assert.ErrorIs(t, err, io.ErrClosedPipe)
+					default:
+						sr.Stop(errors.New("handler failure"))
+					}
+				})
+				assert.Equal(t, []string{"first"}, received)
+				assert.Equal(t, want, info.StreamStatus.EndReason)
+				_, err := io.WriteString(pw, "data: after failure\n")
+				require.ErrorIs(t, err, io.ErrClosedPipe)
+			})
+		})
+	}
+}
+
+type streamFailingWriter struct {
+	gin.ResponseWriter
+	err error
+}
+
+func (w streamFailingWriter) Write([]byte) (int, error) {
+	return 0, w.err
+}
+
+func TestStreamScannerHandlerPingFailureClosesUpstream(t *testing.T) {
+	setting := operation_setting.GetGeneralSetting()
+	previous := *setting
+	setting.PingIntervalEnabled = true
+	setting.PingIntervalSeconds = 1
+	t.Cleanup(func() { *setting = previous })
+	synctest.Test(t, func(t *testing.T) {
+		pr, pw := io.Pipe()
+		t.Cleanup(func() { _ = pr.Close(); _ = pw.Close() })
+		c, resp, info := setupStreamTest(t, pr)
+		resp.Body = pr
+		failure := errors.New("client write failed")
+		c.Writer = streamFailingWriter{ResponseWriter: c.Writer, err: failure}
+		StreamScannerHandler(c, resp, info, func(data string, sr *StreamResult) {
+			t.Error("no data was sent upstream")
+		})
+		assert.Equal(t, relaycommon.StreamEndReasonPingFail, info.StreamStatus.EndReason)
+		assert.ErrorIs(t, info.StreamStatus.EndError, failure)
+		_, err := io.WriteString(pw, "data: after ping failure\n")
+		require.ErrorIs(t, err, io.ErrClosedPipe)
+	})
+}
+
+type streamPanicReader struct{}
+
+func (streamPanicReader) Read([]byte) (int, error) {
+	panic("upstream reader failure")
+}
+
+func TestStreamScannerHandlerReadPanic(t *testing.T) {
+	c, resp, info := setupStreamTest(t, streamPanicReader{})
+	StreamScannerHandler(c, resp, info, func(data string, sr *StreamResult) {
+		t.Error("no data was read upstream")
+	})
+	assert.Equal(t, relaycommon.StreamEndReasonPanic, info.StreamStatus.EndReason)
+	assert.ErrorContains(t, info.StreamStatus.EndError, "upstream reader failure")
 }

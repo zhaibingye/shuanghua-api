@@ -23,13 +23,13 @@ func messagesFromResponsesInput(raw json.RawMessage) ([]ir.Message, error) {
 	}
 	items, ok := jsonx.AsSlice(raw)
 	if !ok {
-		return nil, nil
+		return nil, fmt.Errorf("responses input: expected a string or an array of items")
 	}
 	out := make([]ir.Message, 0, len(items))
-	for _, item := range items {
+	for index, item := range items {
 		msg, err := messageFromResponsesItem(item)
 		if err != nil {
-			return nil, err
+			return nil, fmt.Errorf("responses input[%d]: %w", index, err)
 		}
 		out = append(out, msg)
 	}
@@ -39,11 +39,7 @@ func messagesFromResponsesInput(raw json.RawMessage) ([]ir.Message, error) {
 func messageFromResponsesItem(item any) (ir.Message, error) {
 	m, ok := jsonx.AsMap(item)
 	if !ok {
-		raw, err := jsonx.Marshal(item)
-		if err != nil {
-			return ir.Message{}, err
-		}
-		return ir.Message{Role: ir.RoleUser, Blocks: []ir.Block{ir.Raw("", raw)}}, nil
+		return ir.Message{}, fmt.Errorf("expected an object, got %T", item)
 	}
 	typ := jsonx.MapString(m, "type")
 	full, err := jsonx.Marshal(m)

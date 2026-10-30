@@ -346,25 +346,29 @@ func TestChannelTLSInsecureSkipVerifyAcceptsUntrustedUpstream(t *testing.T) {
 	}{
 		{name: "default direct verifies", settings: dto.ChannelSettings{}},
 		{name: "default proxy verifies", proxy: connectProxy.URL, settings: dto.ChannelSettings{}},
+		{name: "sharded proxy verifies", proxy: connectProxy.URL, settings: dto.ChannelSettings{HTTP2ConnectionShards: 3}},
 		{name: "http1 verifies", settings: dto.ChannelSettings{HTTPProtocol: dto.HTTPProtocolHTTP1}},
 		{name: "skip direct", settings: skip, wantProto: 2},
 		{name: "skip proxy", proxy: connectProxy.URL, settings: skip, wantProto: 2},
 		{name: "skip http1", settings: dto.ChannelSettings{HTTPProtocol: dto.HTTPProtocolHTTP1, TLSInsecureSkipVerify: true}, wantProto: 1},
 		{name: "skip sharded", settings: dto.ChannelSettings{HTTP2ConnectionShards: 3, TLSInsecureSkipVerify: true}, wantProto: 2},
+		{name: "skip sharded proxy", proxy: connectProxy.URL, settings: dto.ChannelSettings{HTTP2ConnectionShards: 3, TLSInsecureSkipVerify: true}, wantProto: 2},
 	}
 	for _, tc := range testCases {
 		t.Run(tc.name, func(t *testing.T) {
 			client, err := GetHttpClientWithProxySettings(tc.proxy, tc.settings)
 			require.NoError(t, err)
-			resp, err := client.Get(upstream.URL)
-			if tc.wantProto == 0 {
-				var verifyErr *tls.CertificateVerificationError
-				require.ErrorAs(t, err, &verifyErr)
-				return
+			for range max(1, tc.settings.HTTP2ConnectionShards) {
+				resp, err := client.Get(upstream.URL)
+				if tc.wantProto == 0 {
+					var verifyErr *tls.CertificateVerificationError
+					require.ErrorAs(t, err, &verifyErr)
+					continue
+				}
+				require.NoError(t, err)
+				assert.Equal(t, tc.wantProto, resp.ProtoMajor)
+				drainClose(t, resp)
 			}
-			require.NoError(t, err)
-			assert.Equal(t, tc.wantProto, resp.ProtoMajor)
-			drainClose(t, resp)
 		})
 	}
 }

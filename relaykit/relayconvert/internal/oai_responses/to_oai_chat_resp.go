@@ -6,6 +6,7 @@ import (
 	"strings"
 
 	"github.com/QuantumNous/new-api/relaykit/dto"
+	"github.com/QuantumNous/new-api/relaykit/ir"
 	kitutil "github.com/QuantumNous/new-api/relaykit/relayconvert/kitutil"
 )
 
@@ -50,10 +51,7 @@ func ResponsesFinishReasonFromStatus(resp *dto.OpenAIResponsesResponse) (string,
 	if resp.IncompleteDetails != nil {
 		reason = strings.TrimSpace(resp.IncompleteDetails.Reason)
 	}
-	if reason == responsesIncompleteReasonContentFilter {
-		return "content_filter", true
-	}
-	return "length", true
+	return ir.FinishFromResponses(status, reason).ToChatFinishReason(), true
 }
 
 func ResponsesResponseToChatCompletionsResponse(resp *dto.OpenAIResponsesResponse, id string) (*dto.OpenAITextResponse, *dto.Usage, error) {

@@ -18,6 +18,11 @@ func FromResponse(resp *dto.OpenAIResponsesResponse) (*ir.Response, error) {
 		ID:    resp.ID,
 		Model: resp.Model,
 	}
+	reason := ""
+	if resp.IncompleteDetails != nil {
+		reason = resp.IncompleteDetails.Reason
+	}
+	out.Finish = ir.FinishFromResponses(kitutil.JsonRawMessageToString(resp.Status), reason)
 	for _, item := range resp.Output {
 		blocks, err := blocksFromResponsesOutput(item)
 		if err != nil {

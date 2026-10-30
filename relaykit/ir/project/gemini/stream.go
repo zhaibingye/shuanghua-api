@@ -83,6 +83,10 @@ func FromStream(resp *dto.GeminiChatResponse, state *ir.StreamState) ([]ir.Event
 	}
 	if finish != "" {
 		finishKind := ir.FinishFromGemini(finish)
+		if finishKind == ir.FinishError {
+			state.Done = true
+			return nil, fmt.Errorf("upstream Gemini stream failed: %s", finish)
+		}
 		if state.GeminiToolCount > 0 && finishKind == ir.FinishStop {
 			finishKind = ir.FinishTool
 		}

@@ -261,8 +261,62 @@ describe('content moderation settings', () => {
         mocks.updateContentModerationSettings.mock.calls[0]?.[0]
       ).toMatchObject({
         block_severity: 'critical',
+        score_thresholds: { medium: 0.5, high: 0.75, critical: 0.9 },
       })
     })
+    actionsContainer.remove()
+  })
+
+  test('loads custom thresholds and saves a critical threshold of 0.95', async () => {
+    const { actionsContainer } = renderSettings({
+      ...settingsResponse,
+      data: {
+        ...settingsResponse.data,
+        score_thresholds: { medium: 0.6, high: 0.8, critical: 0.97 },
+      },
+    })
+    const critical = await screen.findByRole('spinbutton', {
+      name: 'Critical risk score threshold',
+    })
+    expect(critical).toHaveValue(0.97)
+    fireEvent.change(critical, { target: { value: '0.95' } })
+    fireEvent.click(
+      screen.getByRole('button', { name: 'Save content moderation settings' })
+    )
+    await waitFor(() =>
+      expect(
+        mocks.updateContentModerationSettings.mock.calls[0]?.[0]
+      ).toMatchObject({
+        score_thresholds: { medium: 0.6, high: 0.8, critical: 0.95 },
+      })
+    )
+    actionsContainer.remove()
+  })
+
+  test.each([
+    [
+      'equal thresholds',
+      '0.75',
+      'Moderation score thresholds must satisfy medium < high < critical',
+    ],
+    [
+      'above one',
+      '1.01',
+      'Moderation score thresholds must be between 0 and 1',
+    ],
+    ['empty', '', 'Moderation score thresholds must be between 0 and 1'],
+  ])('rejects %s before submitting thresholds', async (_, value, message) => {
+    const { actionsContainer } = renderSettings()
+    const critical = await screen.findByRole('spinbutton', {
+      name: 'Critical risk score threshold',
+    })
+    fireEvent.change(critical, { target: { value } })
+    fireEvent.click(
+      screen.getByRole('button', { name: 'Save content moderation settings' })
+    )
+    expect(await screen.findByText(message)).toBeInTheDocument()
+    expect(critical).toHaveAttribute('aria-invalid', 'true')
+    expect(mocks.updateContentModerationSettings).not.toHaveBeenCalled()
     actionsContainer.remove()
   })
 })

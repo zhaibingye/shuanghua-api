@@ -14,6 +14,19 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
+func TestResponsesConversionRejectsInvalidInputShape(t *testing.T) {
+	for _, input := range []string{`{"role":"user","content":"hello"}`, `42`, `true`, `["hello"]`, `[null]`} {
+		t.Run(input, func(t *testing.T) {
+			for _, target := range []types.RelayFormat{types.RelayFormatOpenAI, types.RelayFormatClaude, types.RelayFormatGemini} {
+				_, err := ConvertRequest(t.Context(), nil, target, &dto.OpenAIResponsesRequest{
+					Model: "test-model", Input: []byte(input), MaxOutputTokens: lo.ToPtr(uint(1024)),
+				})
+				require.ErrorContains(t, err, "input", target)
+			}
+		})
+	}
+}
+
 func TestClaudeMessagesToOpenAIChatPreservesAssistantTextWithToolCalls(t *testing.T) {
 	text := "I will look that up."
 	request := dto.ClaudeRequest{

@@ -18,7 +18,6 @@ import (
 
 func TestDoRequestReturnsUpstreamRedirectWithoutFollowing(t *testing.T) {
 	service.InitHttpClient()
-	gin.SetMode(gin.TestMode)
 	sharedClient := service.GetHttpClient()
 	require.NotNil(t, sharedClient)
 	require.NotNil(t, sharedClient.CheckRedirect)

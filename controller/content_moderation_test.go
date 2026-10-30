@@ -4,13 +4,17 @@ import (
 	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"os"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
 	"github.com/QuantumNous/new-api/common"
 	"github.com/QuantumNous/new-api/constant"
+	"github.com/QuantumNous/new-api/i18n"
 	"github.com/QuantumNous/new-api/model"
+	relaycommon "github.com/QuantumNous/new-api/relay/common"
 	"github.com/QuantumNous/new-api/relaykit/types"
 	"github.com/QuantumNous/new-api/service"
 	"github.com/QuantumNous/new-api/setting"
@@ -18,26 +22,58 @@ import (
 	"github.com/glebarez/sqlite"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+	"gorm.io/driver/mysql"
+	"gorm.io/driver/postgres"
 	"gorm.io/gorm"
 )
 
 func setupModerationTestDB(t *testing.T) {
+	t.Helper()
 	previousRedisEnabled := common.RedisEnabled
 	common.RedisEnabled = false
 	t.Cleanup(func() {
 		common.RedisEnabled = previousRedisEnabled
 	})
 
-	db, err := gorm.Open(sqlite.Open(fmt.Sprintf("file:moderation_test_%d?mode=memory&cache=shared", time.Now().UnixNano())), &gorm.Config{})
+	var dialector gorm.Dialector = sqlite.Open(fmt.Sprintf("file:moderation_test_%d?mode=memory&cache=shared", time.Now().UnixNano()))
+	dbType := common.DatabaseTypeSQLite
+	switch os.Getenv("MODERATION_TEST_DATABASE") {
+	case "", "sqlite":
+	case "mysql":
+		require.NotEmpty(t, strings.TrimSpace(os.Getenv("MODERATION_TEST_DSN")))
+		dialector = mysql.Open(os.Getenv("MODERATION_TEST_DSN"))
+		dbType = common.DatabaseTypeMySQL
+	case "postgres":
+		require.NotEmpty(t, strings.TrimSpace(os.Getenv("MODERATION_TEST_DSN")))
+		dialector = postgres.Open(os.Getenv("MODERATION_TEST_DSN"))
+		dbType = common.DatabaseTypePostgreSQL
+	default:
+		t.Fatalf("unsupported moderation test database: %q", os.Getenv("MODERATION_TEST_DATABASE"))
+	}
+	db, err := gorm.Open(dialector, &gorm.Config{})
 	require.NoError(t, err)
+	connection, err := db.DB()
+	require.NoError(t, err)
+	t.Cleanup(func() { require.NoError(t, connection.Close()) })
 	originalDB := model.DB
 	originalLOGDB := model.LOG_DB
+	originalDBType, originalLogDBType := common.MainDatabaseType(), common.LogDatabaseType()
+	common.OptionMapRWMutex.RLock()
+	originalOptions := common.OptionMap
+	common.OptionMapRWMutex.RUnlock()
 	t.Cleanup(func() {
 		model.DB = originalDB
 		model.LOG_DB = originalLOGDB
+		common.SetMainDatabaseType(originalDBType)
+		common.SetLogDatabaseType(originalLogDBType)
+		common.OptionMapRWMutex.Lock()
+		common.OptionMap = originalOptions
+		common.OptionMapRWMutex.Unlock()
 	})
 	model.DB = db
 	model.LOG_DB = db
+	common.SetMainDatabaseType(dbType)
+	common.SetLogDatabaseType(dbType)
 	require.NoError(t, db.AutoMigrate(
 		&model.Option{},
 		&model.Log{},
@@ -52,7 +88,7 @@ func setupModerationTestDB(t *testing.T) {
 		&model.ModerationAction{},
 		&model.ModerationAccountState{},
 	))
-	_ = db.Create(&model.User{Id: 1, Username: "admin"}).Error
+	require.NoError(t, db.FirstOrCreate(&model.User{Id: 1, Username: "admin"}, model.User{Id: 1}).Error)
 	model.InitOptionMap()
 }
 
@@ -653,6 +689,7 @@ func TestTestContentModerationKeysRejectsEmptyKeys(t *testing.T) {
 
 func TestRelaySkipsContentModerationForUnrelatedChannelWithoutPanic(t *testing.T) {
 	gin.SetMode(gin.TestMode)
+	require.NoError(t, i18n.Init())
 	setupModerationTestDB(t)
 
 	common.OptionMapRWMutex.Lock()
@@ -797,6 +834,154 @@ func TestDeleteContentModerationUserHistoryWhenUserDeleted(t *testing.T) {
 	var count int64
 	require.NoError(t, model.DB.Model(&model.ModerationUserRecord{}).Where("user_id = ?", 9999).Count(&count).Error)
 	assert.Equal(t, int64(0), count)
+}
+
+func TestContentModerationThresholdSettingsPersistence(t *testing.T) {
+	setupModerationTestDB(t)
+	versionQuery := "SELECT version()"
+	if common.UsingMainDatabase(common.DatabaseTypeSQLite) {
+		versionQuery = "SELECT sqlite_version()"
+	}
+	var version string
+	require.NoError(t, model.DB.Raw(versionQuery).Scan(&version).Error)
+	t.Logf("Database: %s %s", model.DB.Dialector.Name(), version)
+	assert.Equal(t, setting.DefaultModerationScoreThresholds(), setting.GetContentModerationSetting().ResolvedScoreThresholds())
+	for _, tc := range []struct {
+		name   string
+		field  string
+		status int
+		want   setting.ModerationScoreThresholds
+	}{
+		{name: "custom critical 0.95", field: `,"score_thresholds":{"medium":0.6,"high":0.8,"critical":0.95}`, status: http.StatusOK, want: setting.ModerationScoreThresholds{Medium: 0.6, High: 0.8, Critical: 0.95}},
+		{name: "omitted preserves configured values", status: http.StatusOK, want: setting.ModerationScoreThresholds{Medium: 0.6, High: 0.8, Critical: 0.95}},
+		{name: "explicit zero survives persistence", field: `,"score_thresholds":{"medium":0,"high":0.8,"critical":0.95}`, status: http.StatusOK, want: setting.ModerationScoreThresholds{Medium: 0, High: 0.8, Critical: 0.95}},
+		{name: "negative rejected", field: `,"score_thresholds":{"medium":-0.01,"high":0.8,"critical":0.95}`, status: http.StatusBadRequest},
+		{name: "above one rejected", field: `,"score_thresholds":{"medium":0.5,"high":0.8,"critical":1.01}`, status: http.StatusBadRequest},
+		{name: "equal thresholds rejected", field: `,"score_thresholds":{"medium":0.8,"high":0.8,"critical":0.95}`, status: http.StatusBadRequest},
+		{name: "reversed thresholds rejected", field: `,"score_thresholds":{"medium":0.5,"high":0.96,"critical":0.95}`, status: http.StatusBadRequest},
+		{name: "null rejected", field: `,"score_thresholds":null`, status: http.StatusBadRequest},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			before := setting.GetContentModerationSetting().ResolvedScoreThresholds()
+			recorder := httptest.NewRecorder()
+			c, _ := gin.CreateTestContext(recorder)
+			body := `{"enabled":false,"model":"omni-moderation-latest","timeout_seconds":30,"max_retries":1` + tc.field + `}`
+			c.Request = httptest.NewRequest(http.MethodPut, "/api/moderation/settings", strings.NewReader(body))
+			c.Set("id", 1)
+			c.Set("role", common.RoleRootUser)
+			UpdateContentModerationSettings(c)
+			require.Equal(t, tc.status, recorder.Code, recorder.Body.String())
+			want := tc.want
+			if tc.status != http.StatusOK {
+				want = before
+				assert.Contains(t, recorder.Body.String(), "Moderation score thresholds")
+			}
+			// Reload from the database, as a restart would, before reading the API.
+			model.InitOptionMap()
+			getRecorder := httptest.NewRecorder()
+			getContext, _ := gin.CreateTestContext(getRecorder)
+			getContext.Request = httptest.NewRequest(http.MethodGet, "/api/moderation/settings", nil)
+			getContext.Set("id", 1)
+			getContext.Set("role", common.RoleRootUser)
+			GetContentModerationSettings(getContext)
+			var response struct {
+				Data contentModerationSettingsResponse `json:"data"`
+			}
+			require.NoError(t, common.Unmarshal(getRecorder.Body.Bytes(), &response))
+			assert.Equal(t, want, response.Data.ScoreThresholds)
+		})
+	}
+}
+
+func TestContentModerationCachedDecisionsRecordEachUser(t *testing.T) {
+	setupModerationTestDB(t)
+	for _, id := range []int{2, 3} {
+		require.NoError(t, model.DB.Create(&model.User{Id: id, Username: fmt.Sprintf("moderation-cache-%d", id), AffCode: fmt.Sprintf("mod%d", id)}).Error)
+	}
+	var calls atomic.Int32
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		calls.Add(1)
+		_, _ = w.Write([]byte(`{"results":[{"flagged":true,"categories":{"violence":true},"category_scores":{"violence":0.96}}]}`))
+	}))
+	defer server.Close()
+	config := setting.ContentModerationSetting{PreflightEnabled: true, APIKey: "test-key", BaseURL: server.URL, Model: "omni-moderation-latest", BlockSeverity: "critical", TimeoutSeconds: 2, MaxRetries: 1}
+	content := service.ModerationRequestContent{UserPrompt: "shared flagged input"}
+	for _, id := range []int{2, 3, 2} {
+		c, _ := gin.CreateTestContext(httptest.NewRecorder())
+		c.Request = httptest.NewRequest(http.MethodPost, "/v1/chat/completions", nil)
+		common.SetContextKey(c, constant.ContextKeyUserId, id)
+		require.ErrorIs(t, service.PreflightModerationRequest(c, content, config), model.ErrModerationBlocked)
+	}
+	assert.EqualValues(t, 1, calls.Load(), "identical input and policy should reuse the upstream result")
+	var events []model.ModerationEvent
+	require.NoError(t, model.DB.Order("id").Find(&events).Error)
+	require.Len(t, events, 3)
+	assert.Equal(t, []int{2, 3, 2}, []int{events[0].UserID, events[1].UserID, events[2].UserID})
+	var record model.ModerationUserRecord
+	require.NoError(t, model.DB.Where("user_id = ?", 2).First(&record).Error)
+	assert.Equal(t, 2, record.MaxViolationCount)
+	// An operator resolution must still override the cached decision.
+	require.NoError(t, service.ResolveModerationEvent(events[0].ID, 1, model.ModerationEventFalsePositive, "reviewed"))
+	c, _ := gin.CreateTestContext(httptest.NewRecorder())
+	c.Request = httptest.NewRequest(http.MethodPost, "/v1/chat/completions", nil)
+	common.SetContextKey(c, constant.ContextKeyUserId, 2)
+	require.NoError(t, service.PreflightModerationRequest(c, content, config))
+	assert.EqualValues(t, 1, calls.Load())
+	config.ScoreThresholds = &setting.ModerationScoreThresholds{Medium: 0.2, High: 0.4, Critical: 0.5}
+	require.NoError(t, service.PreflightModerationRequest(c, content, config))
+	assert.EqualValues(t, 1, calls.Load(), "an explicit operator resolution takes precedence over automatic thresholds")
+}
+
+func TestContentModerationPostflightUsesCustomThresholds(t *testing.T) {
+	setupModerationTestDB(t)
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var request struct {
+			Input string `json:"input"`
+		}
+		if err := common.DecodeJson(r.Body, &request); !assert.NoError(t, err) {
+			w.WriteHeader(http.StatusBadRequest)
+			return
+		}
+		score := 0.949
+		if request.Input == "boundary" {
+			score = 0.95
+		}
+		_, _ = fmt.Fprintf(w, `{"results":[{"flagged":false,"categories":{"violence":true},"category_scores":{"violence":%g}}]}`, score)
+	}))
+	defer server.Close()
+	require.NoError(t, model.UpdateOptionsBulk(map[string]string{
+		setting.ContentModerationEnabledOption:         "true",
+		setting.ContentModerationPostflightOption:      "true",
+		setting.ContentModerationChannelsOption:        "1",
+		setting.ContentModerationBaseURLOption:         server.URL,
+		setting.ContentModerationAPIKeyOption:          "test-key",
+		setting.ContentModerationModelOption:           "omni-moderation-latest",
+		setting.ContentModerationBlockSeverityOption:   "critical",
+		setting.ContentModerationScoreThresholdsOption: `{"medium":0.6,"high":0.8,"critical":0.95}`,
+	}))
+	for _, reply := range []string{"below", "boundary"} {
+		recorder := httptest.NewRecorder()
+		c, _ := gin.CreateTestContext(recorder)
+		c.Request = httptest.NewRequest(http.MethodPost, "/v1/chat/completions", nil)
+		c.Writer.Header().Set("Content-Type", "application/json")
+		service.BeginModerationCapture(c, nil)
+		_, err := fmt.Fprintf(c.Writer, `{"choices":[{"message":{"content":%q}}]}`, reply)
+		require.NoError(t, err)
+		info := &relaycommon.RelayInfo{UserId: 2, RequestId: "postflight-" + reply, ChannelMeta: &relaycommon.ChannelMeta{ChannelId: 1}}
+		service.FinalizeModeration(c, info, nil)
+		assert.Equal(t, http.StatusOK, recorder.Code)
+	}
+	var events []model.ModerationEvent
+	require.Eventually(t, func() bool {
+		return model.DB.Where("source = ?", model.ModerationEventSourcePostflight).Order("request_id").Find(&events).Error == nil && len(events) == 2
+	}, 2*time.Second, 10*time.Millisecond)
+	assert.Equal(t, "high", events[0].Severity)
+	assert.Equal(t, model.ModerationEventDecisionAllow, events[0].Decision)
+	assert.Equal(t, "critical", events[1].Severity)
+	assert.Equal(t, model.ModerationEventDecisionBlock, events[1].Decision)
+	for _, event := range events {
+		assert.Equal(t, model.ModerationEventActorAssistant, event.Actor)
+	}
 }
 
 func TestUpdateContentModerationSettingsBlockSeverity(t *testing.T) {

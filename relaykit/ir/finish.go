@@ -81,7 +81,7 @@ func FinishFromGemini(reason string) Finish {
 	case "SAFETY", "RECITATION", "BLOCKLIST", "PROHIBITED_CONTENT":
 		return FinishFilter
 	case "MALFORMED_FUNCTION_CALL":
-		return FinishTool
+		return FinishError
 	default:
 		return FinishUnknown
 	}
@@ -89,17 +89,26 @@ func FinishFromGemini(reason string) Finish {
 
 func (f Finish) ToGeminiFinishReason() string {
 	switch f {
-	case FinishStop:
+	case FinishStop, FinishTool:
 		return "STOP"
 	case FinishLength:
 		return "MAX_TOKENS"
 	case FinishFilter:
 		return "SAFETY"
-	case FinishTool:
-		return "MALFORMED_FUNCTION_CALL"
 	case "", FinishUnknown, FinishError:
 		return ""
 	default:
 		return string(f)
 	}
+}
+
+// FinishFromResponses maps a terminal Responses status to the shared finish reason.
+func FinishFromResponses(status, reason string) Finish {
+	if strings.TrimSpace(status) != "incomplete" {
+		return FinishStop
+	}
+	if strings.TrimSpace(reason) == "content_filter" {
+		return FinishFilter
+	}
+	return FinishLength
 }
