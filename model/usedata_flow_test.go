@@ -139,28 +139,32 @@ func TestLogQuotaDataSplitsRowsByUseGroupTokenChannelAndNode(t *testing.T) {
 	CacheQuotaDataLock.Unlock()
 
 	LogQuotaData(QuotaDataLogParams{
-		UserID:    1,
-		Username:  "alice",
-		ModelName: "gpt-a",
-		CreatedAt: 3661,
-		UseGroup:  "vip",
-		TokenID:   11,
-		ChannelID: 1,
-		NodeName:  "node-a",
-		Quota:     100,
-		TokenUsed: 40,
+		UserID:              1,
+		Username:            "alice",
+		ModelName:           "gpt-a",
+		CreatedAt:           3661,
+		UseGroup:            "vip",
+		TokenID:             11,
+		ChannelID:           1,
+		NodeName:            "node-a",
+		Quota:               100,
+		TokenUsed:           40,
+		CacheReadTokens:     30,
+		CacheCreationTokens: 2,
 	})
 	LogQuotaData(QuotaDataLogParams{
-		UserID:    1,
-		Username:  "alice",
-		ModelName: "gpt-a",
-		CreatedAt: 3700,
-		UseGroup:  "vip",
-		TokenID:   11,
-		ChannelID: 1,
-		NodeName:  "node-a",
-		Quota:     50,
-		TokenUsed: 20,
+		UserID:              1,
+		Username:            "alice",
+		ModelName:           "gpt-a",
+		CreatedAt:           3700,
+		UseGroup:            "vip",
+		TokenID:             11,
+		ChannelID:           1,
+		NodeName:            "node-a",
+		Quota:               50,
+		TokenUsed:           20,
+		CacheReadTokens:     15,
+		CacheCreationTokens: 3,
 	})
 	LogQuotaData(QuotaDataLogParams{
 		UserID:    1,
@@ -188,6 +192,34 @@ func TestLogQuotaDataSplitsRowsByUseGroupTokenChannelAndNode(t *testing.T) {
 	require.Equal(t, 2, rows[0].Count)
 	require.Equal(t, 150, rows[0].Quota)
 	require.Equal(t, 60, rows[0].TokenUsed)
+	require.EqualValues(t, 45, rows[0].CacheReadTokens)
+	require.EqualValues(t, 5, rows[0].CacheCreationTokens)
 	require.Equal(t, "default", rows[1].UseGroup)
 	require.Equal(t, 25, rows[1].Quota)
+
+	// A later flush updates the existing bucket instead of losing cache usage.
+	LogQuotaData(QuotaDataLogParams{
+		UserID: 1, Username: "alice", ModelName: "gpt-a", CreatedAt: 3800,
+		UseGroup: "vip", TokenID: 11, ChannelID: 1, NodeName: "node-a",
+		Quota: 10, TokenUsed: 20, CacheReadTokens: 10, CacheCreationTokens: 2,
+	})
+	SaveQuotaDataCache()
+	for _, query := range []struct {
+		name string
+		read func() ([]*QuotaData, error)
+	}{
+		{"user ID", func() ([]*QuotaData, error) { return GetQuotaDataByUserId(1, 3600, 4000) }},
+		{"username", func() ([]*QuotaData, error) { return GetQuotaDataByUsername("alice", 3600, 4000) }},
+		{"all models", func() ([]*QuotaData, error) { return GetAllQuotaDates(3600, 4000, "") }},
+		{"grouped users", func() ([]*QuotaData, error) { return GetQuotaDataGroupByUser(3600, 4000) }},
+	} {
+		t.Run(query.name, func(t *testing.T) {
+			data, err := query.read()
+			require.NoError(t, err)
+			require.Len(t, data, 1)
+			require.Equal(t, 90, data[0].TokenUsed)
+			require.EqualValues(t, 55, data[0].CacheReadTokens)
+			require.EqualValues(t, 7, data[0].CacheCreationTokens)
+		})
+	}
 }

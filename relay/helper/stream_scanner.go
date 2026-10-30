@@ -83,6 +83,12 @@ func StreamScannerHandler(c *gin.Context, resp *http.Response, info *relaycommon
 		return
 	}
 
+	// Stop the preparation keepalive before changing headers. The request
+	// goroutine owns all subsequent downstream writes.
+	if writer, ok := c.Writer.(*streamKeepAliveWriter); ok {
+		writer.stop()
+	}
+
 	info.StreamStatus = relaycommon.NewStreamStatus()
 	ctx, cancel := context.WithCancel(c.Request.Context())
 	// Cancellation must interrupt upstream reads even during a blocked client

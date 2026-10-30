@@ -20,11 +20,14 @@ import {
   Hash,
   Coins,
   Layers,
+  Download,
+  Upload,
   Gauge,
   Zap,
   Flame,
   TrendingUp,
   Activity,
+  Database,
   type LucideIcon,
 } from 'lucide-react'
 import { useTranslation } from 'react-i18next'
@@ -70,6 +73,22 @@ export function useModelStatCardsConfig(): StatCardConfig[] {
       getValue: (stat) => stat?.tpm ?? 0,
     },
     {
+      key: 'cacheRead',
+      title: t('Cache Read'),
+      description: t('Statistical tokens'),
+      icon: Download,
+      iconTone: 'chart-3',
+      getValue: (stat) => stat?.cacheRead ?? 0,
+    },
+    {
+      key: 'cacheCreation',
+      title: t('Cache Write'),
+      description: t('Statistical tokens'),
+      icon: Upload,
+      iconTone: 'chart-5',
+      getValue: (stat) => stat?.cacheCreation ?? 0,
+    },
+    {
       key: 'avgRpm',
       title: t('Average RPM'),
       description: t('Requests per minute'),
@@ -94,6 +113,7 @@ export function useSummaryCardsConfig(totals: {
   todayUsageDisplay: string
   usedDisplay: string
   requestCountDisplay: string
+  cacheHitRateDisplay: string
   currencyLabel: string
   currencyEnabled: boolean
 }) {
@@ -124,6 +144,15 @@ export function useSummaryCardsConfig(totals: {
       value: totals.requestCountDisplay,
       description: t('Total requests made'),
       icon: Activity,
+    },
+    {
+      key: 'cacheHitRate',
+      title: t('Cache hit rate'),
+      value: totals.cacheHitRateDisplay,
+      description: t(
+        'Cache read / total input tokens from reported usage in the last 24 hours'
+      ),
+      icon: Database,
     },
   ]
 }
