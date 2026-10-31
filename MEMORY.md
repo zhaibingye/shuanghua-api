@@ -19,6 +19,7 @@
 - 内置文本转换器的实际入口在 `relaykit/relayconvert/text_converter_registry.go`，请求与响应统一走 `ir/project`；排查旧 `internal` 转换器时须先确认调用链，不能仅凭旧实现判断当前行为。
 - Responses 的结束状态在 IR 解析层统一映射，流式与非流式复用 `ir.FinishFromResponses`。内容过滤不能当作长度截断，Gemini 的正常工具调用应以 `STOP` 结束，`MALFORMED_FUNCTION_CALL` 应作为上游错误。
 - Responses 的 item 完成事件和 response 完成事件会重复携带工具快照；转换为增量协议时，函数名及调用 ID 只能发送一次。无效 `input` 结构应在解析边界报错，不应静默变成空对话。验证入口为 `relaykit/relayconvert/{request,response}_registry_test.go`。
+- Chat/Claude/Responses→Gemini 按项目兼容策略，仅在会保留普通函数或可转换的自定义工具时过滤内置搜索；仅搜索时保留，Gemini 原生请求不变。`attachGeminiRequest` 预先检查全部工具，避免声明顺序影响结果，也不将已丢弃的工具当作过滤条件。过滤返回 `hosted_web_search_omitted` 语义损失诊断，默认允许，`safe`/`strict` 仍拒绝。回归入口为 `TestConvertRequestToGeminiToolCombination` 和 `TestResponsesToGeminiOmitsBuiltInWebSearch`。
 
 ## Windows 本机竞态验证
 

@@ -682,6 +682,15 @@ func attachGeminiRequest(request any, set Set, options *convmeta.Options) (any, 
 	)
 	jsonSchema := options != nil && options.Gemini.SupportsJSONSchemaModel(set.Model)
 	customTools, diagnostics := responsesCustomTools(set)
+	// Check all definitions first so a search preceding a function is also
+	// filtered. Dropped or unsupported tools must not disable search.
+	hasFunctionTools := false
+	for index, definition := range set.Definitions {
+		if (definition.Kind == KindFunction && definition.Function != nil) || customTools[index] != nil {
+			hasFunctionTools = true
+			break
+		}
+	}
 	for index, definition := range set.Definitions {
 		switch definition.Kind {
 		case KindFunction:
@@ -712,6 +721,16 @@ func attachGeminiRequest(request any, set Set, options *convmeta.Options) (any, 
 				diagnostics = append(diagnostics, presentationLoss(fmt.Sprintf("tools[%d].strict", index), "unsupported_function_strict", "Gemini does not expose OpenAI function strictness"))
 			}
 		case KindWebSearch:
+			// Converted requests avoid mixing hosted search with functions;
+			// native Gemini requests were handled above without this policy.
+			if hasFunctionTools {
+				diagnostics = append(diagnostics, semanticLoss(
+					fmt.Sprintf("tools[%d]", index),
+					"hosted_web_search_omitted",
+					"built-in web search is omitted when converting to Gemini with function tools",
+				))
+				continue
+			}
 			call := newWebSearchCall(set, index, definition, types.RelayFormatGemini)
 			call.Gemini = target
 			handled, err := appendEncodedWebSearch(&tools, &diagnostics, call, options)

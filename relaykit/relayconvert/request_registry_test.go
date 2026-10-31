@@ -698,6 +698,16 @@ func TestConvertRequestToGeminiToolCombination(t *testing.T) {
 		"parameters": map[string]any{"type": "object", "properties": map[string]any{"q": map[string]any{"type": "string"}}},
 	}
 	search := map[string]any{"type": "web_search"}
+	chatWithSearch := &dto.GeneralOpenAIRequest{
+		Model: "gemini-3-flash-preview", Messages: []dto.Message{{Role: "user", Content: "hello"}},
+		Tools:            []dto.ToolCallRequest{{Type: "function", Function: dto.FunctionRequest{Name: "lookup"}}},
+		WebSearchOptions: &dto.WebSearchOptions{},
+		ToolChoice:       "auto",
+	}
+	chatSearchOnly := &dto.GeneralOpenAIRequest{
+		Model: "gemini-3-flash-preview", Messages: []dto.Message{{Role: "user", Content: "hello"}},
+		WebSearchOptions: &dto.WebSearchOptions{},
+	}
 	for _, tc := range []struct {
 		name       string
 		request    any
@@ -709,33 +719,37 @@ func TestConvertRequestToGeminiToolCombination(t *testing.T) {
 	}{
 		{
 			name: "default choice", tools: []map[string]any{search, function},
-			wantTools:  []string{"googleSearch", "functionDeclarations"},
-			wantConfig: `{"includeServerSideToolInvocations":true,"functionCallingConfig":{"mode":"VALIDATED"}}`,
+			wantTools:  []string{"functionDeclarations"},
+			wantConfig: `null`,
 		},
 		{
 			name: "auto choice", tools: []map[string]any{search, function}, choice: "auto",
-			wantTools:  []string{"googleSearch", "functionDeclarations"},
-			wantConfig: `{"includeServerSideToolInvocations":true,"functionCallingConfig":{"mode":"VALIDATED"}}`,
+			wantTools:  []string{"functionDeclarations"},
+			wantConfig: `{"functionCallingConfig":{"mode":"AUTO"}}`,
 		},
 		{
 			name: "required choice", tools: []map[string]any{search, function}, choice: "required",
-			wantTools:  []string{"googleSearch", "functionDeclarations"},
-			wantConfig: `{"includeServerSideToolInvocations":true,"functionCallingConfig":{"mode":"ANY"}}`,
+			wantTools:  []string{"functionDeclarations"},
+			wantConfig: `{"functionCallingConfig":{"mode":"ANY"}}`,
 		},
 		{
 			name: "named choice", tools: []map[string]any{search, function}, choice: map[string]any{"type": "function", "name": "lookup"},
-			wantTools:  []string{"googleSearch", "functionDeclarations"},
-			wantConfig: `{"includeServerSideToolInvocations":true,"functionCallingConfig":{"mode":"ANY","allowedFunctionNames":["lookup"]}}`,
+			wantTools:  []string{"functionDeclarations"},
+			wantConfig: `{"functionCallingConfig":{"mode":"ANY","allowedFunctionNames":["lookup"]}}`,
 		},
 		{
 			name: "none choice", tools: []map[string]any{search, function}, choice: "none",
-			wantTools:  []string{"googleSearch", "functionDeclarations"},
-			wantConfig: `{"includeServerSideToolInvocations":true,"functionCallingConfig":{"mode":"NONE"}}`,
+			wantTools:  []string{"functionDeclarations"},
+			wantConfig: `{"functionCallingConfig":{"mode":"NONE"}}`,
 		},
 		{
-			name: "preview search and custom tool", tools: []map[string]any{{"type": "custom", "name": "apply_patch"}, {"type": "web_search_preview"}}, choice: "auto",
-			wantTools:  []string{"googleSearch", "functionDeclarations"},
-			wantConfig: `{"includeServerSideToolInvocations":true,"functionCallingConfig":{"mode":"VALIDATED"}}`,
+			name: "preview search and custom tool", tools: []map[string]any{{"type": "web_search_preview"}, {"type": "custom", "name": "apply_patch"}}, choice: "auto",
+			wantTools:  []string{"functionDeclarations"},
+			wantConfig: `{"functionCallingConfig":{"mode":"AUTO"}}`,
+		},
+		{
+			name: "forced search omitted", tools: []map[string]any{search, function}, choice: map[string]any{"type": "web_search"},
+			wantTools: []string{"functionDeclarations"}, wantConfig: `null`,
 		},
 		{
 			name: "functions only", tools: []map[string]any{function}, choice: "auto",
@@ -746,20 +760,60 @@ func TestConvertRequestToGeminiToolCombination(t *testing.T) {
 			wantTools: []string{"googleSearch"}, wantConfig: `null`,
 		},
 		{
-			name: "host omits search", tools: []map[string]any{search, function}, choice: "auto",
+			name: "search only with required choice", tools: []map[string]any{search}, choice: "required",
+			wantTools: []string{"googleSearch"}, wantConfig: `null`,
+		},
+		{
+			name: "search with unsupported hosted tool", tools: []map[string]any{search, {"type": "file_search"}},
+			wantTools: []string{"googleSearch"}, wantConfig: `null`,
+		},
+		{
+			name: "search with invalid custom tool", tools: []map[string]any{search, {"type": "custom"}},
+			wantTools: []string{"googleSearch"}, wantConfig: `null`,
+		},
+		{
+			name: "chat search and function", request: chatWithSearch,
+			wantTools:  []string{"functionDeclarations"},
+			wantConfig: `{"functionCallingConfig":{"mode":"AUTO"}}`,
+		},
+		{
+			name: "chat search only", request: chatSearchOnly,
+			wantTools: []string{"googleSearch"}, wantConfig: `null`,
+		},
+		{
+			name: "chat pseudo search before function",
+			request: &dto.GeneralOpenAIRequest{
+				Model: "gemini-3-flash-preview", Messages: []dto.Message{{Role: "user", Content: "hello"}},
+				Tools: []dto.ToolCallRequest{
+					{Type: "function", Function: dto.FunctionRequest{Name: "googleSearch"}},
+					{Type: "function", Function: dto.FunctionRequest{Name: "lookup"}},
+				},
+			},
+			wantTools: []string{"functionDeclarations"}, wantConfig: `null`,
+		},
+		{
+			name: "chat pseudo search only",
+			request: &dto.GeneralOpenAIRequest{
+				Model: "gemini-3-flash-preview", Messages: []dto.Message{{Role: "user", Content: "hello"}},
+				Tools: []dto.ToolCallRequest{{Type: "function", Function: dto.FunctionRequest{Name: "googleSearch"}}},
+			},
+			wantTools: []string{"googleSearch"}, wantConfig: `null`,
+		},
+		{
+			name: "host omits chat search", request: chatSearchOnly,
 			options: &convmeta.Options{WebSearch: func(convmeta.WebSearchCall) (*convmeta.WebSearchEncoding, error) {
 				return &convmeta.WebSearchEncoding{Omitted: true}, nil
 			}},
-			wantTools: []string{"functionDeclarations"}, wantConfig: `{"functionCallingConfig":{"mode":"AUTO"}}`,
+			wantConfig: `null`,
 		},
 		{
-			name: "host retrieval configuration", tools: []map[string]any{search, function}, choice: "auto",
+			name: "host retrieval configuration", request: chatSearchOnly,
 			options: &convmeta.Options{WebSearch: func(call convmeta.WebSearchCall) (*convmeta.WebSearchEncoding, error) {
 				call.Gemini.ToolConfig = &dto.ToolConfig{RetrievalConfig: &dto.RetrievalConfig{LanguageCode: "en"}}
 				return &convmeta.WebSearchEncoding{Tool: map[string]any{"googleSearch": map[string]any{}}}, nil
 			}},
-			wantTools:  []string{"googleSearch", "functionDeclarations"},
-			wantConfig: `{"includeServerSideToolInvocations":true,"functionCallingConfig":{"mode":"VALIDATED"},"retrievalConfig":{"languageCode":"en"}}`,
+			wantTools:  []string{"googleSearch"},
+			wantConfig: `{"retrievalConfig":{"languageCode":"en"}}`,
 		},
 		{
 			name: "chat code execution and function",
@@ -797,8 +851,32 @@ func TestConvertRequestToGeminiToolCombination(t *testing.T) {
 				},
 				ToolChoice: map[string]any{"type": "auto"},
 			},
+			wantTools:  []string{"functionDeclarations"},
+			wantConfig: `{"functionCallingConfig":{"mode":"AUTO"}}`,
+		},
+		{
+			name: "Claude search only",
+			request: &dto.ClaudeRequest{
+				Model: "gemini-3-flash-preview", Messages: []dto.ClaudeMessage{{Role: "user", Content: "hello"}},
+				Tools: []map[string]any{{"type": "web_search_20250305", "name": "web_search"}},
+			},
+			wantTools: []string{"googleSearch"}, wantConfig: `null`,
+		},
+		{
+			name: "native Gemini mixed tools preserved",
+			request: &dto.GeminiChatRequest{
+				Contents: []dto.GeminiChatContent{{Role: "user", Parts: []dto.GeminiPart{{Text: "hello"}}}},
+				Tools: mustRawMessage(t, []map[string]any{
+					{"googleSearch": map[string]any{}},
+					{"functionDeclarations": []map[string]any{{"name": "lookup"}}},
+				}),
+				ToolConfig: &dto.ToolConfig{
+					FunctionCallingConfig:            &dto.FunctionCallingConfig{Mode: "AUTO"},
+					IncludeServerSideToolInvocations: lo.ToPtr(false),
+				},
+			},
 			wantTools:  []string{"googleSearch", "functionDeclarations"},
-			wantConfig: `{"includeServerSideToolInvocations":true,"functionCallingConfig":{"mode":"VALIDATED"}}`,
+			wantConfig: `{"functionCallingConfig":{"mode":"AUTO"},"includeServerSideToolInvocations":false}`,
 		},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
@@ -817,7 +895,11 @@ func TestConvertRequestToGeminiToolCombination(t *testing.T) {
 			converted, ok := result.Value.(*dto.GeminiChatRequest)
 			require.True(t, ok)
 			var tools []map[string]any
-			require.NoError(t, kitutil.Unmarshal(converted.Tools, &tools))
+			if len(tc.wantTools) == 0 {
+				assert.Empty(t, converted.Tools)
+			} else {
+				require.NoError(t, kitutil.Unmarshal(converted.Tools, &tools))
+			}
 			require.Len(t, tools, len(tc.wantTools))
 			for i, key := range tc.wantTools {
 				assert.Contains(t, tools[i], key)
@@ -825,6 +907,55 @@ func TestConvertRequestToGeminiToolCombination(t *testing.T) {
 			config, err := kitutil.Marshal(converted.ToolConfig)
 			require.NoError(t, err)
 			assert.JSONEq(t, tc.wantConfig, string(config))
+		})
+	}
+}
+
+func TestResponsesToGeminiOmitsBuiltInWebSearch(t *testing.T) {
+	tools := []map[string]any{
+		{"type": "function", "name": "eval_javascript", "parameters": map[string]any{
+			"type": "object", "properties": map[string]any{"code": map[string]any{"type": "string"}}, "required": []string{"code"},
+		}},
+		{"type": "function", "name": "get_time_info", "parameters": map[string]any{"type": "object", "properties": map[string]any{}}},
+		{"type": "function", "name": "web_search"},
+	}
+	for _, toolType := range []string{"web_search", "web_search_2025_08_26", "web_search_preview", "web_search_preview_2025_03_11"} {
+		tools = append(tools, map[string]any{"type": toolType})
+	}
+	req := &dto.OpenAIResponsesRequest{
+		Model: "gemini-test", Input: mustRawMessage(t, "hello"), Tools: mustRawMessage(t, tools),
+	}
+	originalTools := string(req.Tools)
+	for _, policy := range []types.ConversionLossPolicy{"", types.ConversionLossPolicySafe, types.ConversionLossPolicyStrict} {
+		t.Run(string(policy), func(t *testing.T) {
+			info := &convmeta.Values{Options: &convmeta.Options{
+				ToolLossPolicy: policy,
+				WebSearch: func(convmeta.WebSearchCall) (*convmeta.WebSearchEncoding, error) {
+					return &convmeta.WebSearchEncoding{Tool: map[string]any{"googleSearch": map[string]any{}}}, nil
+				},
+			}}
+			result, err := ConvertRequest(t.Context(), info, types.RelayFormatGemini, req)
+			require.NotNil(t, result)
+			assert.Equal(t, originalTools, string(req.Tools), "filtering must not mutate the inbound request")
+			require.Len(t, result.Diagnostics, 4)
+			for _, diagnostic := range result.Diagnostics {
+				assert.Equal(t, "hosted_web_search_omitted", diagnostic.Code)
+				assert.Equal(t, types.ConversionDiagnosticError, diagnostic.Severity)
+			}
+			if policy != "" {
+				var loss *types.ConversionLossError
+				require.ErrorAs(t, err, &loss)
+				return
+			}
+			require.NoError(t, err)
+			converted, ok := result.Value.(*dto.GeminiChatRequest)
+			require.True(t, ok)
+			assert.JSONEq(t, `[{"functionDeclarations":[
+				{"name":"eval_javascript","parameters":{"type":"OBJECT","properties":{"code":{"type":"STRING"}},"required":["code"]}},
+				{"name":"get_time_info","parameters":null},
+				{"name":"web_search","parameters":null}
+			]}]`, string(converted.Tools))
+			assert.Nil(t, converted.ToolConfig)
 		})
 	}
 }
