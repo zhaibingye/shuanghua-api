@@ -125,6 +125,127 @@ func TestResponsesToolStreamEmitsMetadataOnce(t *testing.T) {
 	}
 }
 
+func TestChatToolStreamIndexesAndResponseIDAfterThinking(t *testing.T) {
+	for _, tc := range []struct {
+		from   types.RelayFormat
+		frames []any
+	}{
+		{
+			from: types.RelayFormatClaude,
+			frames: []any{
+				claudeStreamChunk(`{"type":"message_start","message":{"id":"msg_1","model":"test","type":"message","role":"assistant","content":[]}}`),
+				claudeStreamChunk(`{"type":"content_block_start","index":0,"content_block":{"type":"thinking","thinking":""}}`),
+				claudeStreamChunk(`{"type":"content_block_delta","index":0,"delta":{"type":"thinking_delta","thinking":"Look it up"}}`),
+				claudeStreamChunk(`{"type":"content_block_delta","index":0,"delta":{"type":"signature_delta","signature":"opaque"}}`),
+				claudeStreamChunk(`{"type":"content_block_stop","index":0}`),
+				claudeStreamChunk(`{"type":"content_block_start","index":1,"content_block":{"type":"text","text":"Checking"}}`),
+				claudeStreamChunk(`{"type":"content_block_stop","index":1}`),
+				claudeStreamChunk(`{"type":"content_block_start","index":2,"content_block":{"type":"tool_use","id":"call_1","name":"lookup","input":{}}}`),
+				claudeStreamChunk(`{"type":"content_block_delta","index":2,"delta":{"type":"input_json_delta","partial_json":"{\"q\":"}}`),
+				claudeStreamChunk(`{"type":"content_block_start","index":3,"content_block":{"type":"tool_use","id":"call_2","name":"other","input":{}}}`),
+				claudeStreamChunk(`{"type":"content_block_delta","index":3,"delta":{"type":"input_json_delta","partial_json":"{}"}}`),
+				claudeStreamChunk(`{"type":"content_block_delta","index":2,"delta":{"type":"input_json_delta","partial_json":"\"x\"}"}}`),
+				claudeStreamChunk(`{"type":"content_block_stop","index":2}`),
+				claudeStreamChunk(`{"type":"content_block_stop","index":3}`),
+				claudeStreamChunk(`{"type":"message_delta","delta":{"stop_reason":"tool_use"},"usage":{"input_tokens":4,"output_tokens":8}}`),
+			},
+		},
+		{
+			from: types.RelayFormatGemini,
+			frames: []any{
+				geminiStreamChunk(`{"candidates":[{"index":0,"content":{"role":"model","parts":[{"text":"Look it up","thought":true}]}}]}`),
+				geminiStreamChunk(`{"candidates":[{"index":0,"content":{"role":"model","parts":[{"text":"Checking"}]}}]}`),
+				geminiStreamChunk(`{"candidates":[{"index":0,"content":{"role":"model","parts":[{"functionCall":{"id":"call_1","name":"lookup","args":{"q":"x"}}},{"functionCall":{"id":"call_2","name":"other","args":{}}}]},"finishReason":"STOP"}]}`),
+			},
+		},
+		{
+			from: types.RelayFormatOpenAIResponses,
+			frames: []any{
+				responsesStreamChunk(`{"type":"response.created","response":{"id":"msg_1","model":"test","output":[]}}`),
+				responsesStreamChunk(`{"type":"response.reasoning_summary_text.delta","output_index":0,"summary_index":0,"delta":"Look it up"}`),
+				responsesStreamChunk(`{"type":"response.output_text.delta","output_index":1,"content_index":0,"delta":"Checking"}`),
+				responsesStreamChunk(`{"type":"response.output_item.added","output_index":2,"item":{"type":"function_call","id":"fc_1","call_id":"call_1","name":"lookup","arguments":""}}`),
+				responsesStreamChunk(`{"type":"response.function_call_arguments.delta","output_index":2,"delta":"{\"q\":"}`),
+				responsesStreamChunk(`{"type":"response.output_item.added","output_index":3,"item":{"type":"function_call","id":"fc_2","call_id":"call_2","name":"other","arguments":""}}`),
+				responsesStreamChunk(`{"type":"response.function_call_arguments.delta","output_index":3,"delta":"{}"}`),
+				responsesStreamChunk(`{"type":"response.function_call_arguments.delta","output_index":2,"delta":"\"x\"}"}`),
+				responsesStreamChunk(`{"type":"response.completed","response":{"id":"msg_1","model":"test","status":"completed","output":[]}}`),
+			},
+		},
+	} {
+		t.Run(string(tc.from), func(t *testing.T) {
+			for _, facade := range []bool{false, true} {
+				if facade && tc.from != types.RelayFormatClaude {
+					continue
+				}
+				t.Run(fmt.Sprintf("legacy=%t", facade), func(t *testing.T) {
+					state, err := NewResponseStreamState(tc.from, types.RelayFormatOpenAI, ResponseStreamOptions{ID: "msg_1"})
+					require.NoError(t, err)
+					legacy := NewClaudeToChatStreamState()
+					var results []ResponseResult
+					for _, frame := range tc.frames {
+						if facade {
+							chunk, err := legacy.ConvertChunk(frame.(*dto.ClaudeResponse))
+							require.NoError(t, err)
+							results = append(results, ResponseResult{Value: chunk})
+							continue
+						}
+						chunks, err := ConvertStreamResponseChunk(t.Context(), nil, state, frame)
+						require.NoError(t, err)
+						results = append(results, chunks...)
+					}
+					if !facade {
+						final, err := FinalizeStreamResponse(t.Context(), nil, state)
+						require.NoError(t, err)
+						results = append(results, final...)
+					}
+					var tools []dto.ToolCallResponse
+					var text, thinking string
+					for _, result := range results {
+						var chunk *dto.ChatCompletionsStreamResponse
+						switch value := result.Value.(type) {
+						case *dto.ChatCompletionsStreamResponse:
+							chunk = value
+						case dto.ChatCompletionsStreamResponse:
+							chunk = &value
+						default:
+							t.Fatalf("unexpected stream value %T", result.Value)
+						}
+						assert.Equal(t, "msg_1", chunk.Id)
+						for _, choice := range chunk.Choices {
+							text += choice.Delta.GetContentString()
+							thinking += choice.Delta.GetReasoningContent()
+							for _, tool := range choice.Delta.ToolCalls {
+								require.NotNil(t, tool.Index)
+								require.GreaterOrEqual(t, *tool.Index, 0)
+								// SDKs use index as a position in the tool_calls array.
+								require.LessOrEqual(t, *tool.Index, len(tools))
+								if *tool.Index == len(tools) {
+									tools = append(tools, tool)
+									continue
+								}
+								current := &tools[*tool.Index]
+								current.ID += tool.ID
+								current.Function.Name += tool.Function.Name
+								current.Function.Arguments += tool.Function.Arguments
+							}
+						}
+					}
+					assert.Equal(t, "Checking", text)
+					assert.Equal(t, "Look it up", thinking)
+					require.Len(t, tools, 2)
+					assert.Equal(t, "call_1", tools[0].ID)
+					assert.Equal(t, "lookup", tools[0].Function.Name)
+					assert.JSONEq(t, `{"q":"x"}`, tools[0].Function.Arguments)
+					assert.Equal(t, "call_2", tools[1].ID)
+					assert.Equal(t, "other", tools[1].Function.Name)
+					assert.JSONEq(t, `{}`, tools[1].Function.Arguments)
+				})
+			}
+		})
+	}
+}
+
 func TestToolResponseConvertsToSuccessfulGeminiFinish(t *testing.T) {
 	for _, tc := range []struct {
 		name     string

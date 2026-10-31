@@ -109,7 +109,9 @@ func messageFromResponsesItem(item any) (ir.Message, error) {
 		}, nil
 	case "reasoning":
 		text := reasoningTextFromMap(m)
-		return ir.Message{Role: ir.RoleAssistant, Blocks: []ir.Block{ir.Think(text, "")}}, nil
+		block := ir.Think(text, "")
+		block.Think.ResponsesItem = full
+		return ir.Message{Role: ir.RoleAssistant, Blocks: []ir.Block{block}}, nil
 	default:
 		return ir.Message{Role: ir.RoleAssistant, Blocks: []ir.Block{ir.Raw(typ, full)}}, nil
 	}
@@ -293,19 +295,15 @@ func messageToResponsesItems(msg ir.Message) ([]any, error) {
 	for _, block := range msg.Blocks {
 		switch block.Kind {
 		case ir.BlockKindThink:
+			// Foreign summaries have neither a Responses item ID nor its
+			// opaque reasoning state. Do not fabricate a native replay item.
+			if block.Think == nil || !jsonx.Present(block.Think.ResponsesItem) {
+				continue
+			}
 			if err := flushMessage(); err != nil {
 				return nil, err
 			}
-			text := ""
-			if block.Think != nil {
-				text = block.Think.Text
-			}
-			items = append(items, map[string]any{
-				"type": "reasoning",
-				"summary": []any{
-					map[string]any{"type": "summary_text", "text": text},
-				},
-			})
+			items = append(items, jsonx.Clone(block.Think.ResponsesItem))
 		case ir.BlockKindToolUse:
 			if err := flushMessage(); err != nil {
 				return nil, err

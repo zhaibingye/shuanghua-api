@@ -65,8 +65,12 @@ func ToStream(events []ir.Event, state *ir.StreamState) ([]any, error) {
 	}
 	out := make([]any, 0, len(events))
 	for _, event := range events {
+		if event.Kind == ir.EventStart {
+			state.ID = firstNonEmpty(event.ID, state.ID)
+			state.Model = firstNonEmpty(event.Model, state.Model)
+		}
 		chunk := &dto.ChatCompletionsStreamResponse{
-			Id:      firstNonEmpty(event.ID, state.ID),
+			Id:      state.ID,
 			Object:  "chat.completion.chunk",
 			Created: state.Created,
 			Model:   firstNonEmpty(event.Model, state.Model),
@@ -85,9 +89,9 @@ func ToStream(events []ir.Event, state *ir.StreamState) ([]any, error) {
 			if event.Block != nil && (event.Block.Kind == ir.BlockKindMedia || event.Block.Kind == ir.BlockKindCode) {
 				delta.SetContentString(event.Block.RenderText())
 			} else if event.Block != nil && event.Block.Kind == ir.BlockKindToolUse && event.Block.ToolUse != nil {
-				idx := event.Index
+				toolIndex := toolCallIndex(state, event.Index)
 				delta.ToolCalls = []dto.ToolCallResponse{{
-					Index: &idx,
+					Index: &toolIndex,
 					ID:    event.Block.ToolUse.ID,
 					Type:  "function",
 					Function: dto.FunctionResponse{
@@ -109,9 +113,9 @@ func ToStream(events []ir.Event, state *ir.StreamState) ([]any, error) {
 				}
 			}
 			if event.Delta.JSON != "" || event.Block != nil && event.Block.ToolUse != nil {
-				idx := event.Index
+				toolIndex := toolCallIndex(state, event.Index)
 				delta.ToolCalls = []dto.ToolCallResponse{{
-					Index: &idx,
+					Index: &toolIndex,
 					Type:  "function",
 					Function: dto.FunctionResponse{
 						Arguments: event.Delta.JSON,
@@ -167,6 +171,20 @@ func ToStream(events []ir.Event, state *ir.StreamState) ([]any, error) {
 		out = append(out, chunk)
 	}
 	return out, nil
+}
+
+// toolCallIndex maps content-block indexes to the dense tool_calls array of
+// this response choice. Text and thinking blocks do not occupy tool slots.
+func toolCallIndex(state *ir.StreamState, blockIndex int) int {
+	if state.ChatToolIndexes == nil {
+		state.ChatToolIndexes = make(map[int]int)
+	}
+	index, exists := state.ChatToolIndexes[blockIndex]
+	if !exists {
+		index = len(state.ChatToolIndexes)
+		state.ChatToolIndexes[blockIndex] = index
+	}
+	return index
 }
 
 func firstNonEmpty(values ...string) string {

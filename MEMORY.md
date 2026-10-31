@@ -17,6 +17,8 @@
 ## API 协议转换
 
 - 内置文本转换器的实际入口在 `relaykit/relayconvert/text_converter_registry.go`，请求与响应统一走 `ir/project`；排查旧 `internal` 转换器时须先确认调用链，不能仅凭旧实现判断当前行为。
+- IR 内容块索引包含思维和正文；投影 Chat 流时，`tool_calls.index` 必须独立映射为每个 choice 内从零开始的连续索引。工具块开始事件的 `Event.ID` 是调用 ID，不能用作 Chat 响应 ID。回归入口为 `TestChatToolStreamIndexesAndResponseIDAfterThinking`，并已用 OpenAI Python SDK 2.9.0 重放实际转换输出。
+- 历史思维摘要不能直接充当目标协议的原生回放状态。Claude 请求只回传带签名或非空 redacted 数据的思维块；Responses 请求保留原始 reasoning item（含 ID 和加密状态），不为其他协议的摘要伪造 reasoning item。无法回传的摘要在请求转换时省略，并返回 `historical_thinking_omitted` 诊断；响应侧展示仍保留。回归入口为 `TestConvertRequestOmitsUnreplayableHistoricalThinking` 和 Responses 请求 roundtrip 测试。
 - Responses 的结束状态在 IR 解析层统一映射，流式与非流式复用 `ir.FinishFromResponses`。内容过滤不能当作长度截断，Gemini 的正常工具调用应以 `STOP` 结束，`MALFORMED_FUNCTION_CALL` 应作为上游错误。
 - Responses 的 item 完成事件和 response 完成事件会重复携带工具快照；转换为增量协议时，函数名及调用 ID 只能发送一次。无效 `input` 结构应在解析边界报错，不应静默变成空对话。验证入口为 `relaykit/relayconvert/{request,response}_registry_test.go`。
 - Chat/Claude/Responses→Gemini 按项目兼容策略，仅在会保留普通函数或可转换的自定义工具时过滤内置搜索；仅搜索时保留，Gemini 原生请求不变。`attachGeminiRequest` 预先检查全部工具，避免声明顺序影响结果，也不将已丢弃的工具当作过滤条件。过滤返回 `hosted_web_search_omitted` 语义损失诊断，默认允许，`safe`/`strict` 仍拒绝。回归入口为 `TestConvertRequestToGeminiToolCombination` 和 `TestResponsesToGeminiOmitsBuiltInWebSearch`。

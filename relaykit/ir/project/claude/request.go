@@ -102,11 +102,23 @@ func ToRequest(req *ir.Request) (*dto.ClaudeRequest, error) {
 		if !ir.ValidRole(message.Role) {
 			return nil, fmt.Errorf("claude projection: unsupported message role %q", message.Role)
 		}
-		if message.Role == ir.RoleSystem {
-			systemBlocks = append(systemBlocks, message.Blocks...)
+		// Only Claude-originated thinking can be replayed as thinking. Other
+		// protocols expose summaries without the required Claude signature.
+		blocks := make([]ir.Block, 0, len(message.Blocks))
+		for _, block := range message.Blocks {
+			if block.Kind == ir.BlockKindThink && !block.Think.HasClaudeState() {
+				continue
+			}
+			blocks = append(blocks, block)
+		}
+		if len(blocks) == 0 && len(message.Blocks) > 0 {
 			continue
 		}
-		content, err := blocksToClaudeContent(message.Blocks)
+		if message.Role == ir.RoleSystem {
+			systemBlocks = append(systemBlocks, blocks...)
+			continue
+		}
+		content, err := blocksToClaudeContent(blocks)
 		if err != nil {
 			return nil, err
 		}

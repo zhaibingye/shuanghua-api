@@ -26,6 +26,23 @@ func irRequestConverter(from, target types.RelayFormat) RequestConverterFunc {
 			return nil, err
 		}
 		convdiag.Add(ctx, normalized.Diagnostics...)
+		for i, message := range normalized.Messages {
+			for j, block := range message.Blocks {
+				if block.Kind != ir.BlockKindThink {
+					continue
+				}
+				omitted := target == types.RelayFormatClaude && !block.Think.HasClaudeState() ||
+					target == types.RelayFormatOpenAIResponses && (block.Think == nil || len(block.Think.ResponsesItem) == 0)
+				if omitted {
+					convdiag.Add(ctx, types.ConversionDiagnostic{
+						Code:     "historical_thinking_omitted",
+						Path:     fmt.Sprintf("messages[%d].content[%d]", i, j),
+						Message:  "Historical thinking was omitted because it has no replay state for the target protocol",
+						Severity: types.ConversionDiagnosticWarning,
+					})
+				}
+			}
+		}
 		if normalized.Sample.N != nil && *normalized.Sample.N > 1 && target != types.RelayFormatOpenAI && target != types.RelayFormatGemini {
 			return nil, fmt.Errorf("%s cannot represent multiple response choices", target)
 		}

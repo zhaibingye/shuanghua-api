@@ -22,6 +22,7 @@ func TestRequestRoundtripGoldenFixture(t *testing.T) {
 				{"type": "input_text", "text": "What is in this image?"},
 				{"type": "input_image", "image_url": "https://example.com/cat.png"}
 			]},
+			{"type": "reasoning", "id": "rs_context", "summary": [], "encrypted_content": "opaque", "status": "completed"},
 			{"type": "function_call", "call_id": "call_abc", "name": "get_weather", "arguments": "{\"city\":\"Paris\"}"},
 			{"type": "function_call_output", "call_id": "call_abc", "output": "15 degrees"}
 		],
@@ -31,8 +32,9 @@ func TestRequestRoundtripGoldenFixture(t *testing.T) {
 	require.Equal(t, "gpt-test", irReq.Model)
 	require.True(t, irReq.Stream)
 	require.Equal(t, ir.RoleSystem, irReq.Messages[0].Role)
-	require.Equal(t, "call_abc", irReq.Messages[2].Blocks[0].ToolUse.ID)
-	require.Equal(t, "call_abc", irReq.Messages[3].Blocks[0].ToolResult.ToolUseID)
+	require.JSONEq(t, `{"type":"reasoning","id":"rs_context","summary":[],"encrypted_content":"opaque","status":"completed"}`, string(irReq.Messages[2].Blocks[0].Think.ResponsesItem))
+	require.Equal(t, "call_abc", irReq.Messages[3].Blocks[0].ToolUse.ID)
+	require.Equal(t, "call_abc", irReq.Messages[4].Blocks[0].ToolResult.ToolUseID)
 	require.Equal(t, ir.ToolFunction, irReq.Tools[0].Kind)
 }
 
@@ -247,7 +249,7 @@ func findThink(blocks []ir.Block) string {
 	return text
 }
 
-func TestToRequestSplitsThinkingTextAndTool(t *testing.T) {
+func TestToRequestOmitsForeignThinkingWithoutLosingTextOrTool(t *testing.T) {
 	t.Parallel()
 	irReq := &ir.Request{
 		Model: "gpt-test",
@@ -264,12 +266,12 @@ func TestToRequestSplitsThinkingTextAndTool(t *testing.T) {
 	require.NoError(t, err)
 	var items []map[string]any
 	require.NoError(t, kitutil.Unmarshal(out.Input, &items))
-	require.Len(t, items, 3)
-	require.Equal(t, "reasoning", items[0]["type"])
-	require.Equal(t, "message", items[1]["type"])
-	require.Equal(t, "function_call", items[2]["type"])
-	require.Equal(t, "call_1", items[2]["call_id"])
-	require.Equal(t, "fc_call_1", items[2]["id"])
+	require.Len(t, items, 2)
+	require.Equal(t, "message", items[0]["type"])
+	require.Equal(t, "the answer", items[0]["content"].([]any)[0].(map[string]any)["text"])
+	require.Equal(t, "function_call", items[1]["type"])
+	require.Equal(t, "call_1", items[1]["call_id"])
+	require.Equal(t, "fc_call_1", items[1]["id"])
 }
 
 func TestToStreamFunctionCallNameWithoutID(t *testing.T) {

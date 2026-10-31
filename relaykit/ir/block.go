@@ -74,6 +74,21 @@ type ThinkBlock struct {
 	Redacted     bool   `json:"redacted,omitempty"`
 	RedactedData string `json:"redacted_data,omitempty"`
 	ProviderSig  []byte `json:"provider_sig,omitempty"`
+	// ResponsesItem retains the original reasoning item, including its ID
+	// and encrypted state. A display summary alone is not replayable state.
+	ResponsesItem json.RawMessage `json:"responses_item,omitempty"`
+}
+
+// HasClaudeState reports whether thinking carries Claude's opaque replay state.
+// It does not authenticate the state; only the upstream can verify it.
+func (b *ThinkBlock) HasClaudeState() bool {
+	if b == nil {
+		return false
+	}
+	if b.Redacted {
+		return b.RedactedData != ""
+	}
+	return b.Signature != ""
 }
 
 type ToolUseBlock struct {

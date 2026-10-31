@@ -71,6 +71,7 @@ type StreamState struct {
 	GeminiToolCount int
 
 	ChatRoleSent             bool
+	ChatToolIndexes          map[int]int
 	ResponsesCreated         bool
 	ResponsesItems           map[int]*ResponsesStreamItemState
 	ResponsesSourceBlocks    map[int]int

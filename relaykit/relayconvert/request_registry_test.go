@@ -27,6 +27,123 @@ func TestResponsesConversionRejectsInvalidInputShape(t *testing.T) {
 	}
 }
 
+func TestConvertRequestOmitsUnreplayableHistoricalThinking(t *testing.T) {
+	for _, tc := range []struct {
+		name    string
+		request any
+		raw     string
+		targets []types.RelayFormat
+	}{
+		{
+			name: "chat reasoning with tool continuation", request: &dto.GeneralOpenAIRequest{},
+			raw: `{"model":"claude-sonnet-4-5","max_tokens":2048,"messages":[
+				{"role":"user","content":"Check the weather"},
+				{"role":"assistant","reasoning_content":"Look it up","content":"Checking","tool_calls":[{"id":"call_1","type":"function","function":{"name":"lookup","arguments":"{}"}}]},
+				{"role":"tool","tool_call_id":"call_1","content":"sunny"}]}`,
+			targets: []types.RelayFormat{types.RelayFormatClaude, types.RelayFormatOpenAIResponses},
+		},
+		{
+			name: "responses summary with tool continuation", request: &dto.OpenAIResponsesRequest{},
+			raw: `{"model":"claude-sonnet-4-5","max_output_tokens":2048,"input":[
+				{"role":"user","content":"Check the weather"},
+				{"type":"reasoning","id":"rs_1","summary":[{"type":"summary_text","text":"Look it up"}]},
+				{"role":"assistant","content":"Checking"},
+				{"type":"function_call","call_id":"call_1","name":"lookup","arguments":"{}"},
+				{"type":"function_call_output","call_id":"call_1","output":"sunny"}]}`,
+			targets: []types.RelayFormat{types.RelayFormatClaude},
+		},
+		{
+			name: "responses encrypted state without summary", request: &dto.OpenAIResponsesRequest{},
+			raw: `{"model":"claude-sonnet-4-5","max_output_tokens":2048,"input":[
+				{"role":"user","content":"Check the weather"},
+				{"type":"reasoning","id":"rs_1","summary":[],"encrypted_content":"opaque"},
+				{"role":"assistant","content":"Checking"},
+				{"type":"function_call","call_id":"call_1","name":"lookup","arguments":"{}"},
+				{"type":"function_call_output","call_id":"call_1","output":"sunny"}]}`,
+			targets: []types.RelayFormat{types.RelayFormatClaude},
+		},
+		{
+			name: "gemini thought with tool continuation", request: &dto.GeminiChatRequest{},
+			raw: `{"generationConfig":{"maxOutputTokens":2048},"contents":[
+				{"role":"user","parts":[{"text":"Check the weather"}]},
+				{"role":"model","parts":[{"text":"Look it up","thought":true,"thoughtSignature":"opaque"},{"text":"Checking"},{"functionCall":{"id":"call_1","name":"lookup","args":{}}}]},
+				{"role":"user","parts":[{"functionResponse":{"id":"call_1","name":"lookup","response":{"content":"sunny"}}}]}]}`,
+			targets: []types.RelayFormat{types.RelayFormatClaude, types.RelayFormatOpenAIResponses},
+		},
+		{
+			name: "claude signed and redacted state to responses", request: &dto.ClaudeRequest{},
+			raw: `{"model":"gpt-test","max_tokens":2048,"messages":[
+				{"role":"user","content":"Check the weather"},
+				{"role":"assistant","content":[{"type":"thinking","thinking":"Look it up","signature":"original-signature"},{"type":"redacted_thinking","data":"opaque"},{"type":"text","text":"Checking"},{"type":"tool_use","id":"call_1","name":"lookup","input":{}}]},
+				{"role":"user","content":[{"type":"tool_result","tool_use_id":"call_1","content":"sunny"}]}]}`,
+			targets: []types.RelayFormat{types.RelayFormatOpenAIResponses},
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			require.NoError(t, kitutil.UnmarshalJsonStr(tc.raw, tc.request))
+			before, err := kitutil.Marshal(tc.request)
+			require.NoError(t, err)
+			for _, target := range tc.targets {
+				t.Run(string(target), func(t *testing.T) {
+					info := &convmeta.Values{ChannelMetaAttached: true, UpstreamModelName: "claude-sonnet-4-5"}
+					result, err := ConvertRequest(t.Context(), info, target, tc.request)
+					require.NoError(t, err)
+					var codes []string
+					for _, diagnostic := range result.Diagnostics {
+						codes = append(codes, diagnostic.Code)
+					}
+					assert.Contains(t, codes, "historical_thinking_omitted")
+					var text, callID, resultID string
+					switch request := result.Value.(type) {
+					case *dto.ClaudeRequest:
+						for _, message := range request.Messages {
+							content, err := message.ParseContent()
+							require.NoError(t, err)
+							require.NotEmpty(t, content)
+							for _, part := range content {
+								assert.NotContains(t, []string{"thinking", "redacted_thinking"}, part.Type)
+								if part.Type == "text" && message.Role == "assistant" {
+									text += lo.FromPtr(part.Text)
+								}
+								if part.Type == "tool_use" {
+									callID = part.Id
+								}
+								if part.Type == "tool_result" {
+									resultID = part.ToolUseId
+								}
+							}
+						}
+					case *dto.OpenAIResponsesRequest:
+						var items []map[string]any
+						require.NoError(t, kitutil.Unmarshal(request.Input, &items))
+						for _, item := range items {
+							assert.NotEqual(t, "reasoning", item["type"])
+							switch item["type"] {
+							case "message":
+								if item["role"] == "assistant" {
+									text += inputContentText(t, item)
+								}
+							case "function_call":
+								callID = item["call_id"].(string)
+							case "function_call_output":
+								resultID = item["call_id"].(string)
+							}
+						}
+					default:
+						t.Fatalf("unexpected request %T", result.Value)
+					}
+					assert.Equal(t, "Checking", text)
+					assert.Equal(t, "call_1", callID)
+					assert.Equal(t, callID, resultID)
+				})
+			}
+			after, err := kitutil.Marshal(tc.request)
+			require.NoError(t, err)
+			assert.JSONEq(t, string(before), string(after))
+		})
+	}
+}
+
 func TestClaudeMessagesToOpenAIChatPreservesAssistantTextWithToolCalls(t *testing.T) {
 	text := "I will look that up."
 	request := dto.ClaudeRequest{
