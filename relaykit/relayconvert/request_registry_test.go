@@ -595,6 +595,225 @@ func TestConvertRequestClaudeAdaptiveThinkingPreservesEffort(t *testing.T) {
 	}
 }
 
+func TestConvertRequestReasoningDefaultsAndEquivalentLevels(t *testing.T) {
+	formats := []types.RelayFormat{types.RelayFormatOpenAI, types.RelayFormatOpenAIResponses, types.RelayFormatClaude, types.RelayFormatGemini}
+	for _, source := range formats {
+		for _, target := range formats {
+			for _, effort := range []string{"", "minimal", "low", "medium", "high", "xhigh", "max"} {
+				if source == target {
+					continue
+				}
+				t.Run(string(source)+"/"+string(target)+"/"+effort, func(t *testing.T) {
+					model := "proxy-model"
+					if target == types.RelayFormatClaude {
+						model = "claude-sonnet-4-6"
+					}
+					if target == types.RelayFormatGemini {
+						model = "gemini-3-pro-preview"
+					}
+					req := reasoningConversionRequest(t, source, model, effort)
+					before, err := kitutil.Marshal(req)
+					require.NoError(t, err)
+					// These source models have different native defaults. Neither
+					// may override the format converter's default when fields are absent.
+					origin := "claude-opus-5-5"
+					if source == types.RelayFormatGemini {
+						origin = "gemini-2.5-flash-lite"
+					}
+					info := &convmeta.Values{OriginModelName: origin, UpstreamModelName: model, ChannelMetaAttached: true}
+					result, err := ConvertRequest(t.Context(), info, target, req)
+					require.NoError(t, err)
+					want := effort
+					if want == "" {
+						want = "xhigh"
+					}
+					if target == types.RelayFormatGemini && (want == "xhigh" || want == "max") {
+						want = "high"
+					}
+					assertConvertedReasoningEffort(t, result.Value, want)
+					assert.Equal(t, want, info.GetReasoningEffort())
+					after, err := kitutil.Marshal(req)
+					require.NoError(t, err)
+					assert.JSONEq(t, string(before), string(after))
+				})
+			}
+		}
+	}
+}
+
+func TestConvertRequestReasoningSurvivesIntermediateFormats(t *testing.T) {
+	for _, tc := range []struct {
+		source types.RelayFormat
+		path   []types.RelayFormat
+		effort string
+		want   string
+	}{
+		{types.RelayFormatOpenAI, []types.RelayFormat{types.RelayFormatGemini, types.RelayFormatOpenAIResponses}, "", "xhigh"},
+		{types.RelayFormatOpenAIResponses, []types.RelayFormat{types.RelayFormatGemini, types.RelayFormatClaude}, "", "xhigh"},
+		{types.RelayFormatGemini, []types.RelayFormat{types.RelayFormatClaude, types.RelayFormatOpenAIResponses}, "", "xhigh"},
+		{types.RelayFormatClaude, []types.RelayFormat{types.RelayFormatGemini, types.RelayFormatOpenAI}, "", "xhigh"},
+		{types.RelayFormatOpenAI, []types.RelayFormat{types.RelayFormatClaude, types.RelayFormatGemini}, "", "high"},
+		{types.RelayFormatOpenAI, []types.RelayFormat{types.RelayFormatGemini, types.RelayFormatOpenAIResponses}, "xhigh", "xhigh"},
+		{types.RelayFormatOpenAIResponses, []types.RelayFormat{types.RelayFormatGemini, types.RelayFormatOpenAI}, "max", "max"},
+		{types.RelayFormatClaude, []types.RelayFormat{types.RelayFormatGemini, types.RelayFormatOpenAIResponses}, "minimal", "minimal"},
+	} {
+		t.Run(string(tc.source)+"/"+string(tc.path[0])+"/"+string(tc.path[1])+"/"+tc.effort, func(t *testing.T) {
+			req := reasoningConversionRequest(t, tc.source, "proxy-model", tc.effort)
+			info := &convmeta.Values{UpstreamModelName: "gemini-2.5-pro", ChannelMetaAttached: true}
+			result, err := ConvertRequestVia(t.Context(), info, req, tc.path...)
+			require.NoError(t, err)
+			if tc.path[len(tc.path)-1] == types.RelayFormatGemini {
+				converted := result.Value.(*dto.GeminiChatRequest)
+				require.NotNil(t, converted.GenerationConfig.ThinkingConfig)
+				assert.Equal(t, lo.ToPtr(24576), converted.GenerationConfig.ThinkingConfig.ThinkingBudget)
+			} else {
+				assertConvertedReasoningEffort(t, result.Value, tc.want)
+			}
+			assert.Equal(t, tc.want, info.GetReasoningEffort())
+		})
+	}
+}
+
+func TestConvertRequestReasoningExplicitDisableAndBudget(t *testing.T) {
+	for _, source := range []types.RelayFormat{types.RelayFormatOpenAI, types.RelayFormatOpenAIResponses, types.RelayFormatClaude, types.RelayFormatGemini} {
+		for _, target := range []types.RelayFormat{types.RelayFormatOpenAI, types.RelayFormatOpenAIResponses, types.RelayFormatClaude, types.RelayFormatGemini} {
+			if source == target {
+				continue
+			}
+			t.Run(string(source)+"/"+string(target), func(t *testing.T) {
+				info := &convmeta.Values{UpstreamModelName: "gemini-2.5-flash", ChannelMetaAttached: true}
+				result, err := ConvertRequest(t.Context(), info, target, reasoningConversionRequest(t, source, "proxy-model", "none"))
+				require.NoError(t, err)
+				if target == types.RelayFormatGemini {
+					converted := result.Value.(*dto.GeminiChatRequest)
+					require.NotNil(t, converted.GenerationConfig.ThinkingConfig)
+					assert.Equal(t, lo.ToPtr(0), converted.GenerationConfig.ThinkingConfig.ThinkingBudget)
+				} else {
+					assertConvertedReasoningEffort(t, result.Value, "none")
+				}
+				assert.Equal(t, "none", info.GetReasoningEffort())
+			})
+		}
+	}
+	t.Run("exact budget survives a level-based intermediate", func(t *testing.T) {
+		req := reasoningConversionRequest(t, types.RelayFormatClaude, "proxy-model", "").(*dto.ClaudeRequest)
+		req.Thinking = &dto.Thinking{Type: "enabled", BudgetTokens: lo.ToPtr(4096)}
+		info := &convmeta.Values{UpstreamModelName: "gemini-3-flash-preview", ChannelMetaAttached: true}
+		result, err := ConvertRequestVia(t.Context(), info, req, types.RelayFormatGemini, types.RelayFormatOpenAIResponses)
+		require.NoError(t, err)
+		converted := result.Value.(*dto.OpenAIResponsesRequest)
+		assertConvertedReasoningEffort(t, converted, "medium")
+		require.NotNil(t, converted.ReasoningConversion)
+		assert.Equal(t, lo.ToPtr(4096), converted.ReasoningConversion.BudgetTokens)
+	})
+	t.Run("converter ID uses format defaults", func(t *testing.T) {
+		req := reasoningConversionRequest(t, types.RelayFormatOpenAI, "proxy-model", "")
+		result, err := ConvertRequestByID(t.Context(), nil, ConverterOpenAIChatToClaudeMessages, req)
+		require.NoError(t, err)
+		assertConvertedReasoningEffort(t, result.Value, "xhigh")
+	})
+	t.Run("same protocol keeps absent controls", func(t *testing.T) {
+		for _, format := range []types.RelayFormat{types.RelayFormatOpenAI, types.RelayFormatOpenAIResponses, types.RelayFormatClaude, types.RelayFormatGemini} {
+			req := reasoningConversionRequest(t, format, "proxy-model", "")
+			before, err := kitutil.Marshal(req)
+			require.NoError(t, err)
+			result, err := ConvertRequest(t.Context(), nil, format, req)
+			require.NoError(t, err)
+			assert.Same(t, req, result.Value)
+			after, err := kitutil.Marshal(result.Value)
+			require.NoError(t, err)
+			assert.JSONEq(t, string(before), string(after))
+		}
+	})
+	for _, effort := range []string{"", "xhigh", "max"} {
+		t.Run("gemini budget mapping/"+effort, func(t *testing.T) {
+			info := &convmeta.Values{UpstreamModelName: "gemini-2.5-pro", ChannelMetaAttached: true}
+			result, err := ConvertRequest(t.Context(), info, types.RelayFormatGemini, reasoningConversionRequest(t, types.RelayFormatOpenAI, "gemini-2.5-pro", effort))
+			require.NoError(t, err)
+			converted := result.Value.(*dto.GeminiChatRequest)
+			require.NotNil(t, converted.GenerationConfig.ThinkingConfig)
+			assert.Equal(t, lo.ToPtr(24576), converted.GenerationConfig.ThinkingConfig.ThinkingBudget)
+		})
+	}
+	for _, level := range []string{"medium", "xhigh", "max"} {
+		t.Run("google extra body/"+level, func(t *testing.T) {
+			req := reasoningConversionRequest(t, types.RelayFormatOpenAI, "proxy-model", "").(*dto.GeneralOpenAIRequest)
+			req.ExtraBody = mustRawMessage(t, map[string]any{"google": map[string]any{"thinking_config": map[string]any{"thinking_level": level}}})
+			info := &convmeta.Values{UpstreamModelName: "gemini-3-pro-preview", ChannelMetaAttached: true}
+			result, err := ConvertRequest(t.Context(), info, types.RelayFormatGemini, req)
+			require.NoError(t, err)
+			want := level
+			if level == "xhigh" || level == "max" {
+				want = "high"
+			}
+			assertConvertedReasoningEffort(t, result.Value, want)
+			for _, path := range [][]types.RelayFormat{{types.RelayFormatOpenAIResponses}, {types.RelayFormatGemini, types.RelayFormatOpenAIResponses}} {
+				result, err := ConvertRequestVia(t.Context(), info, req, path...)
+				require.NoError(t, err)
+				assertConvertedReasoningEffort(t, result.Value, level)
+			}
+		})
+	}
+}
+
+func reasoningConversionRequest(t *testing.T, format types.RelayFormat, model, effort string) any {
+	t.Helper()
+	switch format {
+	case types.RelayFormatOpenAI:
+		return &dto.GeneralOpenAIRequest{Model: model, MaxTokens: lo.ToPtr(uint(8192)), Messages: []dto.Message{{Role: "user", Content: "hello"}}, ReasoningEffort: effort}
+	case types.RelayFormatOpenAIResponses:
+		req := &dto.OpenAIResponsesRequest{Model: model, MaxOutputTokens: lo.ToPtr(uint(8192)), Input: []byte(`"hello"`)}
+		if effort != "" {
+			req.Reasoning = &dto.Reasoning{Effort: effort}
+		}
+		return req
+	case types.RelayFormatClaude:
+		req := &dto.ClaudeRequest{Model: model, MaxTokens: lo.ToPtr(uint(8192)), Messages: []dto.ClaudeMessage{{Role: "user", Content: "hello"}}}
+		if effort == "none" {
+			req.Thinking = &dto.Thinking{Type: "disabled"}
+		} else if effort != "" {
+			req.Thinking = &dto.Thinking{Type: "adaptive"}
+			req.OutputConfig = mustRawMessage(t, map[string]any{"effort": effort})
+		}
+		return req
+	case types.RelayFormatGemini:
+		req := &dto.GeminiChatRequest{Contents: []dto.GeminiChatContent{{Role: "user", Parts: []dto.GeminiPart{{Text: "hello"}}}}, GenerationConfig: dto.GeminiChatGenerationConfig{MaxOutputTokens: lo.ToPtr(uint(8192))}}
+		if effort == "none" {
+			req.GenerationConfig.ThinkingConfig = &dto.GeminiThinkingConfig{ThinkingBudget: lo.ToPtr(0)}
+		} else if effort != "" {
+			req.GenerationConfig.ThinkingConfig = &dto.GeminiThinkingConfig{ThinkingLevel: effort}
+		}
+		return req
+	default:
+		t.Fatalf("unsupported test format %s", format)
+		return nil
+	}
+}
+
+func assertConvertedReasoningEffort(t *testing.T, request any, effort string) {
+	t.Helper()
+	switch req := request.(type) {
+	case *dto.GeneralOpenAIRequest:
+		assert.Equal(t, effort, req.ReasoningEffort)
+	case *dto.OpenAIResponsesRequest:
+		require.NotNil(t, req.Reasoning)
+		assert.Equal(t, effort, req.Reasoning.Effort)
+	case *dto.ClaudeRequest:
+		require.NotNil(t, req.Thinking)
+		if effort == "none" {
+			assert.Equal(t, "disabled", req.Thinking.Type)
+			return
+		}
+		assert.Contains(t, []string{"adaptive", "enabled"}, req.Thinking.Type)
+		assert.Equal(t, effort, req.GetEfforts())
+	case *dto.GeminiChatRequest:
+		require.NotNil(t, req.GenerationConfig.ThinkingConfig)
+		assert.Equal(t, effort, req.GenerationConfig.ThinkingConfig.ThinkingLevel)
+	default:
+		t.Fatalf("unsupported converted request %T", request)
+	}
+}
+
 func TestGeminiThinkingLevelCaseInsensitiveAcrossPaths(t *testing.T) {
 	newRequest := func(level string) *dto.GeminiChatRequest {
 		return &dto.GeminiChatRequest{
@@ -647,7 +866,7 @@ func TestGeminiThinkingLevelCaseInsensitiveAcrossPaths(t *testing.T) {
 		assert.Equal(t, "medium", info.GetReasoningEffort())
 	})
 
-	t.Run("gemini to openai conversion adjusts unsupported level with a diagnostic", func(t *testing.T) {
+	t.Run("gemini to openai conversion preserves the supplied level", func(t *testing.T) {
 		info := &convmeta.Values{
 			OriginModelName:   "gemini-3-pro-preview",
 			UpstreamModelName: "gemini-3-pro-preview",
@@ -657,13 +876,13 @@ func TestGeminiThinkingLevelCaseInsensitiveAcrossPaths(t *testing.T) {
 		require.NoError(t, err)
 		openaiReq, ok := result.Value.(*dto.GeneralOpenAIRequest)
 		require.True(t, ok)
-		assert.Equal(t, "low", openaiReq.ReasoningEffort)
-		assert.Equal(t, "low", info.GetReasoningEffort())
+		assert.Equal(t, "minimal", openaiReq.ReasoningEffort)
+		assert.Equal(t, "minimal", info.GetReasoningEffort())
 		codes := make([]string, 0, len(result.Diagnostics))
 		for _, diagnostic := range result.Diagnostics {
 			codes = append(codes, diagnostic.Code)
 		}
-		assert.Contains(t, codes, "gemini_level_adjusted")
+		assert.NotContains(t, codes, "gemini_level_adjusted")
 	})
 }
 
@@ -1469,10 +1688,10 @@ func TestIRRequestPreservesExplicitZeroAndFalseAcrossProtocols(t *testing.T) {
 		raw     string
 		request any
 	}{
-		{types.RelayFormatOpenAI, `{"model":"test","messages":[{"role":"user","content":"hello"}],"max_tokens":0,"temperature":0,"top_p":0,"stream":false}`, &dto.GeneralOpenAIRequest{}},
+		{types.RelayFormatOpenAI, `{"model":"test","messages":[{"role":"user","content":"hello"}],"reasoning_effort":"none","max_tokens":0,"temperature":0,"top_p":0,"stream":false}`, &dto.GeneralOpenAIRequest{}},
 		{types.RelayFormatClaude, `{"model":"test","messages":[{"role":"user","content":"hello"}],"max_tokens":0,"temperature":0,"top_p":0,"stream":false}`, &dto.ClaudeRequest{}},
-		{types.RelayFormatOpenAIResponses, `{"model":"test","input":"hello","max_output_tokens":0,"temperature":0,"top_p":0,"stream":false}`, &dto.OpenAIResponsesRequest{}},
-		{types.RelayFormatGemini, `{"contents":[{"role":"user","parts":[{"text":"hello"}]}],"generationConfig":{"maxOutputTokens":0,"temperature":0,"topP":0}}`, &dto.GeminiChatRequest{}},
+		{types.RelayFormatOpenAIResponses, `{"model":"test","input":"hello","reasoning":{"effort":"none"},"max_output_tokens":0,"temperature":0,"top_p":0,"stream":false}`, &dto.OpenAIResponsesRequest{}},
+		{types.RelayFormatGemini, `{"contents":[{"role":"user","parts":[{"text":"hello"}]}],"generationConfig":{"thinkingConfig":{"thinkingBudget":0},"maxOutputTokens":0,"temperature":0,"topP":0}}`, &dto.GeminiChatRequest{}},
 	}
 	for _, source := range sources {
 		require.NoError(t, kitutil.UnmarshalJsonStr(source.raw, source.request))

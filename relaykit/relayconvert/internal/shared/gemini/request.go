@@ -156,7 +156,11 @@ func ApplyThinkingConfig(ctx context.Context, geminiRequest *dto.GeminiChatReque
 	// Rewrite the provider-native config into the target model's dialect
 	// first, so a budget on Gemini 3 or a level on Gemini 2.5 is converted
 	// rather than rejected and later comparisons see what will be sent.
-	nativeEffort, diagnostics, err := reasoning.NormalizeGeminiThinkingConfig(baseModel, &geminiRequest.GenerationConfig)
+	normalize := reasoning.NormalizeGeminiThinkingConfig
+	if crossProtocol {
+		normalize = reasoning.NormalizeGeminiThinkingConfigForConversion
+	}
+	nativeEffort, diagnostics, err := normalize(baseModel, &geminiRequest.GenerationConfig)
 	if err != nil {
 		return err
 	}
@@ -227,7 +231,11 @@ func ApplyThinkingConfig(ctx context.Context, geminiRequest *dto.GeminiChatReque
 	if requested.IsEmpty() {
 		return nil
 	}
-	rendered, err := reasoning.RenderGemini(
+	render := reasoning.RenderGemini
+	if crossProtocol {
+		render = reasoning.RenderGeminiForConversion
+	}
+	rendered, err := render(
 		baseModel,
 		requested,
 		geminiRequest.GenerationConfig.MaxOutputTokens,

@@ -70,6 +70,16 @@ func geminiCapabilitiesFor(model string) geminiCapabilities {
 // coercion is reported in Diagnostics. Errors are reserved for unknown effort
 // values and numeric overflow.
 func RenderGemini(model string, intent Intent, maxOutputTokens *uint, adapterBudgetPercentage float64) (GeminiRender, error) {
+	return renderGemini(model, intent, maxOutputTokens, adapterBudgetPercentage, false)
+}
+
+// RenderGeminiForConversion preserves portable levels, with xhigh and max
+// represented by high. Budget-based model families still use thinkingBudget.
+func RenderGeminiForConversion(model string, intent Intent, maxOutputTokens *uint, adapterBudgetPercentage float64) (GeminiRender, error) {
+	return renderGemini(model, intent, maxOutputTokens, adapterBudgetPercentage, true)
+}
+
+func renderGemini(model string, intent Intent, maxOutputTokens *uint, adapterBudgetPercentage float64, crossProtocol bool) (GeminiRender, error) {
 	intent, diagnostics, err := normalizeIntent(intent)
 	if err != nil {
 		return GeminiRender{}, err
@@ -79,6 +89,20 @@ func RenderGemini(model string, intent Intent, maxOutputTokens *uint, adapterBud
 	}
 
 	capabilities := geminiCapabilitiesFor(model)
+	levelModel := model
+	if crossProtocol {
+		if intent.Effort == EffortXHigh || intent.Effort == EffortMax {
+			diagnostics = append(diagnostics, geminiReasoningDiagnostic(
+				"gemini_level_adjusted",
+				fmt.Sprintf("Gemini represents thinking effort %q as high", intent.Effort),
+			))
+			intent.Effort = EffortHigh
+		}
+		levelModel = ""
+		if capabilities.kind == geminiThinkingUnknown || capabilities.kind == geminiThinkingNotConfigurable {
+			capabilities.kind = geminiThinkingLevel
+		}
+	}
 	if capabilities.kind == geminiThinkingNotConfigurable {
 		render := GeminiRender{Diagnostics: diagnostics}
 		if capabilities.supportsIncludeThoughts {
@@ -174,7 +198,7 @@ func RenderGemini(model string, intent Intent, maxOutputTokens *uint, adapterBud
 	}
 
 	if intent.Mode == ModeDisabled || intent.Effort == EffortNone {
-		level, err := geminiLevelForEffort(model, EffortMinimal)
+		level, err := geminiLevelForEffort(levelModel, EffortMinimal)
 		if err != nil {
 			return GeminiRender{}, err
 		}
@@ -194,7 +218,7 @@ func RenderGemini(model string, intent Intent, maxOutputTokens *uint, adapterBud
 		))
 	}
 	if effort != "" {
-		level, err := geminiLevelForEffort(model, effort)
+		level, err := geminiLevelForEffort(levelModel, effort)
 		if err != nil {
 			return GeminiRender{}, err
 		}
@@ -245,6 +269,16 @@ func geminiDefaultEffort(model string) Effort {
 // on a model whose dialect is unknown; when the dialect is known the field the
 // model does not use is dropped with a diagnostic.
 func NormalizeGeminiThinkingConfig(model string, generation *dto.GeminiChatGenerationConfig) (Effort, []types.ConversionDiagnostic, error) {
+	return normalizeGeminiThinkingConfig(model, generation, false)
+}
+
+// NormalizeGeminiThinkingConfigForConversion applies the same effort policy to
+// native controls carried by another protocol, including Chat's Google extra body.
+func NormalizeGeminiThinkingConfigForConversion(model string, generation *dto.GeminiChatGenerationConfig) (Effort, []types.ConversionDiagnostic, error) {
+	return normalizeGeminiThinkingConfig(model, generation, true)
+}
+
+func normalizeGeminiThinkingConfig(model string, generation *dto.GeminiChatGenerationConfig, crossProtocol bool) (Effort, []types.ConversionDiagnostic, error) {
 	if generation == nil || generation.ThinkingConfig == nil {
 		return "", nil, nil
 	}
@@ -266,6 +300,19 @@ func NormalizeGeminiThinkingConfig(model string, generation *dto.GeminiChatGener
 			))
 			config.ThinkingBudget = nil
 		}
+	}
+	if crossProtocol {
+		intent, intentDiagnostics, err := FromGemini(&dto.GeminiChatRequest{GenerationConfig: *generation})
+		diagnostics = append(diagnostics, intentDiagnostics...)
+		if err != nil {
+			return "", diagnostics, err
+		}
+		rendered, err := RenderGeminiForConversion(model, intent, generation.MaxOutputTokens, 0)
+		if err != nil {
+			return "", diagnostics, err
+		}
+		generation.ThinkingConfig = rendered.Config
+		return rendered.EffectiveEffort, append(diagnostics, rendered.Diagnostics...), nil
 	}
 	if capabilities.kind == geminiThinkingNotConfigurable {
 		dropped := config.ThinkingBudget != nil || config.ThinkingLevel != "" || (config.IncludeThoughts != nil && !capabilities.supportsIncludeThoughts)

@@ -17,6 +17,7 @@
 ## API 协议转换
 
 - 内置文本转换器的实际入口在 `relaykit/relayconvert/text_converter_registry.go`，请求与响应统一走 `ir/project`；排查旧 `internal` 转换器时须先确认调用链，不能仅凭旧实现判断当前行为。
+- 跨格式请求在缺少思考强度控制时，按最终目标补默认值：Chat、Responses、Claude 为 `xhigh`，Gemini 为 `high`；显式关闭和预算不被默认值覆盖。转换时保留原始档位，Gemini 将 `xhigh`/`max` 映射为 `high`，2.5 系列仍使用等价预算。`ConvertRequestVia` 用请求局部状态保留原始意图，避免中间格式降低档位或丢失精确预算；原生同格式请求仍走透传路径。验证入口为 `request_registry_test.go` 的 `TestConvertRequestReasoning*`。
 - IR 内容块索引包含思维和正文；投影 Chat 流时，`tool_calls.index` 必须独立映射为每个 choice 内从零开始的连续索引。工具块开始事件的 `Event.ID` 是调用 ID，不能用作 Chat 响应 ID。回归入口为 `TestChatToolStreamIndexesAndResponseIDAfterThinking`，并已用 OpenAI Python SDK 2.9.0 重放实际转换输出。
 - 历史思维摘要不能直接充当目标协议的原生回放状态。Claude 请求只回传带签名或非空 redacted 数据的思维块；Responses 请求保留原始 reasoning item（含 ID 和加密状态），不为其他协议的摘要伪造 reasoning item。无法回传的摘要在请求转换时省略，并返回 `historical_thinking_omitted` 诊断；响应侧展示仍保留。回归入口为 `TestConvertRequestOmitsUnreplayableHistoricalThinking` 和 Responses 请求 roundtrip 测试。
 - Responses 的结束状态在 IR 解析层统一映射，流式与非流式复用 `ir.FinishFromResponses`。内容过滤不能当作长度截断，Gemini 的正常工具调用应以 `STOP` 结束，`MALFORMED_FUNCTION_CALL` 应作为上游错误。

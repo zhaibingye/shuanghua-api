@@ -51,7 +51,7 @@
       ]
     }
   ],
-  "max_tokens": 1024,
+  "max_tokens": 1280,
   "stream": true,
   "tools": [
     {
@@ -70,7 +70,14 @@
       }
     }
   ],
+  "output_config": {
+    "effort": "xhigh"
+  },
   "tool_choice": {
     "type": "auto"
+  },
+  "thinking": {
+    "type": "enabled",
+    "budget_tokens": 1216
   }
 }

@@ -91,7 +91,7 @@ func ApplyReasoning(ctx context.Context, req *dto.ClaudeRequest, info convmeta.M
 		// rendered for the thinking-off state rather than left unchecked.
 		intent.Effort = requestEffort
 	}
-	if req.MaxTokens == nil && intent.HasStrength() {
+	if req.MaxTokens == nil && intent.HasStrength() && intent.Mode != reasoning.ModeDisabled && intent.Effort != reasoning.EffortNone {
 		// Adapter-provided defaults may be raised to accommodate an exact
 		// cross-protocol budget. Values too small for manual thinking are
 		// raised again by the renderer, which reports the change.
@@ -115,7 +115,11 @@ func ApplyReasoning(ctx context.Context, req *dto.ClaudeRequest, info convmeta.M
 		req.MaxTokens = &minimum
 	}
 
-	rendered, err := reasoning.RenderClaude(capabilityModel, intent, req.MaxTokens, opts.Claude.ThinkingAdapterBudgetTokensPercentage)
+	render := reasoning.RenderClaude
+	if crossProtocol {
+		render = reasoning.RenderClaudeForConversion
+	}
+	rendered, err := render(capabilityModel, intent, req.MaxTokens, opts.Claude.ThinkingAdapterBudgetTokensPercentage)
 	if err != nil {
 		return err
 	}

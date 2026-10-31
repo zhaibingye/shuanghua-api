@@ -17,6 +17,13 @@ import (
 	"github.com/QuantumNous/new-api/relaykit/types"
 )
 
+type requestReasoningKey struct{}
+
+type requestReasoningState struct {
+	intent reasoning.Intent
+	target types.RelayFormat
+}
+
 // irRequestConverter projects the message body once. The registry owns tool
 // policy and host diagnostics around this projection, including vendor search.
 func irRequestConverter(from, target types.RelayFormat) RequestConverterFunc {
@@ -94,9 +101,12 @@ func irRequestConverter(from, target types.RelayFormat) RequestConverterFunc {
 		}
 		// Rendering uses the current model capability rules and the original
 		// portable intent, rather than a second protocol's approximated effort.
-		intent, err := irSourceReasoning(ctx, info, from, request, normalized)
+		intent, err := irSourceReasoning(ctx, info, from, target, request, normalized)
 		if err != nil {
 			return nil, reasoning.AsClientError(err)
+		}
+		if original, ok := ctx.Value(requestReasoningKey{}).(*requestReasoningState); ok {
+			original.intent = intent
 		}
 		normalized.Think = ir.ThinkFromIntent(intent)
 		if normalized.Think != nil && target == types.RelayFormatOpenAIResponses && from != types.RelayFormatOpenAIResponses && normalized.Think.Display == ir.ThinkDisplayAuto {
@@ -231,11 +241,50 @@ func irRequestConverter(from, target types.RelayFormat) RequestConverterFunc {
 	}
 }
 
-// irSourceReasoning resolves native defaults before target-model rendering.
-func irSourceReasoning(ctx context.Context, info convmeta.Meta, from types.RelayFormat, request any, normalized *ir.Request) (reasoning.Intent, error) {
+// irSourceReasoning keeps the original controls across conversion steps. Only
+// absent strength gets the conversion default; explicit disables and budgets
+// remain authoritative. Defaults depend on the final target, never a pivot.
+func irSourceReasoning(ctx context.Context, info convmeta.Meta, from, target types.RelayFormat, request any, normalized *ir.Request) (reasoning.Intent, error) {
+	if original, ok := ctx.Value(requestReasoningKey{}).(*requestReasoningState); ok {
+		if original.intent.HasStrength() {
+			return original.intent, nil
+		}
+		target = original.target
+	}
 	intent := normalized.Think.Intent()
-	if from != types.RelayFormatClaude && from != types.RelayFormatGemini {
-		return intent, nil
+	if from == types.RelayFormatOpenAI {
+		var extraBody []byte
+		switch req := request.(type) {
+		case *dto.GeneralOpenAIRequest:
+			extraBody = req.ExtraBody
+		case dto.GeneralOpenAIRequest:
+			extraBody = req.ExtraBody
+		}
+		var native dto.GeminiChatRequest
+		if err := sharedgemini.ApplyGoogleExtraBody(&native, extraBody); err != nil {
+			return intent, err
+		}
+		google, diagnostics, err := reasoning.FromGemini(&native)
+		if err != nil {
+			return intent, err
+		}
+		convdiag.Add(ctx, diagnostics...)
+		if google.HasStrength() {
+			if intent.HasStrength() && reasoning.EffectiveEffort(google) != reasoning.EffectiveEffort(intent) {
+				convdiag.Add(ctx, types.ConversionDiagnostic{
+					Code:     "native_overrode_standard",
+					Path:     "extra_body.google.thinking_config",
+					Message:  "Google thinking_config overrides the standard reasoning strength",
+					Severity: types.ConversionDiagnosticWarning,
+				})
+			}
+			if google.IncludeThoughts == nil {
+				google.IncludeThoughts = intent.IncludeThoughts
+			}
+			intent = google
+		} else if google.IncludeThoughts != nil {
+			intent.IncludeThoughts = google.IncludeThoughts
+		}
 	}
 	sourceModel := normalized.Model
 	if info != nil && info.GetOriginModelName() != "" {
@@ -243,36 +292,6 @@ func irSourceReasoning(ctx context.Context, info convmeta.Meta, from types.Relay
 	}
 	opts := convmeta.OptionsOf(info)
 	preserve := opts.ShouldPreserveThinkingSuffix(sourceModel)
-	base := sourceModel
-	if from == types.RelayFormatGemini {
-		if !preserve {
-			base = reasoning.ParseModelModifiers(sourceModel).Base
-			if parsed, _, found, err := reasoning.ParseGeminiModelSuffix(base, opts.Gemini.ThinkingAdapterEnabled); err == nil && found {
-				base = parsed
-			}
-		}
-		var native dto.GeminiChatRequest
-		switch value := request.(type) {
-		case *dto.GeminiChatRequest:
-			native = *value
-		case dto.GeminiChatRequest:
-			native = value
-		}
-		if base != "" && native.GenerationConfig.ThinkingConfig != nil {
-			_, diagnostics, err := reasoning.NormalizeGeminiThinkingConfig(base, &native.GenerationConfig)
-			if err != nil {
-				return intent, err
-			}
-			convdiag.Add(ctx, diagnostics...)
-		}
-		var diagnostics []types.ConversionDiagnostic
-		var err error
-		intent, diagnostics, err = reasoning.FromGemini(&native)
-		if err != nil {
-			return intent, err
-		}
-		convdiag.Add(ctx, diagnostics...)
-	}
 	if !preserve {
 		if suffix := reasoning.IntentFromState(convmeta.ReasoningStateOf(info)); !suffix.IsEmpty() {
 			merged, diagnostics, err := reasoning.MergeExplicitAndSuffix(intent, suffix, sourceModel)
@@ -283,8 +302,15 @@ func irSourceReasoning(ctx context.Context, info convmeta.Meta, from types.Relay
 			intent = merged
 		}
 	}
-	if from == types.RelayFormatGemini {
-		return reasoning.ResolveGeminiDefault(base, intent), nil
+	if !intent.HasStrength() {
+		intent.Mode = reasoning.ModeEnabled
+		intent.Effort = reasoning.EffortXHigh
+		if target == types.RelayFormatGemini {
+			intent.Effort = reasoning.EffortHigh
+		}
 	}
-	return reasoning.ResolveClaudeDefault(sourceModel, intent), nil
+	if from == types.RelayFormatClaude {
+		return reasoning.ResolveClaudeDefault(sourceModel, intent), nil
+	}
+	return intent, nil
 }

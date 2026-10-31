@@ -240,6 +240,9 @@ func executeRequestSpec(c context.Context, info convmeta.Meta, from types.RelayF
 
 func executeRequestSteps(c context.Context, info convmeta.Meta, from types.RelayFormat, target types.RelayFormat, request any, converter string, quality RequestConverterQuality, specs []RequestConverterSpec) (*RequestResult, error) {
 	c, diagnosticCollector := convdiag.WithCollector(c)
+	// Intermediate protocols can approximate an effort or an exact budget.
+	// Render each step from the original intent instead of those approximations.
+	c = context.WithValue(c, requestReasoningKey{}, &requestReasoningState{target: target})
 	current, tools, err := toolconv.ExtractRequest(from, request)
 	if err != nil {
 		return nil, err

@@ -113,6 +113,16 @@ func claudeCapabilitiesFor(model string) claudeCapabilities {
 }
 
 func RenderClaude(model string, intent Intent, maxTokens *uint, adapterBudgetPercentage float64) (ClaudeRender, error) {
+	return renderClaude(model, intent, maxTokens, adapterBudgetPercentage, false)
+}
+
+// RenderClaudeForConversion preserves portable effort levels across protocols
+// while retaining model-specific thinking modes, budget bounds, and sampling.
+func RenderClaudeForConversion(model string, intent Intent, maxTokens *uint, adapterBudgetPercentage float64) (ClaudeRender, error) {
+	return renderClaude(model, intent, maxTokens, adapterBudgetPercentage, true)
+}
+
+func renderClaude(model string, intent Intent, maxTokens *uint, adapterBudgetPercentage float64, crossProtocol bool) (ClaudeRender, error) {
 	disabledWithEffort := intent.Mode == ModeDisabled && intent.Effort != "" && intent.Effort != EffortNone
 	if disabledWithEffort {
 		effort, err := ParseEffort(string(intent.Effort))
@@ -158,7 +168,10 @@ func RenderClaude(model string, intent Intent, maxTokens *uint, adapterBudgetPer
 		outputEffort := Effort("")
 		if disabledWithEffort && (capabilities.supportsDisable || capabilities.disableAsBetweenTools) {
 			outputEffort = ClaudeEffort(model, intent.Effort)
-			if capabilities.offEffortAtMostHigh && (outputEffort == EffortXHigh || outputEffort == EffortMax) {
+			if crossProtocol {
+				outputEffort = intent.Effort
+			}
+			if !crossProtocol && capabilities.offEffortAtMostHigh && (outputEffort == EffortXHigh || outputEffort == EffortMax) {
 				outputEffort = EffortHigh
 			}
 			diagnostics = append(diagnostics, claudeEffortDiagnostics(model, intent.Effort, outputEffort)...)
@@ -232,7 +245,10 @@ func RenderClaude(model string, intent Intent, maxTokens *uint, adapterBudgetPer
 		if effort == "" && intent.Mode == ModeEnabled {
 			effort = capabilities.defaultEffort
 		}
-		normalizedEffort := normalizeClaudeEffort(effort, capabilities)
+		normalizedEffort := effort
+		if !crossProtocol {
+			normalizedEffort = normalizeClaudeEffort(effort, capabilities)
+		}
 		if effort != "" && normalizedEffort != effort {
 			diagnostics = append(diagnostics, claudeReasoningDiagnostic(
 				"claude_effort_adjusted",
@@ -289,7 +305,7 @@ func RenderClaude(model string, intent Intent, maxTokens *uint, adapterBudgetPer
 		// Known models get the effort they accept. They think only when asked,
 		// so a removed effort leaves none.
 		effort := intent.Effort
-		if isKnownClaudeModel(model) {
+		if !crossProtocol && isKnownClaudeModel(model) {
 			effort = ClaudeEffort(model, intent.Effort)
 			diagnostics = append(diagnostics, claudeEffortDiagnostics(model, intent.Effort, effort)...)
 		}
@@ -356,6 +372,9 @@ func RenderClaude(model string, intent Intent, maxTokens *uint, adapterBudgetPer
 		effectiveEffort = EffortFromBudget(budget)
 	}
 	outputEffort := ClaudeEffort(model, intent.Effort)
+	if crossProtocol {
+		outputEffort = intent.Effort
+	}
 	if outputEffort != "" {
 		effectiveEffort = outputEffort
 	}

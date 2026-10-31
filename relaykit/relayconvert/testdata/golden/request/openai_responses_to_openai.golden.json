@@ -43,6 +43,7 @@
   ],
   "stream": true,
   "max_completion_tokens": 1024,
+  "reasoning_effort": "xhigh",
   "tools": [
     {
       "type": "function",

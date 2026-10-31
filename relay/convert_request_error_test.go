@@ -287,7 +287,8 @@ func TestGeminiThinkingControlsConvertBestEffort(t *testing.T) {
 		converted, ok := result.Value.(*dto.GeneralOpenAIRequest)
 		require.True(t, ok)
 		assert.Equal(t, "medium", converted.ReasoningEffort)
-		assert.True(t, hasHostDiagnosticCode(info.ConversionDiagnostics(), "gemini_budget_to_level"))
+		require.NotNil(t, converted.ReasoningConversion)
+		assert.Equal(t, &budget, converted.ReasoningConversion.BudgetTokens)
 	})
 }
 

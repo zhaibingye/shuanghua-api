@@ -24,8 +24,9 @@ func TestClaudeDefaultMaxTokensPresence(t *testing.T) {
 			convert: func(t *testing.T, meta convmeta.Meta, clientMaxTokens *uint) (*dto.ClaudeRequest, error) {
 				t.Helper()
 				return OpenAIChatRequestToClaudeMessages(context.Background(), meta, dto.GeneralOpenAIRequest{
-					Model:     "claude-test",
-					MaxTokens: clientMaxTokens,
+					ReasoningEffort: "none",
+					Model:           "claude-test",
+					MaxTokens:       clientMaxTokens,
 					Messages: []dto.Message{
 						{Role: "user", Content: "hello"},
 					},
@@ -37,6 +38,7 @@ func TestClaudeDefaultMaxTokensPresence(t *testing.T) {
 			convert: func(t *testing.T, meta convmeta.Meta, clientMaxTokens *uint) (*dto.ClaudeRequest, error) {
 				t.Helper()
 				return OpenAIResponsesRequestToClaudeMessages(context.Background(), meta, &dto.OpenAIResponsesRequest{
+					Reasoning:       &dto.Reasoning{Effort: "none"},
 					Model:           "claude-test",
 					Input:           []byte(`"hello"`),
 					MaxOutputTokens: clientMaxTokens,
