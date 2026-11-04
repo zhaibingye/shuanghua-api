@@ -45,6 +45,7 @@ type ChatExt struct {
 }
 
 type ResponsesExt struct {
+	PromptCacheOptions json.RawMessage `json:"prompt_cache_options,omitempty"`
 	PreviousResponseID string          `json:"previous_response_id,omitempty"`
 	Conversation       json.RawMessage `json:"conversation,omitempty"`
 	Prompt             json.RawMessage `json:"prompt,omitempty"`

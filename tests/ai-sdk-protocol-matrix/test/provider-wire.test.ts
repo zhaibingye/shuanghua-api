@@ -5,6 +5,7 @@ import { afterEach, describe, expect, it, vi } from "vitest"
 import { runGeneration } from "../src/generation.js"
 import { createModelRuntime } from "../src/providers.js"
 import { TraceRecorder } from "../src/trace-recorder.js"
+import { runCacheScenario } from "../src/scenarios.js"
 import type { MatrixConfig, SourceFormat, TargetSpec } from "../src/types.js"
 
 const temporaryDirectories: string[] = []
@@ -34,6 +35,29 @@ function errorResponse(url: string): Response {
 }
 
 describe("provider wire routing", () => {
+  it("sends stable cache keys and Claude breakpoints through the real SDKs", async () => {
+    for (const source of ["chat", "responses", "claude"] as const) {
+      const directory = await mkdtemp(path.join(os.tmpdir(), `ai-sdk-cache-${source}-`))
+      temporaryDirectories.push(directory)
+      vi.stubGlobal("fetch", vi.fn(async (request: Request) => errorResponse(request.url)))
+      const config: MatrixConfig = {
+        apiKey: "local", baseUrl: "https://newapi.example", outputRoot: directory,
+        runId: "cache-wire", timeoutMs: 5_000, maxOutputTokens: 4096,
+        sourceFormats: [source], targets: [], scenarios: ["cache"], confirmLive: false, dryRun: true,
+      }
+      const target: TargetSpec = { format: source, model: "test-model" }
+      const recorder = new TraceRecorder(directory, config.apiKey)
+      const runtime = createModelRuntime(source, target, config, recorder.fetch)
+      await runCacheScenario({ source, target, config, recorder, runtime, relativeCellDirectory: "cell" })
+      const metadata = JSON.parse(await readFile(path.join(directory, "cell", "cache", "cache-repeat-1", "http-001.request.json"), "utf8"))
+      if (source === "claude") {
+        expect(metadata.parsedBody.system[0].cache_control).toEqual({ type: "ephemeral", ttl: "5m" })
+      } else {
+        expect(metadata.parsedBody.prompt_cache_key).toBe(`matrix-cache-wire-${source}`)
+      }
+    }
+  })
+
   const cases: Array<{ source: SourceFormat; expectedPath: string }> = [
     { source: "chat", expectedPath: "/v1/chat/completions" },
     { source: "responses", expectedPath: "/v1/responses" },

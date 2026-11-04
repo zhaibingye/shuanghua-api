@@ -3,7 +3,7 @@ import type { ModelMessage } from "ai"
 export const SOURCE_FORMATS = ["chat", "responses", "claude", "gemini"] as const
 export type SourceFormat = (typeof SOURCE_FORMATS)[number]
 
-export const SCENARIOS = ["conversation", "file", "image"] as const
+export const SCENARIOS = ["conversation", "file", "image", "cache"] as const
 export type ScenarioName = (typeof SCENARIOS)[number]
 
 export type CheckStatus = "pass" | "warn" | "fail" | "unsupported" | "capability_unsupported"
@@ -31,7 +31,7 @@ export interface MatrixConfig {
 export interface CheckResult {
   id: string
   status: CheckStatus
-  category: "transport" | "sdk" | "conversion" | "reasoning" | "tool" | "context" | "file" | "image" | "model"
+  category: "transport" | "sdk" | "conversion" | "reasoning" | "tool" | "context" | "file" | "image" | "model" | "cache"
   message: string
   evidence?: unknown
 }

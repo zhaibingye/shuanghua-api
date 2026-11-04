@@ -82,6 +82,9 @@ func collectBlockLosses(to types.RelayFormat, blocks []Block, report *Report) {
 		if block.ToolUse != nil && len(block.ToolUse.ProviderSig) > 0 && to != types.RelayFormatGemini {
 			report.AddOnce(LossDropped, "tool_use.thought_signature", "target protocol has no Gemini thoughtSignature")
 		}
+		if block.ToolUse != nil && block.ToolUse.CacheControl != nil && to != types.RelayFormatClaude {
+			report.AddOnce(LossDropped, "cache_control", "target protocol has no Claude cache_control")
+		}
 		if block.Raw != nil && to == types.RelayFormatGemini {
 			switch block.Raw.Type {
 			case "custom_tool_call", "custom_tool_call_output":

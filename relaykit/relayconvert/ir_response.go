@@ -131,7 +131,14 @@ func irApplyResponseUsage(value any, usage *dto.Usage) {
 			return
 		}
 		out.HasUsageMetadata = true
-		out.UsageMetadata = dto.GeminiUsageMetadata{PromptTokenCount: usage.PromptTokens, CandidatesTokenCount: usage.CompletionTokens, TotalTokenCount: usage.TotalTokens, BillingUsage: dto.CloneBillingUsage(usage.BillingUsage)}
+		out.UsageMetadata = dto.GeminiUsageMetadata{
+			PromptTokenCount:        usage.PromptTokens,
+			CandidatesTokenCount:    max(0, usage.CompletionTokens-usage.CompletionTokenDetails.ReasoningTokens),
+			ThoughtsTokenCount:      usage.CompletionTokenDetails.ReasoningTokens,
+			CachedContentTokenCount: usage.PromptTokensDetails.CachedTokens,
+			TotalTokenCount:         usage.TotalTokens,
+			BillingUsage:            dto.CloneBillingUsage(usage.BillingUsage),
+		}
 		billing := dto.CloneBillingUsage(usage.BillingUsage)
 		if billing != nil && billing.GeminiUsageMetadata != nil && (billing.Source == dto.BillingUsageSourceGeminiChat || billing.Semantic == dto.BillingUsageSemanticGemini) {
 			out.UsageMetadata = *billing.GeminiUsageMetadata

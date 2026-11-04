@@ -98,6 +98,10 @@ ${scenarioTable(result, "file")}
 
 ${scenarioTable(result, "image")}
 
+## cache：重复长前缀、缓存命中与用量完整性
+
+${scenarioTable(result, "cache")}
+
 ## 异常与警告
 
 ${details.length > 0 ? details.join("\n") : "- 无。"}

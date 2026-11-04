@@ -6,6 +6,7 @@ import { redactText, toSerializable } from "./util.js"
 function estimatedHttpRequests(config: ReturnType<typeof parseConfig>): number {
   const perCell = config.scenarios.reduce((total, scenario) => {
     if (scenario === "conversation") return total + 5
+    if (scenario === "cache") return total + 2
     return total + 1
   }, 0)
   return config.sourceFormats.length * config.targets.length * perCell

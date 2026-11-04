@@ -168,6 +168,13 @@ func UsageFromChatUsage(src *dto.Usage) *dto.Usage {
 		usage.BillingUsage = dto.NewOpenAIChatBillingUsage(src)
 	}
 	usage.Cost = src.Cost
+	// This is canonical usage for every target, not just the Responses wire
+	// envelope. Keep Chat's cache details as well as the Responses alias.
+	usage.PromptTokensDetails = src.PromptTokensDetails.Clone()
+	usage.PromptCacheHitTokens = src.PromptCacheHitTokens
+	if usage.PromptTokensDetails.CachedTokens == 0 && src.PromptCacheHitTokens > 0 {
+		usage.PromptTokensDetails.CachedTokens = src.PromptCacheHitTokens
+	}
 	if src.PromptTokens != 0 {
 		usage.PromptTokens = src.PromptTokens
 		usage.InputTokens = src.PromptTokens
@@ -181,13 +188,14 @@ func UsageFromChatUsage(src *dto.Usage) *dto.Usage {
 	} else {
 		usage.TotalTokens = usage.InputTokens + usage.OutputTokens
 	}
-	if src.PromptTokensDetails.CachedTokens != 0 ||
+	if usage.PromptTokensDetails.CachedTokens != 0 ||
+		usage.PromptTokensDetails.CachedTokensDetails != nil ||
 		src.PromptTokensDetails.ImageTokens != 0 ||
 		src.PromptTokensDetails.AudioTokens != 0 ||
 		src.PromptTokensDetails.CachedCreationTokens != 0 ||
 		src.PromptTokensDetails.CacheWriteTokens != 0 ||
 		src.PromptTokensDetails.TextTokens != 0 {
-		details := src.PromptTokensDetails
+		details := usage.PromptTokensDetails.Clone()
 		usage.InputTokensDetails = &details
 	}
 	if src.CompletionTokenDetails.ReasoningTokens != 0 ||

@@ -90,7 +90,7 @@
       }
     },
     "prompt_tokens_details": {
-      "cached_tokens": 0,
+      "cached_tokens": 3,
       "text_tokens": 0,
       "audio_tokens": 0,
       "image_tokens": 0

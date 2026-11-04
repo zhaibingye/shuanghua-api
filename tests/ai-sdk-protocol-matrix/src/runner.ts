@@ -2,7 +2,7 @@ import path from "node:path"
 import { cellStatus, check, runStatus, scenarioStatus } from "./analysis.js"
 import { createModelRuntime, PACKAGE_VERSIONS } from "./providers.js"
 import { writeReports } from "./report.js"
-import { runConversationScenario, runFileScenario, runImageScenario } from "./scenarios.js"
+import { runCacheScenario, runConversationScenario, runFileScenario, runImageScenario } from "./scenarios.js"
 import { TraceRecorder } from "./trace-recorder.js"
 import type {
   CellResult,
@@ -31,6 +31,8 @@ async function runScenario(
       return runFileScenario(context)
     case "image":
       return runImageScenario(context)
+    case "cache":
+      return runCacheScenario(context)
   }
 }
 

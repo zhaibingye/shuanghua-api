@@ -102,7 +102,12 @@ type Request struct {
 	ToolChoice  *ToolChoice                  `json:"tool_choice,omitempty"`
 	Format      *ResponseFormat              `json:"format,omitempty"`
 	Metadata    map[string]string            `json:"metadata,omitempty"`
-	Extensions  Extensions                   `json:"extensions,omitempty"`
+	// OpenAI-compatible cache controls have the same meaning in Chat and
+	// Responses. They must survive that bridge, including the isolation salt.
+	PromptCacheKey       string          `json:"prompt_cache_key,omitempty"`
+	PromptCacheRetention json.RawMessage `json:"prompt_cache_retention,omitempty"`
+	CacheSalt            json.RawMessage `json:"cache_salt,omitempty"`
+	Extensions           Extensions      `json:"extensions,omitempty"`
 }
 
 type Message struct {

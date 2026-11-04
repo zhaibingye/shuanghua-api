@@ -15,6 +15,7 @@ import (
 var responsesClaimedKeys = []string{
 	"model", "input", "instructions", "stream", "temperature", "top_p",
 	"max_output_tokens", "tools", "tool_choice", "reasoning", "parallel_tool_calls",
+	"prompt_cache_key", "prompt_cache_retention", "cache_salt",
 }
 
 func FromRequest(req *dto.OpenAIResponsesRequest) (*ir.Request, error) {
@@ -22,8 +23,13 @@ func FromRequest(req *dto.OpenAIResponsesRequest) (*ir.Request, error) {
 		return nil, fmt.Errorf("responses request is nil")
 	}
 	out := &ir.Request{
-		Model:  req.Model,
-		Sample: samplingFromResponses(req),
+		Model:                req.Model,
+		Sample:               samplingFromResponses(req),
+		PromptCacheRetention: jsonx.Clone(req.PromptCacheRetention),
+		CacheSalt:            jsonx.Clone(req.CacheSalt),
+	}
+	if jsonx.Present(req.PromptCacheKey) && kitutil.GetJsonType(req.PromptCacheKey) == "string" {
+		_ = kitutil.Unmarshal(req.PromptCacheKey, &out.PromptCacheKey)
 	}
 	intent, diagnostics, err := reasoning.FromOpenAIResponses(req)
 	if err != nil {
@@ -60,6 +66,7 @@ func FromRequest(req *dto.OpenAIResponsesRequest) (*ir.Request, error) {
 	out.Format = formatFromResponsesText(req.Text)
 
 	ext := &ir.ResponsesExt{
+		PromptCacheOptions: jsonx.Clone(req.PromptCacheOptions),
 		PreviousResponseID: req.PreviousResponseID,
 		Conversation:       jsonx.Clone(req.Conversation),
 		Prompt:             jsonx.Clone(req.Prompt),
@@ -68,12 +75,12 @@ func FromRequest(req *dto.OpenAIResponsesRequest) (*ir.Request, error) {
 		Truncation:         jsonx.Clone(req.Truncation),
 		ContextManagement:  jsonx.Clone(req.ContextManagement),
 	}
-	raw, err := jsonx.WithoutKeys(req, append(responsesClaimedKeys, "previous_response_id", "conversation", "prompt", "include", "store", "truncation", "context_management")...)
+	raw, err := jsonx.WithoutKeys(req, append(responsesClaimedKeys, "prompt_cache_options", "previous_response_id", "conversation", "prompt", "include", "store", "truncation", "context_management")...)
 	if err != nil {
 		return nil, err
 	}
 	ext.Raw = raw
-	if ext.PreviousResponseID != "" || jsonx.Present(ext.Conversation) || jsonx.Present(ext.Prompt) ||
+	if jsonx.Present(ext.PromptCacheOptions) || ext.PreviousResponseID != "" || jsonx.Present(ext.Conversation) || jsonx.Present(ext.Prompt) ||
 		jsonx.Present(ext.Include) || jsonx.Present(ext.Store) || jsonx.Present(ext.Truncation) ||
 		jsonx.Present(ext.ContextManagement) || jsonx.Present(ext.Raw) {
 		out.Extensions.Responses = ext
@@ -86,6 +93,11 @@ func ToRequest(req *ir.Request) (*dto.OpenAIResponsesRequest, error) {
 		return nil, fmt.Errorf("ir request is nil")
 	}
 	out := &dto.OpenAIResponsesRequest{Model: req.Model}
+	if req.PromptCacheKey != "" {
+		out.PromptCacheKey, _ = kitutil.Marshal(req.PromptCacheKey)
+	}
+	out.PromptCacheRetention = jsonx.Clone(req.PromptCacheRetention)
+	out.CacheSalt = jsonx.Clone(req.CacheSalt)
 	if req.Stream || req.StreamSet {
 		stream := req.Stream
 		out.Stream = &stream
@@ -156,6 +168,7 @@ func ToRequest(req *ir.Request) (*dto.OpenAIResponsesRequest, error) {
 		out.Input = raw
 	}
 	if ext := req.Extensions.Responses; ext != nil {
+		out.PromptCacheOptions = jsonx.Clone(ext.PromptCacheOptions)
 		out.PreviousResponseID = ext.PreviousResponseID
 		out.Conversation = jsonx.Clone(ext.Conversation)
 		out.Prompt = jsonx.Clone(ext.Prompt)

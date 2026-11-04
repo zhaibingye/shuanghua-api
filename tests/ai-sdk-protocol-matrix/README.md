@@ -28,7 +28,7 @@
 | Claude | `minimax-m3` |
 | Gemini | `gemini-3.7-flash` |
 
-因此完整深度模式是 4 个客户端格式 × 4 个原生上游格式 × 3 类场景。
+因此完整深度模式是 4 个客户端格式 × 4 个原生上游格式 × 4 类场景。
 
 ## 场景
 
@@ -74,6 +74,12 @@
 - 3 个橙色圆形；
 - 2 个蓝色方形。
 
+### 4. cache
+
+对同一份约一万 tokens 的稳定前缀连续发送两次请求，检查返回标记、输入用量和缓存读取/写入计数。Claude 客户端在 system 消息上设置显式缓存断点；Chat 和 Responses 客户端设置稳定的 `prompt_cache_key`；Gemini 使用隐式缓存。未命中标记为 `WARN`，需要对照同一上游的原生协议列，不能单独据此断言转换失败。
+
+产物序列化保留重复引用的 usage 快照，只将真正的引用环标记为 `[Circular]`。
+
 ## 安装与检查
 
 ```bash
@@ -104,7 +110,7 @@ export NEWAPI_BASE_URL="http://107.175.65.211:3000"
 bun run matrix --dry-run
 ```
 
-默认 deep 模式预计最多约 112 次 HTTP 请求：每个单元格 conversation 约 5 次，file 1 次，image 1 次。工具首步使用 OpenCode/AI SDK 默认的 `auto` 选择，工具返回后的第二步禁用再次调用；默认输出上限为 8192 tokens，降低 reasoning 模型在正文前被截断的概率。
+默认 deep 模式预计最多约 144 次 HTTP 请求：每个单元格 conversation 约 5 次，file 1 次，image 1 次，cache 2 次。工具首步使用 OpenCode/AI SDK 默认的 `auto` 选择，工具返回后的第二步禁用再次调用；默认输出上限为 8192 tokens，降低 reasoning 模型在正文前被截断的概率。
 
 所有生成请求统一使用同一个全局输出 token 配置，不再存在场景级短输出限额。若要完全省略测试程序传给 `streamText` 的输出 token 限制，使用：
 
@@ -189,6 +195,21 @@ artifacts/<run-id>/
 鉴权字段会被替换为 `[REDACTED]`。请求正文中的文件和图片 base64 会保留在 HTTP body 日志中，以便确认附件是否在客户端协议层正确编码。
 
 ## 服务端转换后请求的边界
+
+本地源码验证可使用 `bridge/` 中的回环测试入口。它直接调用当前工作区的 `relaykit` 请求、响应和流式注册表，并将四种原生上游配置为环境变量：`MATRIX_{CHAT,RESPONSES,CLAUDE,GEMINI}_{BASE_URL,API_KEY,MODEL}`。`BASE_URL` 应包含上游的 `/v1` 或 `/v1beta` 前缀。密钥只通过环境传入。
+
+```powershell
+# 配置好上述环境变量后，在 bridge/ 中运行
+$env:GOWORK = "off"
+go run . --trace ../artifacts/upstream
+
+# 在另一个终端，回到本测试目录并配置相同的 MATRIX_*_MODEL
+$env:NEWAPI_BASE_URL = "http://127.0.0.1:38173"
+$env:NEWAPI_API_KEY = "local-matrix"
+bun run matrix --confirm-live
+```
+
+该入口只监听 `127.0.0.1`，不经过网关鉴权、渠道路由、数据库或扣费流程；适用于转换代码的真实 SDK 和上游联调。`--trace` 记录不含鉴权头的上游请求/响应正文，可与客户端产物对照。完整网关部署仍应单独验证。
 
 客户端程序能够完整记录 **AI SDK ↔ NewAPI** 的线协议，但无法从客户端直接看到 **NewAPI → 模型上游** 的转换后请求。要证明某个字段在服务端出站时被改坏，应使用响应头/request ID 与测试服务器日志关联，并在服务器侧开启脱敏后的 relay 请求记录。
 

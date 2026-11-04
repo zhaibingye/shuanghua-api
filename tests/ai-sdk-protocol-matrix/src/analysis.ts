@@ -123,7 +123,7 @@ export function evaluatePuzzleAnswer(text: string): PuzzleEvaluation {
   const normalized = text.replace(/\s+/g, " ").toLowerCase()
   const forty = "(?:40|四十)"
   const driverGain = new RegExp(`(?:司机|车主|你|driver|customer).{0,30}(?:赚|获益|占便宜|gain|benefit).{0,20}${forty}`, "i")
-  const parkingLoss = new RegExp(`(?:保安|停车场|小区|物业|guard|parking|lot).{0,30}(?:亏|损失|少收|lose|lost).{0,20}${forty}`, "i")
+  const parkingLoss = new RegExp(`(?:保安|停车场|停车方|小区|物业|收费方|guard|parking|lot).{0,30}(?:亏|损失|少收|lose|lost).{0,20}${forty}`, "i")
   const unpaidFee = new RegExp(`(?:停车费|parking fee).{0,30}(?:没付|未付|未支付|没有支付|为零|是零|0|unpaid|not paid)`, "i")
   const cashBalanced =
     /(?:现金|cash).{0,30}(?:双方|两人|都|net).{0,30}(?:为?0|是零|零|balanced|even)/i.test(normalized) ||

@@ -3,6 +3,7 @@ import os from "node:os"
 import path from "node:path"
 import { afterEach, describe, expect, it, vi } from "vitest"
 import { TraceRecorder } from "../src/trace-recorder.js"
+import { toSerializable } from "../src/util.js"
 
 const temporaryDirectories: string[] = []
 
@@ -12,6 +13,16 @@ afterEach(async () => {
 })
 
 describe("TraceRecorder", () => {
+  it("preserves shared usage snapshots and detects actual cycles", () => {
+    const usage = { inputTokens: 100, inputTokenDetails: { cacheReadTokens: 60 } }
+    const result: Record<string, unknown> = { stream: { usage }, settled: { usage } }
+    result.self = result
+    expect(toSerializable(result)).toEqual({ stream: { usage }, settled: { usage }, self: "[Circular]" })
+    const error = new Error("test")
+    error.cause = error
+    expect(toSerializable(error)).toMatchObject({ cause: "[Circular]" })
+  })
+
   it("records complete bodies while redacting credentials", async () => {
     const directory = await mkdtemp(path.join(os.tmpdir(), "ai-sdk-matrix-"))
     temporaryDirectories.push(directory)

@@ -16,6 +16,7 @@ var chatClaimedKeys = []string{
 	"seed", "max_tokens", "max_completion_tokens", "frequency_penalty", "presence_penalty",
 	"tools", "tool_choice", "reasoning_effort", "response_format", "parallel_tool_calls",
 	"web_search_options",
+	"prompt_cache_key", "prompt_cache_retention", "cache_salt",
 }
 
 func FromRequest(req *dto.GeneralOpenAIRequest) (*ir.Request, error) {
@@ -23,8 +24,11 @@ func FromRequest(req *dto.GeneralOpenAIRequest) (*ir.Request, error) {
 		return nil, fmt.Errorf("chat request is nil")
 	}
 	out := &ir.Request{
-		Model:  req.Model,
-		Sample: samplingFromChat(req),
+		Model:                req.Model,
+		Sample:               samplingFromChat(req),
+		PromptCacheKey:       req.PromptCacheKey,
+		PromptCacheRetention: jsonx.Clone(req.PromptCacheRetention),
+		CacheSalt:            jsonx.Clone(req.CacheSalt),
 	}
 	if req.Stream != nil {
 		out.Stream = *req.Stream
@@ -92,6 +96,9 @@ func ToRequest(req *ir.Request) (*dto.GeneralOpenAIRequest, error) {
 		return nil, fmt.Errorf("ir request is nil")
 	}
 	out := &dto.GeneralOpenAIRequest{Model: req.Model}
+	out.PromptCacheKey = req.PromptCacheKey
+	out.PromptCacheRetention = jsonx.Clone(req.PromptCacheRetention)
+	out.CacheSalt = jsonx.Clone(req.CacheSalt)
 	if req.Stream || req.StreamSet {
 		stream := req.Stream
 		out.Stream = &stream

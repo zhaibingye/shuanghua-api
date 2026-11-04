@@ -88,7 +88,11 @@ export function toSerializable(value: unknown, secrets: string[] = [], seen = ne
   if (value instanceof URL) return redactUrl(value.toString(), secrets)
   if (value instanceof Date) return value.toISOString()
   if (value instanceof Headers) return headersToRecord(value, secrets)
-  if (value instanceof Error) return serializeError(value, secrets, seen)
+  if (value instanceof Error) {
+    if (seen.has(value)) return "[Circular]"
+    seen.add(value)
+    try { return serializeError(value, secrets, seen) } finally { seen.delete(value) }
+  }
   if (value instanceof Uint8Array) {
     return {
       type: value.constructor.name,
@@ -103,16 +107,20 @@ export function toSerializable(value: unknown, secrets: string[] = [], seen = ne
   if (Array.isArray(value)) {
     if (seen.has(value)) return "[Circular]"
     seen.add(value)
-    return value.map((item) => toSerializable(item, secrets, seen))
+    try { return value.map((item) => toSerializable(item, secrets, seen)) } finally { seen.delete(value) }
   }
   if (typeof value === "object") {
     if (seen.has(value)) return "[Circular]"
     seen.add(value)
-    const result: Record<string, unknown> = {}
-    for (const [key, item] of Object.entries(value)) {
-      result[key] = toSerializable(item, secrets, seen)
+    try {
+      const result: Record<string, unknown> = {}
+      for (const [key, item] of Object.entries(value)) {
+        result[key] = toSerializable(item, secrets, seen)
+      }
+      return result
+    } finally {
+      seen.delete(value)
     }
-    return result
   }
   return String(value)
 }

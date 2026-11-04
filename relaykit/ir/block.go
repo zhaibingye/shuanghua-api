@@ -92,11 +92,12 @@ func (b *ThinkBlock) HasClaudeState() bool {
 }
 
 type ToolUseBlock struct {
-	ID          string          `json:"id,omitempty"`
-	Name        string          `json:"name,omitempty"`
-	Input       json.RawMessage `json:"input,omitempty"`
-	ProviderSig []byte          `json:"provider_sig,omitempty"`
-	Server      bool            `json:"server,omitempty"`
+	ID           string          `json:"id,omitempty"`
+	Name         string          `json:"name,omitempty"`
+	Input        json.RawMessage `json:"input,omitempty"`
+	ProviderSig  []byte          `json:"provider_sig,omitempty"`
+	Server       bool            `json:"server,omitempty"`
+	CacheControl *CacheControl   `json:"cache_control,omitempty"`
 }
 
 type ToolResultBlock struct {

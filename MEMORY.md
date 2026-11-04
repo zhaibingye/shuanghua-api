@@ -16,6 +16,10 @@
 
 ## API 协议转换
 
+- 缓存计数必须同时保留公共 `PromptTokensDetails` 与 Responses 的 `InputTokensDetails`：`UsageFromChatUsage` 也用于其他目标协议和流式账务，不能只填 Responses 别名。Gemini 投影须发送 `cachedContentTokenCount`，并把已包含在 completion 总数里的 reasoning 拆为 `thoughtsTokenCount`。原始供应商账务仍以 `BillingUsage` 快照为准。回归入口为 `relaykit/relayconvert/cache_conversion_test.go`。
+- 缓存转换按用户确认的可用性优先策略处理：Chat/Responses 共有的 `prompt_cache_key`、`prompt_cache_retention`、`cache_salt` 经 IR 保留；目标无法表示的 Gemini `cachedContent`、Responses `prompt_cache_options`、`cache_salt` 等缓存选项静默丢弃，不增加报错或诊断。Responses 非字符串缓存 key 也忽略。原生同格式透传保留原字段；不据此放宽其他有状态会话字段的验证。已核对 new-api 上游 `ba5f7367` 的 Gemini→Chat、Responses→Chat 转换。
+- Claude 工具调用、工具定义及工具结果中的缓存断点均需保留。单文本工具结果只有在不含 `cache_control` 或 citations 时才能折叠成字符串。`ConvertRequestVia` 抽取并最终恢复的工具定义也必须保留缓存配置。
+
 - 内置文本转换器的实际入口在 `relaykit/relayconvert/text_converter_registry.go`，请求与响应统一走 `ir/project`；排查旧 `internal` 转换器时须先确认调用链，不能仅凭旧实现判断当前行为。
 - 跨格式请求在缺少思考强度控制时，按最终目标补默认值：Chat、Responses、Claude 为 `xhigh`，Gemini 为 `high`；显式关闭和预算不被默认值覆盖。转换时保留原始档位，Gemini 将 `xhigh`/`max` 映射为 `high`，2.5 系列仍使用等价预算。`ConvertRequestVia` 用请求局部状态保留原始意图，避免中间格式降低档位或丢失精确预算；原生同格式请求仍走透传路径。验证入口为 `request_registry_test.go` 的 `TestConvertRequestReasoning*`。
 - IR 内容块索引包含思维和正文；投影 Chat 流时，`tool_calls.index` 必须独立映射为每个 choice 内从零开始的连续索引。工具块开始事件的 `Event.ID` 是调用 ID，不能用作 Chat 响应 ID。回归入口为 `TestChatToolStreamIndexesAndResponseIDAfterThinking`，并已用 OpenAI Python SDK 2.9.0 重放实际转换输出。

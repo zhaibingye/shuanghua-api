@@ -539,12 +539,20 @@ func attachClaudeRequest(request any, set Set, options *convmeta.Options) (any, 
 			if err != nil {
 				return nil, diagnostics, fmt.Errorf("tools[%d].input_schema: %w", index, err)
 			}
-			tools = append(tools, &dto.Tool{
+			tool := &dto.Tool{
 				Name:        definition.Function.Name,
 				Description: definition.Function.Description,
 				InputSchema: inputSchema,
 				Strict:      definition.Function.Strict,
-			})
+			}
+			if set.Source == types.RelayFormatClaude && len(definition.Raw) > 0 {
+				var native dto.Tool
+				if err := kitutil.Unmarshal(definition.Raw, &native); err != nil {
+					return nil, diagnostics, err
+				}
+				tool.CacheControl = cloneRaw(native.CacheControl)
+			}
+			tools = append(tools, tool)
 		case KindWebSearch:
 			if set.Source == types.RelayFormatGemini {
 				diagnostics = append(diagnostics, geminiNativeWebSearchDiagnostics(index, definition, types.RelayFormatClaude)...)
@@ -575,6 +583,15 @@ func attachClaudeRequest(request any, set Set, options *convmeta.Options) (any, 
 				return nil, diagnostics, fmt.Errorf("tools[%d].response_inclusion requires Claude web_search_20260318", index)
 			}
 			tool := map[string]any{"type": toolType, "name": "web_search"}
+			if set.Source == types.RelayFormatClaude && len(definition.Raw) > 0 {
+				var native map[string]any
+				if err := kitutil.Unmarshal(definition.Raw, &native); err != nil {
+					return nil, diagnostics, err
+				}
+				if cacheControl, ok := native["cache_control"]; ok {
+					tool["cache_control"] = cacheControl
+				}
+			}
 			if webSearch != nil {
 				if webSearch.Location != nil {
 					location := locationMap(webSearch.Location)

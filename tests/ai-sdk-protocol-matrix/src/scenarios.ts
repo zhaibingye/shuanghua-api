@@ -1,7 +1,7 @@
 import { readFile } from "node:fs/promises"
 import path from "node:path"
 import { fileURLToPath } from "node:url"
-import { stepCountIs, tool, type ModelMessage, type ToolSet } from "ai"
+import { stepCountIs, tool, type LanguageModelUsage, type ModelMessage, type ToolSet } from "ai"
 import { z } from "zod"
 import {
   check,
@@ -66,6 +66,90 @@ function generationSettings(context: ScenarioContext) {
     ...(context.runtime.topP === undefined ? {} : { topP: context.runtime.topP }),
     ...(context.runtime.topK === undefined ? {} : { topK: context.runtime.topK }),
   }
+}
+
+export async function runCacheScenario(context: ScenarioContext): Promise<ScenarioResult> {
+  const startedAt = nowIso()
+  const checks: CheckResult[] = []
+  const operations: ScenarioResult["operations"] = []
+  const marker = `CACHE_OK_${context.source}_${context.target.format}`
+  // About 10k tokens, so the probe also covers models with a 4096-token
+  // minimum. A run-specific prefix prevents an old test from warming it.
+  const prefix = [
+    `Protocol cache audit ${context.config.runId}/${context.source}/${context.target.format}.`,
+    ...Array.from({ length: 512 }, (_, index) =>
+      `Reference record ${String(index).padStart(4, "0")}: CEDAR preserves ordered instructions, tool definitions, and exact conversation text across repeated requests.`,
+    ),
+    `Ignore the reference records when answering. Reply with exactly ${marker}.`,
+  ].join("\n")
+  const messages: ModelMessage[] = [
+    {
+      role: "system",
+      content: prefix,
+      ...(context.source === "claude"
+        ? { providerOptions: { anthropic: { cacheControl: { type: "ephemeral", ttl: "5m" } } } }
+        : {}),
+    },
+    { role: "user", content: `Return the verification marker ${marker}.` },
+  ]
+  const settings = generationSettings(context)
+  const cacheKey = `matrix-${context.config.runId}-${context.target.format}`
+  if (context.source === "chat") {
+    // openai-compatible passes unknown options through using wire names.
+    settings.providerOptions = {
+      ...settings.providerOptions,
+      openaiCompatible: {
+        ...settings.providerOptions.openaiCompatible,
+        prompt_cache_key: cacheKey,
+      },
+    }
+  }
+  if (context.source === "responses") {
+    settings.providerOptions = {
+      ...settings.providerOptions,
+      openai: {
+        ...settings.providerOptions.openai,
+        promptCacheKey: cacheKey,
+      },
+    }
+  }
+  for (let attempt = 1; attempt <= 2; attempt += 1) {
+    const operationName = `cache-repeat-${attempt}`
+    const outcome = await runGeneration(context.recorder, context.config, {
+      source: context.source,
+      relativeCellDirectory: path.join(context.relativeCellDirectory, "cache"),
+      operationName,
+      ...settings,
+      messages,
+    })
+    operations.push({ name: operationName, outcome })
+    checks.push(transportCheck(operationName, outcome))
+    if (!outcome.ok) break
+    checks.push(check(`cache.marker-${attempt}`, containsExact(outcome.text, marker) ? "pass" : "fail", "cache",
+      "Repeated cached-prefix requests must retain their verification marker", { expected: marker, text: outcome.text }))
+    const settledUsage = outcome.settled.usage
+    const usage = settledUsage?.status === "fulfilled" ? settledUsage.value as LanguageModelUsage | undefined : undefined
+    const input = usage?.inputTokens
+    const read = usage?.inputTokenDetails?.cacheReadTokens
+    const write = usage?.inputTokenDetails?.cacheWriteTokens
+    if (typeof input !== "number" || input <= 0) {
+      checks.push(check(`cache.usage-${attempt}`, "warn", "cache", "Provider did not expose input token usage", usage))
+      continue
+    }
+    const valid = [read, write].every(value => value === undefined || (Number.isSafeInteger(value) && value >= 0 && value <= input))
+    checks.push(check(`cache.usage-${attempt}`, valid ? "pass" : "fail", "cache",
+      "Cache read/write counts must be nonnegative subsets of total input tokens", { input, read, write }))
+    if (attempt === 2) {
+      const fraction = typeof read === "number" ? read / input : 0
+      // Tiny incidental hits do not establish reuse of this long prefix.
+      // Low coverage is a warning because cache placement is upstream-owned.
+      checks.push(check("cache.repeated-prefix-hit", fraction >= 0.5 ? "pass" : "warn", "cache",
+        fraction >= 0.5
+          ? "The provider reused at least half of the repeated long input prefix"
+          : "Less than half of the repeated input was cached; compare native upstream behavior", { input, read, write, fraction }))
+    }
+  }
+  return createScenarioResult("cache", startedAt, checks, operations)
 }
 
 export async function runConversationScenario(context: ScenarioContext): Promise<ScenarioResult> {

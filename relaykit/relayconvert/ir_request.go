@@ -33,6 +33,8 @@ func irRequestConverter(from, target types.RelayFormat) RequestConverterFunc {
 			return nil, err
 		}
 		convdiag.Add(ctx, normalized.Diagnostics...)
+		// Cache controls are best-effort: each projection emits supported
+		// fields and silently omits the rest so they cannot interrupt relay.
 		for i, message := range normalized.Messages {
 			for j, block := range message.Blocks {
 				if block.Kind != ir.BlockKindThink {

@@ -13,6 +13,12 @@ describe("matrix result analysis", () => {
     })
   })
 
+  it("accepts the fee collector wording observed in a correct live response", () => {
+    expect(evaluatePuzzleAnswer("你获得价值 40 元的停车服务；收费方少收 40 元停车收入。").economicConclusion).toBe(true)
+    expect(evaluatePuzzleAnswer("司机获得价值 40 元的停车服务；停车方少收 40 元停车费。").economicConclusion).toBe(true)
+    expect(evaluatePuzzleAnswer("收费方少收 20 元停车收入。").economicConclusion).toBe(false)
+  })
+
   it("diagnoses portable and malformed tool call IDs", () => {
     expect(diagnoseToolCallId("call_ABC-123")).toMatchObject({
       nonEmpty: true,

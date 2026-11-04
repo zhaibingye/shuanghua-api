@@ -104,6 +104,7 @@ func blockFromClaudeMap(m map[string]any) (ir.Block, error) {
 		}
 		block := ir.ToolUse(mapString(m, "id"), mapString(m, "name"), input)
 		block.ToolUse.Server = typ == "server_tool_use"
+		block.ToolUse.CacheControl = cacheControlFromAny(m["cache_control"])
 		return block, nil
 	case "tool_result":
 		return toolResultFromClaudeMap(m)
@@ -231,6 +232,9 @@ func blockToClaudeValue(block ir.Block) (any, error) {
 		putIfNotEmpty(m, "id", block.ToolUse.ID)
 		putIfNotEmpty(m, "name", block.ToolUse.Name)
 		m["input"] = claudeToolInputValue(block.ToolUse.Input)
+		if cc := cacheControlToMap(block.ToolUse.CacheControl); cc != nil {
+			m["cache_control"] = cc
+		}
 		return m, nil
 	case ir.BlockKindToolResult:
 		if block.ToolResult == nil {
@@ -346,7 +350,8 @@ func toolResultContent(blocks []ir.Block) (any, error) {
 	if len(blocks) == 0 {
 		return "", nil
 	}
-	if len(blocks) == 1 && blocks[0].Kind == ir.BlockKindText && blocks[0].Text != nil {
+	if len(blocks) == 1 && blocks[0].Kind == ir.BlockKindText && blocks[0].Text != nil &&
+		blocks[0].Text.CacheControl == nil && !rawPresent(blocks[0].Text.Citations) {
 		return blocks[0].Text.Text, nil
 	}
 	out := make([]any, 0, len(blocks))
