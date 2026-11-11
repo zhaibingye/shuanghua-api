@@ -114,8 +114,12 @@ func irRequestConverter(from, target types.RelayFormat) RequestConverterFunc {
 		if normalized.Think != nil && target == types.RelayFormatOpenAIResponses && from != types.RelayFormatOpenAIResponses && normalized.Think.Display == ir.ThinkDisplayAuto {
 			normalized.Think.Display = ir.ThinkDisplayDetailed
 		}
-		if info != nil && reasoning.EffectiveEffort(intent) != "" {
-			info.SetReasoningEffort(string(reasoning.EffectiveEffort(intent)))
+		effectiveEffort := reasoning.EffectiveEffort(intent)
+		if target == types.RelayFormatOpenAI || target == types.RelayFormatOpenAIResponses {
+			effectiveEffort = reasoning.OpenAIOutputEffort(normalized.Model, intent)
+		}
+		if info != nil && effectiveEffort != "" {
+			info.SetReasoningEffort(string(effectiveEffort))
 		}
 		if target == types.RelayFormatClaude || target == types.RelayFormatGemini {
 			normalized.Think = nil
@@ -154,6 +158,7 @@ func irRequestConverter(from, target types.RelayFormat) RequestConverterFunc {
 				}
 			}
 			if opts.OpenRouterDialect && !intent.IsEmpty() {
+				intent = intent.PreferEffort(reasoning.EffortXHigh)
 				enabled := intent.Mode != reasoning.ModeDisabled && intent.Effort != reasoning.EffortNone
 				config := map[string]any{"enabled": enabled}
 				if enabled && intent.BudgetTokens != nil && intent.Mode != reasoning.ModeAdaptive {
@@ -271,6 +276,11 @@ func irSourceReasoning(ctx context.Context, info convmeta.Meta, from, target typ
 			return intent, err
 		}
 		convdiag.Add(ctx, diagnostics...)
+		if google.BudgetTokens != nil && intent.Effort != "" {
+			google.BudgetTokens = nil
+			google.Mode = reasoning.ModeUnset
+			google.Effort = ""
+		}
 		if google.HasStrength() {
 			if intent.HasStrength() && reasoning.EffectiveEffort(google) != reasoning.EffectiveEffort(intent) {
 				convdiag.Add(ctx, types.ConversionDiagnostic{

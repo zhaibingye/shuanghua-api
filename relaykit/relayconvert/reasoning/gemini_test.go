@@ -29,8 +29,8 @@ func TestRenderGeminiMapsAndClampsInsteadOfRejecting(t *testing.T) {
 			name:       "budget on gemini 3.1 pro becomes level",
 			model:      "gemini-3.1-pro-preview",
 			intent:     Intent{BudgetTokens: &budget8192},
-			wantLevel:  "medium",
-			wantEffort: EffortMedium,
+			wantLevel:  "high",
+			wantEffort: EffortHigh,
 			wantCodes:  []string{"gemini_budget_to_level"},
 		},
 		{
@@ -160,8 +160,8 @@ func TestNormalizeGeminiThinkingConfigRewritesNativeConfig(t *testing.T) {
 			name:       "budget on gemini 3.1 pro becomes level",
 			model:      "gemini-3.1-pro-preview",
 			config:     dto.GeminiThinkingConfig{ThinkingBudget: intPtr(8192)},
-			wantLevel:  "medium",
-			wantEffort: EffortMedium,
+			wantLevel:  "high",
+			wantEffort: EffortHigh,
 			wantCodes:  []string{"gemini_budget_to_level"},
 		},
 		{
@@ -316,12 +316,12 @@ func TestNormalizeGeminiThinkingConfigRewritesNativeConfig(t *testing.T) {
 			wantCodes:  []string{"gemini_budget_level_conflict"},
 		},
 		{
-			name:       "budget and level on gemini 2.5 keeps the budget",
+			name:       "budget and level on gemini 2.5 uses the level to set a budget",
 			model:      "gemini-2.5-flash",
 			config:     dto.GeminiThinkingConfig{ThinkingBudget: intPtr(4096), ThinkingLevel: "high"},
-			wantBudget: intPtr(4096),
-			wantEffort: EffortMedium,
-			wantCodes:  []string{"gemini_budget_level_conflict"},
+			wantBudget: intPtr(24576),
+			wantEffort: EffortHigh,
+			wantCodes:  []string{"gemini_budget_level_conflict", "gemini_level_to_budget"},
 		},
 		{
 			name:    "budget and level on an unknown model is rejected",

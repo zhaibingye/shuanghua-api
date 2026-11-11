@@ -127,7 +127,7 @@ func TestThinkingConfigMapsBudgetToNativeLevelForGemini3(t *testing.T) {
 	})
 	require.NoError(t, err)
 	require.NotNil(t, out.GenerationConfig.ThinkingConfig)
-	require.Equal(t, "medium", out.GenerationConfig.ThinkingConfig.ThinkingLevel)
+	require.Equal(t, "high", out.GenerationConfig.ThinkingConfig.ThinkingLevel)
 	require.Nil(t, out.GenerationConfig.ThinkingConfig.ThinkingBudget)
 	require.Equal(t, boolPointer(true), out.GenerationConfig.ThinkingConfig.IncludeThoughts)
 }

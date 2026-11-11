@@ -28,6 +28,7 @@ func (r *GeminiChatRequest) UnmarshalJSON(data []byte) error {
 	var aux struct {
 		Alias
 		SystemInstructionSnake *GeminiChatContent `json:"system_instruction,omitempty"`
+		ToolConfigSnake        *ToolConfig        `json:"tool_config,omitempty"`
 	}
 
 	if err := kitutil.Unmarshal(data, &aux); err != nil {
@@ -39,6 +40,9 @@ func (r *GeminiChatRequest) UnmarshalJSON(data []byte) error {
 	if aux.SystemInstructionSnake != nil {
 		r.SystemInstructions = aux.SystemInstructionSnake
 	}
+	if r.ToolConfig == nil {
+		r.ToolConfig = aux.ToolConfigSnake
+	}
 
 	return nil
 }
@@ -49,11 +53,48 @@ type ToolConfig struct {
 	IncludeServerSideToolInvocations *bool                  `json:"includeServerSideToolInvocations,omitempty"`
 }
 
+func (c *ToolConfig) UnmarshalJSON(data []byte) error {
+	type Alias ToolConfig
+	var aux struct {
+		Alias
+		FunctionCallingConfigSnake *FunctionCallingConfig `json:"function_calling_config"`
+	}
+	if err := kitutil.Unmarshal(data, &aux); err != nil {
+		return err
+	}
+	*c = ToolConfig(aux.Alias)
+	if c.FunctionCallingConfig == nil {
+		c.FunctionCallingConfig = aux.FunctionCallingConfigSnake
+	}
+	return nil
+}
+
 type FunctionCallingConfig struct {
 	Mode                        FunctionCallingConfigMode `json:"mode,omitempty"`
 	AllowedFunctionNames        []string                  `json:"allowedFunctionNames,omitempty"`
 	StreamFunctionCallArguments *bool                     `json:"streamFunctionCallArguments,omitempty"`
 }
+
+func (c *FunctionCallingConfig) UnmarshalJSON(data []byte) error {
+	type Alias FunctionCallingConfig
+	var aux struct {
+		Alias
+		AllowedFunctionNamesSnake        []string `json:"allowed_function_names"`
+		StreamFunctionCallArgumentsSnake *bool    `json:"stream_function_call_arguments"`
+	}
+	if err := kitutil.Unmarshal(data, &aux); err != nil {
+		return err
+	}
+	*c = FunctionCallingConfig(aux.Alias)
+	if c.AllowedFunctionNames == nil {
+		c.AllowedFunctionNames = aux.AllowedFunctionNamesSnake
+	}
+	if c.StreamFunctionCallArguments == nil {
+		c.StreamFunctionCallArguments = aux.StreamFunctionCallArgumentsSnake
+	}
+	return nil
+}
+
 type FunctionCallingConfigMode string
 
 type RetrievalConfig struct {

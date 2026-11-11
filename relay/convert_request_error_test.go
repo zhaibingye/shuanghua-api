@@ -30,6 +30,203 @@ type imageReservation struct {
 	held, limit int
 }
 
+func TestReasoningBudgetsInNativeUpstreamRequests(t *testing.T) {
+	service.InitHttpClient()
+	received := make(chan []byte, 1)
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		body, err := io.ReadAll(r.Body)
+		if err == nil {
+			received <- body
+		}
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusBadGateway)
+		_, _ = io.WriteString(w, `{"error":{"message":"fixture upstream failure"}}`)
+	}))
+	t.Cleanup(upstream.Close)
+
+	for _, tc := range []struct {
+		name, model, controls, wantEffort, wantBudget string
+		format                                        types.RelayFormat
+		passThrough                                   bool
+	}{
+		{"Argon budget", "gemini-4-argon", `"thinkingBudget":8192,"includeThoughts":false`, "HIGH", "", types.RelayFormatGemini, false},
+		{"Argon explicit level wins", "gemini-4-argon", `"thinkingBudget":0,"thinkingLevel":"LOW"`, "LOW", "", types.RelayFormatGemini, false},
+		{"Argon zero budget uses lowest level", "gemini-4-argon", `"thinkingBudget":0`, "LOW", "", types.RelayFormatGemini, false},
+		{"Argon dynamic budget uses native default", "gemini-4-argon", `"thinkingBudget":-1`, "", "", types.RelayFormatGemini, false},
+		{"Gemini 2.5 budget", "gemini-2.5-flash", `"thinkingBudget":8192`, "", "8192", types.RelayFormatGemini, false},
+		{"Gemini body passthrough", "gemini-4-argon", `"thinkingBudget":8192`, "", "8192", types.RelayFormatGemini, true},
+		{"Chat budget", "gpt-5.4", `"thinking_budget":8192`, "xhigh", "", types.RelayFormatOpenAI, false},
+		{"Chat nested budget and explicit effort", "gpt-5.4", `"reasoning":{"max_tokens":8192,"effort":"low"}`, "low", "", types.RelayFormatOpenAI, false},
+		{"Chat older effort", "gpt-5", `"thinking_budget":8192`, "high", "", types.RelayFormatOpenAI, false},
+		{"Responses budget preserves summary", "gpt-5.4", `"thinking_budget":8192,"reasoning":{"summary":"auto"}`, "xhigh", "", types.RelayFormatOpenAIResponses, false},
+		{"Responses explicit off wins", "gpt-5.4", `"thinking_budget":8192,"reasoning":{"effort":"none"}`, "none", "", types.RelayFormatOpenAIResponses, false},
+		{"Claude budget", "claude-opus-4-7", `"thinking":{"type":"enabled","budget_tokens":8192}`, "xhigh", "", types.RelayFormatClaude, false},
+		{"Claude explicit effort wins", "claude-opus-4-7", `"thinking":{"type":"enabled","budget_tokens":8192},"output_config":{"effort":"low"}`, "low", "", types.RelayFormatClaude, false},
+		{"Claude 4.6 falls back to high", "claude-sonnet-4-6", `"thinking":{"type":"enabled","budget_tokens":8192}`, "high", "", types.RelayFormatClaude, false},
+		{"Claude manual budget", "claude-opus-4-5", `"thinking":{"type":"enabled","budget_tokens":8192}`, "", "8192", types.RelayFormatClaude, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			channelType := constant.ChannelTypeOpenAI
+			var path, body, effortPath, budgetPath, outputPath string
+			var handle func(*gin.Context, *relaycommon.RelayInfo) *types.NewAPIError
+			switch tc.format {
+			case types.RelayFormatGemini:
+				channelType = constant.ChannelTypeGemini
+				path = "/v1beta/models/alias:streamGenerateContent"
+				body = `{"contents":[{"role":"user","parts":[{"text":"hello"}]}],"generationConfig":{"maxOutputTokens":16384,"thinkingConfig":{` + tc.controls + `}}}`
+				effortPath, budgetPath, outputPath = "generationConfig.thinkingConfig.thinkingLevel", "generationConfig.thinkingConfig.thinkingBudget", "generationConfig.maxOutputTokens"
+				handle = GeminiHelper
+			case types.RelayFormatOpenAI:
+				path = "/v1/chat/completions"
+				body = `{"model":"alias","messages":[{"role":"user","content":"hello"}],"max_completion_tokens":16384,` + tc.controls + `}`
+				effortPath, budgetPath, outputPath = "reasoning_effort", "thinking_budget", "max_completion_tokens"
+				handle = TextHelper
+			case types.RelayFormatOpenAIResponses:
+				path = "/v1/responses"
+				body = `{"model":"alias","input":"hello","max_output_tokens":16384,` + tc.controls + `}`
+				effortPath, budgetPath, outputPath = "reasoning.effort", "thinking_budget", "max_output_tokens"
+				handle = ResponsesHelper
+			case types.RelayFormatClaude:
+				channelType = constant.ChannelTypeAnthropic
+				path = "/v1/messages"
+				body = `{"model":"alias","messages":[{"role":"user","content":"hello"}],"max_tokens":16384,` + tc.controls + `}`
+				effortPath, budgetPath, outputPath = "output_config.effort", "thinking.budget_tokens", "max_tokens"
+				handle = ClaudeHelper
+			}
+			require.NotNil(t, handle)
+			c, _ := gin.CreateTestContext(httptest.NewRecorder())
+			c.Request = httptest.NewRequest(http.MethodPost, path, strings.NewReader(body))
+			c.Request.Header.Set("Content-Type", "application/json")
+			common.SetContextKey(c, constant.ContextKeyOriginalModel, "alias")
+			common.SetContextKey(c, constant.ContextKeyChannelType, channelType)
+			common.SetContextKey(c, constant.ContextKeyChannelModelMapping, `{"alias":"`+tc.model+`"}`)
+			common.SetContextKey(c, constant.ContextKeyChannelBaseUrl, upstream.URL)
+			common.SetContextKey(c, constant.ContextKeyChannelSetting, dto.ChannelSettings{PassThroughBodyEnabled: tc.passThrough})
+			request, err := helper.GetAndValidateRequest(c, tc.format)
+			require.NoError(t, err)
+			info, err := relaycommon.GenRelayInfo(c, tc.format, request, nil)
+			require.NoError(t, err)
+			apiErr := handle(c, info)
+			require.NotNil(t, apiErr)
+			require.Equal(t, http.StatusBadGateway, apiErr.StatusCode, "%v", apiErr)
+			require.Len(t, received, 1)
+			outbound := <-received
+			assert.Equal(t, tc.wantEffort, gjson.GetBytes(outbound, effortPath).Str)
+			assert.Equal(t, tc.wantBudget, gjson.GetBytes(outbound, budgetPath).Raw)
+			assert.Equal(t, int64(16384), gjson.GetBytes(outbound, outputPath).Int())
+			assert.False(t, gjson.GetBytes(outbound, "reasoning.max_tokens").Exists())
+			if tc.format == types.RelayFormatClaude && tc.wantEffort != "" {
+				assert.Equal(t, "adaptive", gjson.GetBytes(outbound, "thinking.type").Str)
+			}
+			if strings.Contains(tc.controls, `"summary":"auto"`) {
+				assert.Equal(t, "auto", gjson.GetBytes(outbound, "reasoning.summary").Str)
+			}
+			if strings.Contains(tc.controls, `"includeThoughts":false`) {
+				assert.Equal(t, "false", gjson.GetBytes(outbound, "generationConfig.thinkingConfig.includeThoughts").Raw)
+			}
+			if tc.passThrough {
+				assert.Equal(t, body, string(outbound))
+			}
+		})
+	}
+}
+
+func TestNativeGeminiSearchAndFunctionTools(t *testing.T) {
+	service.InitHttpClient()
+	received := make(chan []byte, 1)
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		body, err := io.ReadAll(r.Body)
+		if err == nil {
+			received <- body
+		}
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusBadGateway)
+		_, _ = io.WriteString(w, `{"error":{"message":"fixture upstream failure"}}`)
+	}))
+	t.Cleanup(upstream.Close)
+
+	const functions = `[{"functionDeclarations":[{"name":"lookup","parametersJsonSchema":{"type":"object"}}]}]`
+	const mixed = `[{"googleSearch":{}},{"google_search_retrieval":{}},{"enterpriseWebSearch":{}},{"functionDeclarations":[{"name":"lookup","parametersJsonSchema":{"type":"object"}}]}]`
+	const combined = `{"google_search":{},"function_declarations":[{"name":"lookup"}],"urlContext":{},"vendorTool":{"value":9007199254740993}}`
+	const combinedWithoutSearch = `{"function_declarations":[{"name":"lookup"}],"urlContext":{},"vendorTool":{"value":9007199254740993}}`
+	const searchOnly = `[{"googleSearch":{"excludeDomains":["example.test"]}},{"function_declarations":[]},{"codeExecution":{}}]`
+	const skillPrompt = "<role>assistant</role>\n<available_skills>\nUse the lookup tool.\n</available_skills>"
+	const cleanSkillPrompt = "<role>assistant</role>\n\nUse the lookup tool.\n"
+	const clientToolConfig = `,"toolConfig":{"function_calling_config":{"mode":"ANY","allowed_function_names":["lookup"],"stream_function_call_arguments":false,"clientOnly":true}}`
+	const nativeToolConfig = `{"functionCallingConfig":{"mode":"ANY","allowedFunctionNames":["lookup"],"streamFunctionCallArguments":false}}`
+	for _, tc := range []struct {
+		name, tools, want string
+		channelType       int
+		policy            types.ConversionLossPolicy
+		passthrough       bool
+	}{
+		{name: "function tools suppress preceding searches", tools: mixed, want: functions},
+		{name: "mixed native object retains its other fields", tools: combined, want: combinedWithoutSearch},
+		{name: "search and hosted code execution stay enabled", tools: searchOnly, want: searchOnly},
+		{name: "functions only", tools: functions, want: functions},
+		{name: "safe policy rejects removal", tools: mixed, policy: types.ConversionLossPolicySafe},
+		{name: "strict policy rejects removal", tools: mixed, policy: types.ConversionLossPolicyStrict},
+		{name: "request body passthrough", tools: mixed, want: mixed, passthrough: true},
+		{name: "native format on another channel", tools: mixed, want: mixed, channelType: constant.ChannelTypeNewAPI},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			prompt, err := common.Marshal(skillPrompt)
+			require.NoError(t, err)
+			toolConfig := clientToolConfig
+			if tc.tools == searchOnly {
+				toolConfig = ""
+			}
+			body := `{"contents":[{"role":"user","parts":[{"text":"<available_skills>literal user message</available_skills>"}]}],` +
+				`"system_instruction":{"parts":[{"text":` + string(prompt) + `}]},"tools":` + tc.tools + toolConfig + `}`
+			c, _ := gin.CreateTestContext(httptest.NewRecorder())
+			c.Request = httptest.NewRequest(http.MethodPost, "/v1beta/models/gemini-4-argon:streamGenerateContent?alt=sse", strings.NewReader(body))
+			c.Request.Header.Set("Content-Type", "application/json")
+			channelType := tc.channelType
+			if channelType == 0 {
+				channelType = constant.ChannelTypeGemini
+			}
+			common.SetContextKey(c, constant.ContextKeyOriginalModel, "gemini-4-argon")
+			common.SetContextKey(c, constant.ContextKeyChannelType, channelType)
+			common.SetContextKey(c, constant.ContextKeyChannelBaseUrl, upstream.URL)
+			common.SetContextKey(c, constant.ContextKeyChannelSetting, dto.ChannelSettings{PassThroughBodyEnabled: tc.passthrough})
+			common.SetContextKey(c, constant.ContextKeyChannelOtherSetting, dto.ChannelOtherSettings{ToolLossPolicy: string(tc.policy)})
+			request, err := helper.GetAndValidateGeminiRequest(c)
+			require.NoError(t, err)
+			info := relaycommon.GenRelayInfoGemini(c, request)
+			apiErr := GeminiHelper(c, info)
+			require.NotNil(t, apiErr)
+			if tc.want == "" {
+				assert.Equal(t, http.StatusBadRequest, apiErr.StatusCode)
+				assert.Empty(t, received)
+				assert.True(t, hasHostDiagnosticCode(info.ConversionDiagnostics(), "hosted_web_search_omitted"))
+				return
+			}
+			require.Equal(t, http.StatusBadGateway, apiErr.StatusCode, "%v", apiErr)
+			require.Len(t, received, 1)
+			outbound := <-received
+			gotTools := gjson.GetBytes(outbound, "tools").Raw
+			assert.JSONEq(t, tc.want, gotTools)
+			assert.Equal(t, tc.want != tc.tools, hasHostDiagnosticCode(info.ConversionDiagnostics(), "hosted_web_search_omitted"))
+			if tc.tools == combined {
+				assert.Equal(t, "9007199254740993", gjson.Get(gotTools, "vendorTool.value").Raw)
+			}
+			if tc.passthrough {
+				assert.Equal(t, body, string(outbound))
+				return
+			}
+			wantPrompt := skillPrompt
+			if channelType == constant.ChannelTypeGemini {
+				wantPrompt = cleanSkillPrompt
+			}
+			assert.Equal(t, wantPrompt, gjson.GetBytes(outbound, "systemInstruction.parts.0.text").String())
+			assert.Equal(t, "<available_skills>literal user message</available_skills>", gjson.GetBytes(outbound, "contents.0.parts.0.text").String())
+			if toolConfig != "" {
+				assert.JSONEq(t, nativeToolConfig, gjson.GetBytes(outbound, "toolConfig").Raw)
+			}
+		})
+	}
+}
+
 func (s *imageReservation) Reserve(quota int) error {
 	if quota > s.limit {
 		return errors.New("insufficient image quota")
@@ -232,7 +429,7 @@ func TestGeminiThinkingControlsConvertBestEffort(t *testing.T) {
 		converted, ok := result.Value.(*dto.GeminiChatRequest)
 		require.True(t, ok)
 		require.NotNil(t, converted.GenerationConfig.ThinkingConfig)
-		assert.Equal(t, "medium", converted.GenerationConfig.ThinkingConfig.ThinkingLevel)
+		assert.Equal(t, "high", converted.GenerationConfig.ThinkingConfig.ThinkingLevel)
 		assert.Nil(t, converted.GenerationConfig.ThinkingConfig.ThinkingBudget)
 		assert.True(t, hasHostDiagnosticCode(info.ConversionDiagnostics(), "gemini_budget_to_level"))
 	})
@@ -286,7 +483,7 @@ func TestGeminiThinkingControlsConvertBestEffort(t *testing.T) {
 		require.NoError(t, err)
 		converted, ok := result.Value.(*dto.GeneralOpenAIRequest)
 		require.True(t, ok)
-		assert.Equal(t, "medium", converted.ReasoningEffort)
+		assert.Equal(t, "high", converted.ReasoningEffort)
 		require.NotNil(t, converted.ReasoningConversion)
 		assert.Equal(t, &budget, converted.ReasoningConversion.BudgetTokens)
 	})

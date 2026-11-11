@@ -738,14 +738,8 @@ func attachGeminiRequest(request any, set Set, options *convmeta.Options) (any, 
 				diagnostics = append(diagnostics, presentationLoss(fmt.Sprintf("tools[%d].strict", index), "unsupported_function_strict", "Gemini does not expose OpenAI function strictness"))
 			}
 		case KindWebSearch:
-			// Converted requests avoid mixing hosted search with functions;
-			// native Gemini requests were handled above without this policy.
 			if hasFunctionTools {
-				diagnostics = append(diagnostics, semanticLoss(
-					fmt.Sprintf("tools[%d]", index),
-					"hosted_web_search_omitted",
-					"built-in web search is omitted when converting to Gemini with function tools",
-				))
+				diagnostics = append(diagnostics, geminiSearchWithFunctionsOmitted(index))
 				continue
 			}
 			call := newWebSearchCall(set, index, definition, types.RelayFormatGemini)

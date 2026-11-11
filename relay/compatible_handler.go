@@ -124,7 +124,7 @@ func TextHelper(c *gin.Context, info *relaycommon.RelayInfo) (newAPIError *types
 			service.SetModerationRequestContent(c, request)
 		}
 
-		jsonData, err := common.Marshal(convertedRequest)
+		jsonData, err := relaycommon.MarshalConvertedTextRequest(info, convertedRequest)
 		if err != nil {
 			return types.NewError(err, types.ErrorCodeJsonMarshalFailed, types.ErrOptionWithSkipRetry())
 		}

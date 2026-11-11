@@ -208,6 +208,24 @@ func normalizeIntent(intent Intent) (Intent, []types.ConversionDiagnostic, error
 	return intent, diagnostics, nil
 }
 
+// PreferEffort resolves a budget for a target that uses effort levels. Special
+// budgets retain their meaning when the request supplies no explicit effort.
+func (intent Intent) PreferEffort(fallback Effort) Intent {
+	if intent.BudgetTokens == nil {
+		return intent
+	}
+	if intent.Effort != "" || intent.Mode == ModeDisabled {
+		intent.BudgetTokens = nil
+	} else if *intent.BudgetTokens > 0 {
+		intent.BudgetTokens = nil
+		intent.Effort = fallback
+		if intent.Mode == ModeUnset {
+			intent.Mode = ModeEnabled
+		}
+	}
+	return intent
+}
+
 // MergeExplicitAndSuffix combines structured request fields with a model-name
 // alias or @ modifier. The model name wins wherever the two disagree: it is
 // also the billing identity, so upstream behavior and accounting must follow
@@ -409,12 +427,18 @@ func FromOpenAIChat(req *dto.GeneralOpenAIRequest) (Intent, []types.ConversionDi
 			include := !*raw.Exclude
 			nested.IncludeThoughts = &include
 		}
+		if intent.Effort != "" || nested.Effort != "" {
+			nested.BudgetTokens = nil
+		}
 		merged, mergeDiagnostics, err := MergeExplicit(intent, nested, req.Model)
 		if err != nil {
 			return Intent{}, nil, err
 		}
 		intent = merged
 		diagnostics = append(diagnostics, mergeDiagnostics...)
+	}
+	if intent.Effort == "" && intent.Mode != ModeDisabled && intent.BudgetTokens == nil {
+		intent.BudgetTokens = openAIThinkingBudget(req.ThinkingBudget, req.EnableThinking)
 	}
 
 	if req.ReasoningConversion == nil {
@@ -433,7 +457,7 @@ func FromOpenAIChat(req *dto.GeneralOpenAIRequest) (Intent, []types.ConversionDi
 		BudgetSource:    SourcePivot,
 	}
 	if req.ReasoningEffort != "" {
-		pivotEffort := EffectiveEffort(pivot)
+		pivotEffort := OpenAIOutputEffort(req.Model, pivot)
 		if Effort(req.ReasoningEffort) == pivotEffort {
 			intent.Effort = ""
 			intent.Mode = ModeUnset
@@ -458,7 +482,7 @@ func ApplyToOpenAIChat(req *dto.GeneralOpenAIRequest, intent Intent) error {
 		return err
 	}
 
-	if effort := EffectiveEffort(intent); effort != "" {
+	if effort := OpenAIOutputEffort(req.Model, intent); effort != "" {
 		req.ReasoningEffort = string(effort)
 	}
 
@@ -486,7 +510,7 @@ func ApplyToOpenAIResponses(req *dto.OpenAIResponsesRequest, intent Intent) erro
 		return err
 	}
 
-	if effort := EffectiveEffort(intent); effort != "" {
+	if effort := OpenAIOutputEffort(req.Model, intent); effort != "" {
 		summary := "detailed"
 		if effort == EffortNone || (intent.IncludeThoughts != nil && !*intent.IncludeThoughts) {
 			summary = ""
@@ -533,6 +557,9 @@ func FromOpenAIResponses(req *dto.OpenAIResponsesRequest) (Intent, []types.Conve
 			intent.IncludeThoughts = &include
 		}
 	}
+	if intent.Effort == "" {
+		intent.BudgetTokens = openAIThinkingBudget(req.ThinkingBudget, req.EnableThinking)
+	}
 	if req.ReasoningConversion == nil {
 		return normalizeIntent(intent)
 	}
@@ -545,7 +572,7 @@ func FromOpenAIResponses(req *dto.OpenAIResponsesRequest) (Intent, []types.Conve
 		BudgetSource:    SourcePivot,
 	}
 	if req.Reasoning != nil && req.Reasoning.Effort != "" {
-		pivotEffort := EffectiveEffort(pivot)
+		pivotEffort := OpenAIOutputEffort(req.Model, pivot)
 		if Effort(req.Reasoning.Effort) == pivotEffort {
 			intent.Effort = ""
 			intent.Mode = ModeUnset
@@ -609,6 +636,9 @@ func FromClaude(req *dto.ClaudeRequest) (Intent, []types.ConversionDiagnostic, e
 			intent.Effort = effort
 		}
 	}
+	if intent.BudgetTokens != nil && (intent.Mode == ModeDisabled || intent.Effort == EffortNone || intent.Effort != "" && *intent.BudgetTokens <= 0) {
+		intent.BudgetTokens = nil
+	}
 	if intent.Mode == ModeDisabled && intent.Effort != "" && intent.Effort != EffortNone {
 		return intent, diagnostics, nil
 	}
@@ -619,18 +649,13 @@ func FromClaude(req *dto.ClaudeRequest) (Intent, []types.ConversionDiagnostic, e
 	return normalized, append(diagnostics, normalizeDiagnostics...), nil
 }
 
-// FromGemini reads a native thinkingConfig. A config carrying both a budget
-// and a level is rejected here because the intent alone cannot tell which one
-// the target model accepts; NormalizeGeminiThinkingConfig resolves that pair
-// first whenever the model's dialect is known.
+// FromGemini reads a native thinkingConfig into portable intent. An explicit
+// level takes precedence when the intent is rendered in another protocol.
 func FromGemini(req *dto.GeminiChatRequest) (Intent, []types.ConversionDiagnostic, error) {
 	if req == nil || req.GenerationConfig.ThinkingConfig == nil {
 		return Intent{}, nil, nil
 	}
 	config := req.GenerationConfig.ThinkingConfig
-	if config.ThinkingBudget != nil && config.ThinkingLevel != "" {
-		return Intent{}, nil, fmt.Errorf("%w: Gemini thinkingBudget and thinkingLevel cannot both be set", ErrEffortConflict)
-	}
 	intent := Intent{
 		BudgetTokens:    config.ThinkingBudget,
 		IncludeThoughts: config.IncludeThoughts,
@@ -638,6 +663,7 @@ func FromGemini(req *dto.GeminiChatRequest) (Intent, []types.ConversionDiagnosti
 		BudgetSource:    SourceNative,
 	}
 	if config.ThinkingLevel != "" {
+		intent.BudgetTokens = nil
 		effort, err := ParseEffort(config.ThinkingLevel)
 		if err != nil {
 			return Intent{}, nil, err

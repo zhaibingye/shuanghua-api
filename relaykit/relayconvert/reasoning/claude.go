@@ -123,6 +123,23 @@ func RenderClaudeForConversion(model string, intent Intent, maxTokens *uint, ada
 }
 
 func renderClaude(model string, intent Intent, maxTokens *uint, adapterBudgetPercentage float64, crossProtocol bool) (ClaudeRender, error) {
+	capabilities := claudeCapabilitiesFor(model)
+	budgetReplaced := capabilities.adaptive && intent.BudgetTokens != nil && (*intent.BudgetTokens > 0 || intent.Effort != "")
+	diagnostics := make([]types.ConversionDiagnostic, 0, 1)
+	if budgetReplaced {
+		fallback := EffortXHigh
+		if !capabilities.supportsXHigh {
+			fallback = EffortHigh
+		}
+		intent = intent.PreferEffort(fallback)
+		if intent.Effort == EffortXHigh && !capabilities.supportsXHigh {
+			intent.Effort = EffortHigh
+		}
+		diagnostics = append(diagnostics, claudeReasoningDiagnostic(
+			"claude_budget_to_adaptive",
+			fmt.Sprintf("model %q uses adaptive thinking; using effort %q in place of budget_tokens", model, intent.Effort),
+		))
+	}
 	disabledWithEffort := intent.Mode == ModeDisabled && intent.Effort != "" && intent.Effort != EffortNone
 	if disabledWithEffort {
 		effort, err := ParseEffort(string(intent.Effort))
@@ -131,7 +148,6 @@ func renderClaude(model string, intent Intent, maxTokens *uint, adapterBudgetPer
 		}
 		intent.Effort = effort
 	}
-	diagnostics := make([]types.ConversionDiagnostic, 0, 1)
 	if !disabledWithEffort {
 		var normalizeDiagnostics []types.ConversionDiagnostic
 		var err error
@@ -141,7 +157,6 @@ func renderClaude(model string, intent Intent, maxTokens *uint, adapterBudgetPer
 		}
 		diagnostics = append(diagnostics, normalizeDiagnostics...)
 	}
-	capabilities := claudeCapabilitiesFor(model)
 	if !intent.HasStrength() {
 		if intent.IncludeThoughts != nil && capabilities.adaptive && capabilities.defaultThinking {
 			thinking := &dto.Thinking{Type: "adaptive"}
@@ -246,7 +261,7 @@ func renderClaude(model string, intent Intent, maxTokens *uint, adapterBudgetPer
 			effort = capabilities.defaultEffort
 		}
 		normalizedEffort := effort
-		if !crossProtocol {
+		if !crossProtocol || budgetReplaced {
 			normalizedEffort = normalizeClaudeEffort(effort, capabilities)
 		}
 		if effort != "" && normalizedEffort != effort {
@@ -440,6 +455,10 @@ func IsKnownClaudeModel(model string) bool {
 // none.
 func ClaudeDefaultEffort(model string) Effort {
 	return claudeCapabilitiesFor(model).defaultEffort
+}
+
+func ClaudeUsesAdaptiveThinking(model string) bool {
+	return claudeCapabilitiesFor(model).adaptive
 }
 
 // ClaudeEffort returns the effort level the model accepts in place of the

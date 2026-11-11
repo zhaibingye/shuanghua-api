@@ -63,7 +63,7 @@ func PrepareResponsesRequest(c *gin.Context, info *relaycommon.RelayInfo, req *d
 		return nil, nil, nil, newConvertRequestFailedError(c, info, err)
 	}
 	relaycommon.AppendRequestConversionFromRequest(info, convertedRequest)
-	jsonData, err := common.Marshal(convertedRequest)
+	jsonData, err := relaycommon.MarshalConvertedTextRequest(info, convertedRequest)
 	if err != nil {
 		return nil, nil, nil, types.NewError(err, types.ErrorCodeConvertRequestFailed, types.ErrOptionWithSkipRetry())
 	}

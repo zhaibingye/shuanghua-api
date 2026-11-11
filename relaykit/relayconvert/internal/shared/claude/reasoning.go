@@ -29,12 +29,8 @@ func ApplyReasoning(ctx context.Context, req *dto.ClaudeRequest, info convmeta.M
 	if preserveSuffix {
 		suffix = reasoning.Intent{}
 	}
-	// A native Claude request without a host modifier is already in the target
-	// protocol, including Claude-compatible proxies that keep native controls
-	// instead of applying Anthropic model rules. Read portable effort for
-	// accounting metadata, but do not run the capability renderer or rewrite
-	// provider-native controls.
-	if !crossProtocol && source.IsEmpty() && suffix.IsEmpty() {
+	adaptBudget := req.Thinking != nil && req.Thinking.BudgetTokens != nil && reasoning.ClaudeUsesAdaptiveThinking(capabilityModel)
+	if !crossProtocol && source.IsEmpty() && suffix.IsEmpty() && !adaptBudget {
 		if info != nil {
 			effort := req.GetEfforts()
 			if effort == "" && req.Thinking != nil {
@@ -91,7 +87,7 @@ func ApplyReasoning(ctx context.Context, req *dto.ClaudeRequest, info convmeta.M
 		// rendered for the thinking-off state rather than left unchecked.
 		intent.Effort = requestEffort
 	}
-	if req.MaxTokens == nil && intent.HasStrength() && intent.Mode != reasoning.ModeDisabled && intent.Effort != reasoning.EffortNone {
+	if req.MaxTokens == nil && (crossProtocol || suffix.HasStrength()) && intent.HasStrength() && intent.Mode != reasoning.ModeDisabled && intent.Effort != reasoning.EffortNone {
 		// Adapter-provided defaults may be raised to accommodate an exact
 		// cross-protocol budget. Values too small for manual thinking are
 		// raised again by the renderer, which reports the change.
@@ -99,7 +95,7 @@ func ApplyReasoning(ctx context.Context, req *dto.ClaudeRequest, info convmeta.M
 		if configuredDefault, configured := opts.Claude.DefaultMaxTokensFor(capabilityModel); configured && configuredDefault > 0 {
 			minimum = uint(configuredDefault)
 		}
-		if reasoning.ClaudeUsesManualThinking(capabilityModel, intent) && *intent.BudgetTokens >= 0 {
+		if !reasoning.ClaudeUsesAdaptiveThinking(capabilityModel) && reasoning.ClaudeUsesManualThinking(capabilityModel, intent) && *intent.BudgetTokens >= 0 {
 			if *intent.BudgetTokens == math.MaxInt {
 				return fmt.Errorf("thinking budget is too large to derive max_tokens")
 			}

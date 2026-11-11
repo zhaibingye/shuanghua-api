@@ -75,7 +75,7 @@ func applySystemPromptIfNeeded(c *gin.Context, info *relaycommon.RelayInfo, requ
 func textRequestViaResponses(c *gin.Context, info *relaycommon.RelayInfo, adaptor channel.Adaptor, request any) (*dto.Usage, *types.NewAPIError) {
 	paramOverrideApplied := false
 	if chatRequest, ok := request.(*dto.GeneralOpenAIRequest); ok {
-		chatJSON, err := common.Marshal(chatRequest)
+		chatJSON, err := relaycommon.MarshalConvertedTextRequest(info, chatRequest)
 		if err != nil {
 			return nil, types.NewError(err, types.ErrorCodeConvertRequestFailed, types.ErrOptionWithSkipRetry())
 		}
@@ -128,7 +128,7 @@ func relayResponsesRequest(c *gin.Context, info *relaycommon.RelayInfo, adaptor 
 	}
 	relaycommon.AppendRequestConversionFromRequest(info, convertedRequest)
 
-	jsonData, err := common.Marshal(convertedRequest)
+	jsonData, err := relaycommon.MarshalConvertedTextRequest(info, convertedRequest)
 	if err != nil {
 		return nil, types.NewError(err, types.ErrorCodeConvertRequestFailed, types.ErrOptionWithSkipRetry())
 	}

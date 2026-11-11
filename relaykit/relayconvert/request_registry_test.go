@@ -702,10 +702,47 @@ func TestConvertRequestReasoningExplicitDisableAndBudget(t *testing.T) {
 		result, err := ConvertRequestVia(t.Context(), info, req, types.RelayFormatGemini, types.RelayFormatOpenAIResponses)
 		require.NoError(t, err)
 		converted := result.Value.(*dto.OpenAIResponsesRequest)
-		assertConvertedReasoningEffort(t, converted, "medium")
+		assertConvertedReasoningEffort(t, converted, "xhigh")
 		require.NotNil(t, converted.ReasoningConversion)
 		assert.Equal(t, lo.ToPtr(4096), converted.ReasoningConversion.BudgetTokens)
 	})
+	for _, tc := range []struct {
+		name, model, want string
+		source, target    types.RelayFormat
+		budget            int
+		level             string
+	}{
+		{"Chat budget to Argon", "gemini-4-argon", "HIGH", types.RelayFormatOpenAI, types.RelayFormatGemini, 2048, ""},
+		{"Responses budget to adaptive Claude", "claude-opus-4-7", "xhigh", types.RelayFormatOpenAIResponses, types.RelayFormatClaude, 2048, ""},
+		{"Responses budget to Claude 4.6", "claude-sonnet-4-6", "high", types.RelayFormatOpenAIResponses, types.RelayFormatClaude, 2048, ""},
+		{"Gemini level wins over zero", "gpt-5.4", "low", types.RelayFormatGemini, types.RelayFormatOpenAI, 0, "LOW"},
+		{"Claude level wins over budget", "gpt-5.4", "medium", types.RelayFormatClaude, types.RelayFormatOpenAIResponses, 2048, "medium"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			req := reasoningConversionRequest(t, tc.source, tc.model, tc.level)
+			budget := mustRawMessage(t, tc.budget)
+			switch value := req.(type) {
+			case *dto.GeneralOpenAIRequest:
+				value.ThinkingBudget = budget
+			case *dto.OpenAIResponsesRequest:
+				value.ThinkingBudget = budget
+			case *dto.GeminiChatRequest:
+				value.GenerationConfig.ThinkingConfig.ThinkingBudget = &tc.budget
+			case *dto.ClaudeRequest:
+				value.Thinking.Type = "enabled"
+				value.Thinking.BudgetTokens = &tc.budget
+			}
+			info := &convmeta.Values{UpstreamModelName: tc.model, ChannelMetaAttached: true}
+			result, err := ConvertRequest(t.Context(), info, tc.target, req)
+			require.NoError(t, err)
+			assertConvertedReasoningEffort(t, result.Value, tc.want)
+			wire, err := kitutil.Marshal(result.Value)
+			require.NoError(t, err)
+			assert.NotContains(t, string(wire), `"thinkingBudget"`)
+			assert.NotContains(t, string(wire), `"budget_tokens"`)
+			assert.NotContains(t, string(wire), `"thinking_budget"`)
+		})
+	}
 	t.Run("converter ID uses format defaults", func(t *testing.T) {
 		req := reasoningConversionRequest(t, types.RelayFormatOpenAI, "proxy-model", "")
 		result, err := ConvertRequestByID(t.Context(), nil, ConverterOpenAIChatToClaudeMessages, req)

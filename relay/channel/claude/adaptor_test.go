@@ -39,7 +39,7 @@ func TestConvertClaudeRequestTreatsZeroMaxTokensAsUnset(t *testing.T) {
 	assert.Equal(t, uint(model_setting.GetClaudeSettings().GetDefaultMaxTokens(req.Model)), *converted.MaxTokens)
 }
 
-func TestConvertClaudeRequestPreservesNativeClaudeCodeThinking(t *testing.T) {
+func TestConvertClaudeRequestPrefersExplicitEffortOnAdaptiveModel(t *testing.T) {
 	budget := 10000
 	maxTokens := uint(20000)
 	temperature := 0.7
@@ -67,13 +67,12 @@ func TestConvertClaudeRequestPreservesNativeClaudeCodeThinking(t *testing.T) {
 	converted, ok := out.(*dto.ClaudeRequest)
 	require.True(t, ok)
 	require.NotNil(t, converted.Thinking)
-	assert.Equal(t, "enabled", converted.Thinking.Type)
-	require.NotNil(t, converted.Thinking.BudgetTokens)
-	assert.Equal(t, budget, *converted.Thinking.BudgetTokens)
-	assert.Equal(t, temperature, *converted.Temperature)
-	assert.Equal(t, topP, *converted.TopP)
+	assert.Equal(t, "adaptive", converted.Thinking.Type)
+	assert.Nil(t, converted.Thinking.BudgetTokens)
+	assert.Nil(t, converted.Temperature)
+	assert.Nil(t, converted.TopP)
+	assert.Equal(t, &maxTokens, converted.MaxTokens)
 	assert.JSONEq(t, `{"effort":"high"}`, string(converted.OutputConfig))
-	assert.Empty(t, info.ConversionDiagnostics())
 }
 
 func TestConvertClaudeRequestPreservesMessageOutputConfig(t *testing.T) {

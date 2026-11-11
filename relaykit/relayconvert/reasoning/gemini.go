@@ -56,7 +56,7 @@ func geminiCapabilitiesFor(model string) geminiCapabilities {
 		return geminiCapabilities{kind: geminiThinkingBudget, supportsDisable: true, minBudget: 512, maxBudget: 24576}
 	case strings.HasPrefix(model, "gemini-2.5-"):
 		return geminiCapabilities{kind: geminiThinkingBudget, supportsDisable: true, maxBudget: 24576}
-	case strings.HasPrefix(model, "gemini-3"):
+	case strings.HasPrefix(model, "gemini-3"), strings.HasPrefix(model, "gemini-4"):
 		return geminiCapabilities{kind: geminiThinkingLevel}
 	default:
 		return geminiCapabilities{}
@@ -99,6 +99,9 @@ func renderGemini(model string, intent Intent, maxOutputTokens *uint, adapterBud
 			intent.Effort = EffortHigh
 		}
 		levelModel = ""
+		if strings.HasPrefix(strings.ToLower(model), "gemini-4") {
+			levelModel = model
+		}
 		if capabilities.kind == geminiThinkingUnknown || capabilities.kind == geminiThinkingNotConfigurable {
 			capabilities.kind = geminiThinkingLevel
 		}
@@ -207,11 +210,17 @@ func renderGemini(model string, intent Intent, maxOutputTokens *uint, adapterBud
 			fmt.Sprintf("model %q cannot disable thinking; using its lowest thinking level %q", model, level),
 		))
 		config.ThinkingLevel = level
-		return GeminiRender{Config: config, EffectiveEffort: Effort(level), Diagnostics: diagnostics}, nil
+		return GeminiRender{Config: config, EffectiveEffort: Effort(strings.ToLower(level)), Diagnostics: diagnostics}, nil
 	}
 	effort := intent.Effort
 	if effort == "" && intent.BudgetTokens != nil {
+		if *intent.BudgetTokens < 0 && strings.HasPrefix(strings.ToLower(model), "gemini-4") {
+			return GeminiRender{Config: config, EffectiveEffort: geminiDefaultEffort(model), Diagnostics: diagnostics}, nil
+		}
 		effort = EffortFromBudget(*intent.BudgetTokens)
+		if *intent.BudgetTokens > 0 {
+			effort = EffortHigh
+		}
 		diagnostics = append(diagnostics, geminiReasoningDiagnostic(
 			"gemini_budget_to_level",
 			fmt.Sprintf("model %q uses thinkingLevel; thinking budget %d was converted to effort %q", model, *intent.BudgetTokens, effort),
@@ -229,7 +238,7 @@ func renderGemini(model string, intent Intent, maxOutputTokens *uint, adapterBud
 			))
 		}
 		config.ThinkingLevel = level
-		effort = Effort(level)
+		effort = Effort(strings.ToLower(level))
 	} else if intent.Mode == ModeEnabled || intent.Mode == ModeAdaptive {
 		effort = geminiDefaultEffort(model)
 	}
@@ -240,6 +249,7 @@ func geminiDefaultEffort(model string) Effort {
 	model = strings.ToLower(model)
 	switch {
 	case model == "gemini-flash-latest",
+		model == "gemini-4-argon",
 		strings.HasPrefix(model, "gemini-3.5-flash") && !strings.HasPrefix(model, "gemini-3.5-flash-lite"),
 		strings.HasPrefix(model, "gemini-3.6-flash"):
 		return EffortMedium
@@ -248,6 +258,7 @@ func geminiDefaultEffort(model string) Effort {
 		strings.HasPrefix(model, "gemini-3.1-flash-lite"):
 		return EffortMinimal
 	case model == "gemini-pro-latest",
+		strings.HasPrefix(model, "gemini-4-argon-cyber-permissive"),
 		strings.HasPrefix(model, "gemini-3.1-pro"),
 		strings.HasPrefix(model, "gemini-3-pro"),
 		strings.HasPrefix(model, "gemini-3-flash"):
@@ -265,11 +276,24 @@ func geminiDefaultEffort(model string) Effort {
 // the capability table keep their config verbatim. The returned effort is the
 // accounting label for whatever is now in the config.
 //
-// The only error is a config that sets both thinkingBudget and thinkingLevel
-// on a model whose dialect is unknown; when the dialect is known the field the
-// model does not use is dropped with a diagnostic.
+// When both controls are set, the explicit level is rendered in the known
+// model's dialect. An unknown native dialect cannot resolve the pair.
 func NormalizeGeminiThinkingConfig(model string, generation *dto.GeminiChatGenerationConfig) (Effort, []types.ConversionDiagnostic, error) {
 	return normalizeGeminiThinkingConfig(model, generation, false)
+}
+
+// NormalizeGeminiNativeBudget leaves native budget models alone unless a
+// level was also supplied, and removes budgets from level-based models.
+func NormalizeGeminiNativeBudget(model string, generation *dto.GeminiChatGenerationConfig) (Effort, []types.ConversionDiagnostic, error) {
+	config := generation.ThinkingConfig
+	if config == nil || config.ThinkingBudget == nil {
+		return "", nil, nil
+	}
+	kind := geminiCapabilitiesFor(model).kind
+	if kind != geminiThinkingLevel && (kind != geminiThinkingBudget || config.ThinkingLevel == "") {
+		return "", nil, nil
+	}
+	return NormalizeGeminiThinkingConfig(model, generation)
 }
 
 // NormalizeGeminiThinkingConfigForConversion applies the same effort policy to
@@ -287,18 +311,16 @@ func normalizeGeminiThinkingConfig(model string, generation *dto.GeminiChatGener
 	var diagnostics []types.ConversionDiagnostic
 	if config.ThinkingBudget != nil && config.ThinkingLevel != "" {
 		switch capabilities.kind {
-		case geminiThinkingBudget:
+		case geminiThinkingBudget, geminiThinkingLevel:
 			diagnostics = append(diagnostics, geminiReasoningDiagnostic(
 				"gemini_budget_level_conflict",
-				fmt.Sprintf("model %q uses thinkingBudget; thinkingLevel %q was dropped because both were set", model, config.ThinkingLevel),
-			))
-			config.ThinkingLevel = ""
-		case geminiThinkingLevel:
-			diagnostics = append(diagnostics, geminiReasoningDiagnostic(
-				"gemini_budget_level_conflict",
-				fmt.Sprintf("model %q uses thinkingLevel; thinkingBudget %d was dropped because both were set", model, *config.ThinkingBudget),
+				fmt.Sprintf("model %q: thinkingBudget %d was dropped because thinkingLevel %q was set", model, *config.ThinkingBudget, config.ThinkingLevel),
 			))
 			config.ThinkingBudget = nil
+		case geminiThinkingUnknown:
+			if !crossProtocol {
+				return "", nil, fmt.Errorf("%w: Gemini thinkingBudget and thinkingLevel cannot both be set", ErrEffortConflict)
+			}
 		}
 	}
 	if crossProtocol {
@@ -380,6 +402,9 @@ func normalizeGeminiThinkingConfig(model string, generation *dto.GeminiChatGener
 	if config.ThinkingBudget != nil {
 		budget := *config.ThinkingBudget
 		config.ThinkingBudget = nil
+		if budget < 0 && strings.HasPrefix(strings.ToLower(model), "gemini-4") {
+			return geminiDefaultEffort(model), diagnostics, nil
+		}
 		if budget == 0 {
 			level, err := geminiLevelForEffort(model, EffortMinimal)
 			if err != nil {
@@ -390,9 +415,13 @@ func normalizeGeminiThinkingConfig(model string, generation *dto.GeminiChatGener
 				fmt.Sprintf("model %q cannot disable thinking; using its lowest thinking level %q", model, level),
 			))
 			config.ThinkingLevel = level
-			return Effort(level), diagnostics, nil
+			return Effort(strings.ToLower(level)), diagnostics, nil
 		}
-		level, err := geminiLevelForEffort(model, EffortFromBudget(budget))
+		effort := EffortFromBudget(budget)
+		if budget > 0 {
+			effort = EffortHigh
+		}
+		level, err := geminiLevelForEffort(model, effort)
 		if err != nil {
 			return "", diagnostics, err
 		}
@@ -401,7 +430,7 @@ func normalizeGeminiThinkingConfig(model string, generation *dto.GeminiChatGener
 			fmt.Sprintf("model %q uses thinkingLevel; thinkingBudget %d was converted to thinkingLevel %q", model, budget, level),
 		))
 		config.ThinkingLevel = level
-		return Effort(level), diagnostics, nil
+		return Effort(strings.ToLower(level)), diagnostics, nil
 	}
 	if config.ThinkingLevel == "" {
 		return "", diagnostics, nil
@@ -416,20 +445,20 @@ func normalizeGeminiThinkingConfig(model string, generation *dto.GeminiChatGener
 			fmt.Sprintf("model %q cannot disable thinking; using its lowest thinking level %q", model, level),
 		))
 		config.ThinkingLevel = level
-		return Effort(level), diagnostics, nil
+		return Effort(strings.ToLower(level)), diagnostics, nil
 	}
 	level, err := geminiLevelForEffort(model, intent.Effort)
 	if err != nil {
 		return "", diagnostics, err
 	}
-	if level != string(intent.Effort) {
+	if !strings.EqualFold(level, string(intent.Effort)) {
 		diagnostics = append(diagnostics, geminiReasoningDiagnostic(
 			"gemini_level_adjusted",
 			fmt.Sprintf("model %q does not support thinkingLevel %q; using %q", model, config.ThinkingLevel, level),
 		))
 	}
 	config.ThinkingLevel = level
-	return Effort(level), diagnostics, nil
+	return Effort(strings.ToLower(level)), diagnostics, nil
 }
 
 func geminiReasoningDiagnostic(code string, message string) types.ConversionDiagnostic {
@@ -544,6 +573,15 @@ func gemini25BudgetForEffort(effort Effort, maxBudget int) int {
 func geminiLevelForEffort(model string, effort Effort) (string, error) {
 	model = strings.ToLower(model)
 	switch {
+	case strings.HasPrefix(model, "gemini-4"):
+		switch effort {
+		case EffortMinimal, EffortLow:
+			return "LOW", nil
+		case EffortMedium:
+			return "MEDIUM", nil
+		case EffortHigh, EffortXHigh, EffortMax:
+			return "HIGH", nil
+		}
 	case strings.HasPrefix(model, "gemini-3.1-flash-image"),
 		strings.HasPrefix(model, "gemini-3.1-flash-lite-image"):
 		if effort == EffortMinimal || effort == EffortLow {

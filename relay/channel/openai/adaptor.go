@@ -254,6 +254,9 @@ func (a *Adaptor) ConvertOpenAIRequest(c *gin.Context, info *relaycommon.RelayIn
 	if request == nil {
 		return nil, errors.New("request is nil")
 	}
+	if err := kitreasoning.NormalizeOpenAIChatBudget(request); err != nil {
+		return nil, kitreasoning.AsClientError(err)
+	}
 	if info.ChannelType != constant.ChannelTypeOpenAI && info.ChannelType != constant.ChannelTypeAzure {
 		request.StreamOptions = nil
 	}
@@ -328,6 +331,7 @@ func (a *Adaptor) ConvertOpenAIRequest(c *gin.Context, info *relaycommon.RelayIn
 				}
 			}
 		}
+		initialIntent = initialIntent.PreferEffort(kitreasoning.OpenAIOutputEffort(info.UpstreamModelName, initialIntent))
 		if !initialIntent.IsEmpty() {
 			reasoningConfig := make(map[string]any)
 			if len(request.Reasoning) > 0 {
@@ -410,7 +414,7 @@ func (a *Adaptor) ConvertOpenAIRequest(c *gin.Context, info *relaycommon.RelayIn
 			info.UpstreamModelName = baseModel
 			request.Model = baseModel
 		}
-		if canonicalEffort := kitreasoning.EffectiveEffort(currentIntent); canonicalEffort != "" {
+		if canonicalEffort := kitreasoning.OpenAIOutputEffort(request.Model, currentIntent); canonicalEffort != "" {
 			request.ReasoningEffort = string(canonicalEffort)
 			info.SetReasoningEffort(string(canonicalEffort))
 		}
@@ -679,6 +683,7 @@ func detectImageMimeType(filename string) string {
 }
 
 func (a *Adaptor) ConvertOpenAIResponsesRequest(c *gin.Context, info *relaycommon.RelayInfo, request dto.OpenAIResponsesRequest) (any, error) {
+	kitreasoning.NormalizeOpenAIResponsesBudget(&request)
 	//  转换模型推理力度后缀
 	effort, originModel := reasoning.ParseOpenAIReasoningEffortFromModelSuffix(request.Model)
 	preserveSuffix := model_setting.ShouldPreserveThinkingSuffix(request.Model) || (info != nil && model_setting.ShouldPreserveThinkingSuffix(info.OriginModelName))
@@ -737,7 +742,7 @@ func (a *Adaptor) ConvertOpenAIResponsesRequest(c *gin.Context, info *relaycommo
 			info.UpstreamModelName = originModel
 		}
 	}
-	if canonicalEffort := kitreasoning.EffectiveEffort(currentIntent); canonicalEffort != "" {
+	if canonicalEffort := kitreasoning.OpenAIOutputEffort(request.Model, currentIntent); canonicalEffort != "" {
 		if request.Reasoning == nil {
 			request.Reasoning = &dto.Reasoning{}
 		}

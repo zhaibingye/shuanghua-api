@@ -9,6 +9,7 @@ import (
 	"github.com/QuantumNous/new-api/relaykit/relayconvert/internal/convdiag"
 	sharedclaude "github.com/QuantumNous/new-api/relaykit/relayconvert/internal/shared/claude"
 	sharedgemini "github.com/QuantumNous/new-api/relaykit/relayconvert/internal/shared/gemini"
+	"github.com/QuantumNous/new-api/relaykit/relayconvert/internal/toolconv"
 	"github.com/QuantumNous/new-api/relaykit/relayconvert/reasoning"
 	"github.com/QuantumNous/new-api/relaykit/types"
 )
@@ -27,6 +28,10 @@ func GeminiGenerateContentRequestToOpenAIChat(geminiRequest *dto.GeminiChatReque
 
 func OpenAIChatRequestToGeminiGenerateContent(c context.Context, textRequest dto.GeneralOpenAIRequest, info convmeta.Meta) (*dto.GeminiChatRequest, error) {
 	return convertCompatRequest[dto.GeminiChatRequest](c, info, types.RelayFormatGemini, &textRequest)
+}
+
+func ApplyGeminiNativeToolPolicy(request *dto.GeminiChatRequest, info convmeta.Meta) ([]types.ConversionDiagnostic, error) {
+	return toolconv.FilterNativeGeminiSearch(request, convmeta.OptionsOf(info))
 }
 
 func ApplyGeminiThinkingConfigChecked(geminiRequest *dto.GeminiChatRequest, info convmeta.Meta, oaiRequest ...dto.GeneralOpenAIRequest) error {

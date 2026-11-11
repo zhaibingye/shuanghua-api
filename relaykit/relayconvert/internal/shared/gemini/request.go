@@ -135,9 +135,14 @@ func ApplyThinkingConfig(ctx context.Context, geminiRequest *dto.GeminiChatReque
 	// modifier, read portable effort metadata without running the capability
 	// renderer or rewriting provider-native controls.
 	if !crossProtocol && suffix.IsEmpty() {
+		nativeEffort, diagnostics, err := reasoning.NormalizeGeminiNativeBudget(modelName, &geminiRequest.GenerationConfig)
+		if err != nil {
+			return err
+		}
+		convdiag.Add(ctx, diagnostics...)
 		if info != nil {
-			effort := ""
-			if config := geminiRequest.GenerationConfig.ThinkingConfig; config != nil {
+			effort := string(nativeEffort)
+			if config := geminiRequest.GenerationConfig.ThinkingConfig; effort == "" && config != nil {
 				effort = config.ThinkingLevel
 				// Gemini accepts thinkingLevel case-insensitively; record the
 				// canonical effort so logs match other protocols. Unknown values
@@ -159,6 +164,9 @@ func ApplyThinkingConfig(ctx context.Context, geminiRequest *dto.GeminiChatReque
 	normalize := reasoning.NormalizeGeminiThinkingConfig
 	if crossProtocol {
 		normalize = reasoning.NormalizeGeminiThinkingConfigForConversion
+		if config := geminiRequest.GenerationConfig.ThinkingConfig; config != nil && config.ThinkingLevel == "" && source.Effort != "" {
+			config.ThinkingBudget = nil
+		}
 	}
 	nativeEffort, diagnostics, err := normalize(baseModel, &geminiRequest.GenerationConfig)
 	if err != nil {
