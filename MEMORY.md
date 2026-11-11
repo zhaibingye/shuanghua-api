@@ -16,18 +16,29 @@
 
 ## API 协议转换
 
+### 转换入口与缓存
+
+- 内置文本转换器的实际入口在 `relaykit/relayconvert/text_converter_registry.go`，请求与响应统一走 `ir/project`。排查旧 `internal` 转换器时先确认调用链。
 - 缓存计数必须同时保留公共 `PromptTokensDetails` 与 Responses 的 `InputTokensDetails`：`UsageFromChatUsage` 也用于其他目标协议和流式账务，不能只填 Responses 别名。Gemini 投影须发送 `cachedContentTokenCount`，并把已包含在 completion 总数里的 reasoning 拆为 `thoughtsTokenCount`。原始供应商账务仍以 `BillingUsage` 快照为准。回归入口为 `relaykit/relayconvert/cache_conversion_test.go`。
-- 缓存转换按用户确认的可用性优先策略处理：Chat/Responses 共有的 `prompt_cache_key`、`prompt_cache_retention`、`cache_salt` 经 IR 保留；目标无法表示的 Gemini `cachedContent`、Responses `prompt_cache_options`、`cache_salt` 等缓存选项静默丢弃，不增加报错或诊断。Responses 非字符串缓存 key 也忽略。原生同格式透传保留原字段；不据此放宽其他有状态会话字段的验证。已核对 new-api 上游 `ba5f7367` 的 Gemini→Chat、Responses→Chat 转换。
+- Chat/Responses 共有的 `prompt_cache_key`、`prompt_cache_retention`、`cache_salt` 经 IR 保留。目标无法表示的缓存字段和 Responses 非字符串缓存 key 静默丢弃。原生请求体透传保留原字段。该策略仅用于缓存字段。
 - Claude 工具调用、工具定义及工具结果中的缓存断点均需保留。单文本工具结果只有在不含 `cache_control` 或 citations 时才能折叠成字符串。`ConvertRequestVia` 抽取并最终恢复的工具定义也必须保留缓存配置。
 
-- 内置文本转换器的实际入口在 `relaykit/relayconvert/text_converter_registry.go`，请求与响应统一走 `ir/project`；排查旧 `internal` 转换器时须先确认调用链，不能仅凭旧实现判断当前行为。
-- 跨格式请求在缺少思考强度控制时，按最终目标补默认值：Chat、Responses、Claude 为 `xhigh`，Gemini 为 `high`；显式关闭和预算不被默认值覆盖。转换时保留原始档位，Gemini 将 `xhigh`/`max` 映射为 `high`，2.5 系列仍使用等价预算。`ConvertRequestVia` 用请求局部状态保留原始意图，避免中间格式降低档位或丢失精确预算；原生同格式请求仍走透传路径。验证入口为 `request_registry_test.go` 的 `TestConvertRequestReasoning*`。
-- IR 内容块索引包含思维和正文；投影 Chat 流时，`tool_calls.index` 必须独立映射为每个 choice 内从零开始的连续索引。工具块开始事件的 `Event.ID` 是调用 ID，不能用作 Chat 响应 ID。回归入口为 `TestChatToolStreamIndexesAndResponseIDAfterThinking`，并已用 OpenAI Python SDK 2.9.0 重放实际转换输出。
+### 思考参数与流式响应
+
+- 跨格式转换缺少思考强度控制时，Chat、Responses、Claude 默认 `xhigh`，Gemini 默认 `high`。回归入口为 `TestConvertRequestReasoningDefaultsAndEquivalentLevels`。
+- 按目标模型支持的形式发送思考参数。档位模型只收到正数预算时，Gemini 优先用 `high`（Gemini 4 输出 `HIGH`），OpenAI Chat、Responses 和自适应 Claude 优先用 `xhigh`，并按模型支持范围回退。档位与预算同传时优先使用档位。Gemini 2.5 将档位投影为预算，旧 Claude 手动模式和原生 Qwen 支持预算。`ConvertRequestVia` 保留原始意图和精确预算，请求体透传绕过改写。回归入口为 `TestReasoningBudgetsInNativeUpstreamRequests` 和 `TestConvertRequestReasoningExplicitDisableAndBudget`。
+- Gemini 4 Argon 的原生 `thinkingBudget` 会触发 400，`thinkingLevel` 接受 `LOW`、`MEDIUM`、`HIGH`，服务端缺省为 `MEDIUM`。渠道 429 需按实际转发体单独排查。
+- IR 内容块索引包含思维和正文。Chat 流的 `tool_calls.index` 要为每个 choice 从零连续编号，工具块开始事件的 `Event.ID` 是调用 ID。回归入口为 `TestChatToolStreamIndexesAndResponseIDAfterThinking`。
 - 历史思维摘要不能直接充当目标协议的原生回放状态。Claude 请求只回传带签名或非空 redacted 数据的思维块；Responses 请求保留原始 reasoning item（含 ID 和加密状态），不为其他协议的摘要伪造 reasoning item。无法回传的摘要在请求转换时省略，并返回 `historical_thinking_omitted` 诊断；响应侧展示仍保留。回归入口为 `TestConvertRequestOmitsUnreplayableHistoricalThinking` 和 Responses 请求 roundtrip 测试。
 - Responses 的结束状态在 IR 解析层统一映射，流式与非流式复用 `ir.FinishFromResponses`。内容过滤不能当作长度截断，Gemini 的正常工具调用应以 `STOP` 结束，`MALFORMED_FUNCTION_CALL` 应作为上游错误。
 - Responses 的 item 完成事件和 response 完成事件会重复携带工具快照；转换为增量协议时，函数名及调用 ID 只能发送一次。无效 `input` 结构应在解析边界报错，不应静默变成空对话。验证入口为 `relaykit/relayconvert/{request,response}_registry_test.go`。
-- Chat/Claude/Responses→Gemini 按项目兼容策略，仅在会保留普通函数或可转换的自定义工具时过滤内置搜索；仅搜索时保留，Gemini 原生请求不变。`attachGeminiRequest` 预先检查全部工具，避免声明顺序影响结果，也不将已丢弃的工具当作过滤条件。过滤返回 `hosted_web_search_omitted` 语义损失诊断，默认允许，`safe`/`strict` 仍拒绝。回归入口为 `TestConvertRequestToGeminiToolCombination` 和 `TestResponsesToGeminiOmitsBuiltInWebSearch`。
+
+### Gemini 原生请求与工具
+
+- 关闭请求体透传时，Gemini 原生请求会经 DTO 解码和适配器重新编码。`tools` 保留原 JSON 键名，`toolConfig` 把 `function_calling_config` 和已知子字段别名转成 REST 字段并保留显式 `false`。排查时应检查实际出站 JSON。
+- Gemini 类型的原生生成路由在关闭透传时移除客户端系统提示里的 `<available_skills>` 标签，保留内部文本和函数声明。同一 Argon 渠道重放时，技能系统提示段触发了 429，单独加入 `read_file` 声明为 200。移除标签后，原失败请求、工具调用和带思考签名的结果回传均通过。上游判定原因尚未确认。回归入口为 `TestNativeGeminiSearchAndFunctionTools`。
+- 保留普通函数或可转换的自定义工具时过滤内置网页搜索。Chat/Claude/Responses→Gemini 走 `attachGeminiRequest`，Gemini 类型的原生路由在关闭透传时直接过滤工具 JSON 中的搜索键。两条路径均记录 `hosted_web_search_omitted`，默认允许，`safe`/`strict` 拒绝。回归入口为 `TestConvertRequestToGeminiToolCombination` 和 `TestNativeGeminiSearchAndFunctionTools`。
 
 ## Windows 本机竞态验证
 
-- 已通过 WinGet 安装 `BrechtSanders.WinLibs.POSIX.UCRT`（GCC 16.2.0），用户 PATH 已包含工具链目录，新终端生效。Go 当前默认关闭 CGO；运行竞态检测时在进程环境设置 `CGO_ENABLED=1`，并用 `GOMAXPROCS=2`、`go test -race -p 1` 控制编译并行度。`common`、`relay/helper`、`service`、`relay/channel`、`relay/common` 整包竞态测试已通过。
+- Windows 竞态测试使用 WinLibs GCC（`BrechtSanders.WinLibs.POSIX.UCRT`），在当前进程启用 `CGO_ENABLED=1`。本机用 `GOMAXPROCS=2` 和 `go test -race -p 1` 限制并行编译。
