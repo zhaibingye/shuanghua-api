@@ -1,13 +1,11 @@
 # new-api 工程记忆
 
-## 当前仓库的已验证约束
+## 转发运行时
 
 - 流式转发由 `relay/helper/stream_scanner.go` 的请求处理协程统一调用数据回调、发送心跳和记录终态；上游读取协程只传递原始行与读取结果。接管流之前须等待请求准备阶段的 `streamKeepAliveWriter` 心跳退出，再修改响应头。必须先处理已读取的数据，再记录 EOF，避免正常结束掩盖回调错误。取消请求要立即关闭上游，即使下游回调尚未返回；返回前须等待关闭与读取完成。
 - HTTP 代理配置只在构造连接池前校验一次，再通过 `http.Transport.Clone` 创建独立分片。保留各分片的代理、TLS 与协议策略；不要使用吞掉代理构造错误的工厂或不会发生的直连降级分支。验证入口为 `service/http_client_transport_test.go`。
 - 请求体存储的游标、关闭状态与释放计数由同一把互斥锁管理。磁盘构造失败须清理临时文件，`Bytes()` 不得改变主读取游标，独立回放 reader 不得接管存储生命周期。验证入口为 `common/body_storage_test.go`。
 - 日志轮转计数由 `atomic.Uint64` 管理，文件切换由 `setupLogLock` 串行化；计数允许近似并不意味着可以无锁读写。`relay/helper` 与 `service` 的并发日志路径会在竞态检测中覆盖该约束。
-- `relay/channel` 的 Gin 模式在 `TestMain` 中统一初始化，禁止并行测试重复修改全局模式。任务轮询会通过 ORM 更新传入的任务对象，测试需在启动后台轮询前保存用于断言的任务 ID，避免并发读取正在更新的对象。
-- `controller/relay_stream_test.go` 的保活测试显式关闭无关的性能指标并恢复配置，避免异步 Redis 上报跨越测试边界，与后续 fixture 替换 Redis 配置发生竞态。
 
 ## 内容审核
 
@@ -39,6 +37,13 @@
 - Gemini 类型的原生生成路由在关闭透传时移除客户端系统提示里的 `<available_skills>` 标签，保留内部文本和函数声明。同一 Argon 渠道重放时，技能系统提示段触发了 429，单独加入 `read_file` 声明为 200。移除标签后，原失败请求、工具调用和带思考签名的结果回传均通过。上游判定原因尚未确认。回归入口为 `TestNativeGeminiSearchAndFunctionTools`。
 - 保留普通函数或可转换的自定义工具时过滤内置网页搜索。Chat/Claude/Responses→Gemini 走 `attachGeminiRequest`，Gemini 类型的原生路由在关闭透传时直接过滤工具 JSON 中的搜索键。两条路径均记录 `hosted_web_search_omitted`，默认允许，`safe`/`strict` 拒绝。回归入口为 `TestConvertRequestToGeminiToolCombination` 和 `TestNativeGeminiSearchAndFunctionTools`。
 
-## Windows 本机竞态验证
+## 余额查询接口
 
+- `/v1/credits` 返回账户余额，采用站点显示单位。`/api/usage/token/` 返回 API Key 的原始额度，启用 `allow_user_quota_query` 时附带 `data.user_quota`。OpenMinis `1a71df0` 的 New API 解析器只读取 Key 额度字段。
+- OpenMinis 优先探测 `GET /v1/usage`，按 Sub2API 钱包格式读取顶层 `isValid` 和 `balance`，固定以 USD 展示。已识别为 New API 的连接需重新探测。网关要求 `allow_user_quota_query`，按通过鉴权的 Key 确定账户，用原始剩余额度除以 `QuotaPerUnit`。回归入口为 `router/relay_router_test.go` 的 `TestSub2APIWalletBalanceReturnsAccountQuotaInUSD` 和 `TestBalanceEndpointsEnforceTokenRestrictions`。
+
+## 测试与竞态验证
+
+- `relay/channel` 的 Gin 模式在 `TestMain` 中初始化，避免并行测试重复写全局模式。后台任务轮询会通过 ORM 更新传入的任务对象，测试应在启动轮询前保存用于断言的任务 ID。
+- `controller/relay_stream_test.go` 的保活测试关闭性能指标并在清理时恢复，避免异步 Redis 上报与后续测试替换 Redis 配置发生竞态。
 - Windows 竞态测试使用 WinLibs GCC（`BrechtSanders.WinLibs.POSIX.UCRT`），在当前进程启用 `CGO_ENABLED=1`。本机用 `GOMAXPROCS=2` 和 `go test -race -p 1` 限制并行编译。
