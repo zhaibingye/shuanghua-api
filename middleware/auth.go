@@ -540,6 +540,15 @@ func TokenAuthReadOnly() func(c *gin.Context) {
 }
 
 func TokenAuth() func(c *gin.Context) {
+	return tokenAuth(false)
+}
+
+// TokenAuthForUserQuota requires permission to query the API key owner's quota.
+func TokenAuthForUserQuota() gin.HandlerFunc {
+	return tokenAuth(true)
+}
+
+func tokenAuth(requireUserQuotaQuery bool) gin.HandlerFunc {
 	return func(c *gin.Context) {
 		// 先检测是否为ws
 		applyWebSocketSubprotocolAuthorization(c.Request.Header)
@@ -638,7 +647,7 @@ func TokenAuth() func(c *gin.Context) {
 			abortWithOpenAiMessage(c, http.StatusForbidden, common.TranslateMessage(c, i18n.MsgAuthUserBanned))
 			return
 		}
-		if isCreditsRequest && !token.AllowUserQuotaQuery {
+		if (requireUserQuotaQuery || isCreditsRequest) && !token.AllowUserQuotaQuery {
 			abortWithOpenAiMessage(c, http.StatusForbidden, i18n.T(c, i18n.MsgForbidden), types.ErrorCodeAccessDenied)
 			return
 		}

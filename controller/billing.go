@@ -4,6 +4,7 @@ import (
 	"net/http"
 
 	"github.com/QuantumNous/new-api/common"
+	"github.com/QuantumNous/new-api/i18n"
 	"github.com/QuantumNous/new-api/model"
 	"github.com/QuantumNous/new-api/relaykit/types"
 	"github.com/QuantumNous/new-api/setting/operation_setting"
@@ -105,6 +106,23 @@ func GetUsage(c *gin.Context) {
 		TotalUsage: amount * 100,
 	}
 	c.JSON(http.StatusOK, usage)
+}
+
+func GetSub2APIWalletBalance(c *gin.Context) {
+	quota, err := model.GetUserQuota(c.GetInt("id"), false)
+	if err != nil {
+		common.SysError(common.LogText("failed to get user quota: %s", err.Error()))
+		c.JSON(http.StatusInternalServerError, gin.H{
+			"error": types.OpenAIError{Message: i18n.T(c, i18n.MsgDatabaseError), Type: "new_api_error"},
+		})
+		return
+	}
+
+	// Sub2API wallet balances are denominated in USD.
+	c.JSON(http.StatusOK, gin.H{
+		"isValid": true,
+		"balance": float64(quota) / common.QuotaPerUnit,
+	})
 }
 
 func GetCredits(c *gin.Context) {

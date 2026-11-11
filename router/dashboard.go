@@ -8,13 +8,15 @@ import (
 )
 
 func SetDashboardRouter(router *gin.Engine) {
-	apiRouter := router.Group("/")
-	apiRouter.Use(middleware.RouteTag("old_api"))
-	apiRouter.Use(gzip.Gzip(gzip.DefaultCompression))
-	apiRouter.Use(middleware.GlobalAPIRateLimit())
-	apiRouter.Use(middleware.CORS())
-	apiRouter.Use(middleware.DisableCache())
-	apiRouter.Use(middleware.TokenAuth())
+	dashboard := router.Group("/")
+	dashboard.Use(middleware.RouteTag("old_api"))
+	dashboard.Use(gzip.Gzip(gzip.DefaultCompression))
+	dashboard.Use(middleware.GlobalAPIRateLimit())
+	dashboard.Use(middleware.CORS())
+	dashboard.Use(middleware.DisableCache())
+	dashboard.GET("/v1/usage", middleware.TokenAuthForUserQuota(), controller.GetSub2APIWalletBalance)
+
+	apiRouter := dashboard.Group("", middleware.TokenAuth())
 	{
 		apiRouter.GET("/dashboard/billing/subscription", controller.GetSubscription)
 		apiRouter.GET("/v1/dashboard/billing/subscription", controller.GetSubscription)

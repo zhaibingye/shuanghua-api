@@ -285,7 +285,62 @@ func TestCreditsEndpointWithAPIKey(t *testing.T) {
 	})
 }
 
-func TestCreditsNativeAuthenticationEnforcesTokenRestrictions(t *testing.T) {
+func TestSub2APIWalletBalanceReturnsAccountQuotaInUSD(t *testing.T) {
+	require.NoError(t, i18n.Init())
+	setupRelayRouterTestDB(t)
+	general := operation_setting.GetGeneralSetting()
+	originalDisplayType, originalQuotaPerUnit := general.QuotaDisplayType, common.QuotaPerUnit
+	general.QuotaDisplayType, common.QuotaPerUnit = operation_setting.QuotaDisplayTypeTokens, 300_000
+	t.Cleanup(func() {
+		general.QuotaDisplayType, common.QuotaPerUnit = originalDisplayType, originalQuotaPerUnit
+	})
+
+	otherUser := model.User{Username: "other-wallet", AffCode: "other-wallet", Status: common.UserStatusEnabled, Quota: 9_000_000}
+	require.NoError(t, model.DB.Create(&otherUser).Error)
+	engine := gin.New()
+	SetDashboardRouter(engine)
+	for _, tc := range []struct {
+		name      string
+		quota     int
+		unlimited bool
+		response  string
+	}{
+		{name: "limited", quota: 3_750_000, response: `{"isValid":true,"balance":12.5}`},
+		{name: "unlimited", quota: 3_750_000, unlimited: true, response: `{"isValid":true,"balance":12.5}`},
+		{name: "empty", unlimited: true, response: `{"isValid":true,"balance":0}`},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			key := "wallet" + tc.name
+			user := model.User{
+				Username: key, AffCode: key, Status: common.UserStatusEnabled, Group: "default",
+				Quota: tc.quota, UsedQuota: 300_000,
+			}
+			require.NoError(t, model.DB.Create(&user).Error)
+			require.NoError(t, model.DB.Create(&model.Token{
+				UserId: user.Id, Key: key, Status: common.TokenStatusEnabled, ExpiredTime: -1,
+				RemainQuota: 300_000, UnlimitedQuota: tc.unlimited, AllowUserQuotaQuery: true,
+			}).Error)
+
+			request := httptest.NewRequest(http.MethodGet, fmt.Sprintf("/v1/usage?user_id=%d&id=%d", otherUser.Id, otherUser.Id), nil)
+			request.Header.Set("Authorization", "Bearer sk-"+key)
+			recorder := httptest.NewRecorder()
+			engine.ServeHTTP(recorder, request)
+			require.Equal(t, http.StatusOK, recorder.Code)
+			assert.JSONEq(t, tc.response, recorder.Body.String())
+			assert.Contains(t, recorder.Header().Get("Cache-Control"), "no-store")
+		})
+	}
+
+	t.Run("rejects credentials in the query string", func(t *testing.T) {
+		request := httptest.NewRequest(http.MethodGet, "/v1/usage?key=sk-walletlimited", nil)
+		recorder := httptest.NewRecorder()
+		engine.ServeHTTP(recorder, request)
+		assert.Equal(t, http.StatusUnauthorized, recorder.Code)
+		assert.NotContains(t, recorder.Body.String(), "walletlimited")
+	})
+}
+
+func TestBalanceEndpointsEnforceTokenRestrictions(t *testing.T) {
 	require.NoError(t, i18n.Init())
 	setupRelayRouterTestDB(t)
 	engine := gin.New()
@@ -295,18 +350,20 @@ func TestCreditsNativeAuthenticationEnforcesTokenRestrictions(t *testing.T) {
 	for _, protocol := range []struct{ name, path, header string }{
 		{"Claude", "/v1/credits", "x-api-key"},
 		{"Gemini", "/v1beta/credits", "x-goog-api-key"},
+		{"Sub2API", "/v1/usage", "Authorization"},
 	} {
 		for i, tc := range []struct {
-			name        string
-			tokenStatus int
-			expired     bool
-			exhausted   bool
-			banned      bool
-			allowIPs    string
-			missingKey  bool
-			invalidKey  bool
-			bearer      bool
-			wantStatus  int
+			name           string
+			tokenStatus    int
+			expired        bool
+			exhausted      bool
+			banned         bool
+			allowIPs       string
+			missingKey     bool
+			invalidKey     bool
+			fallbackBearer bool
+			denyUserQuota  bool
+			wantStatus     int
 		}{
 			{name: "missing key", missingKey: true, wantStatus: http.StatusUnauthorized},
 			{name: "invalid key", invalidKey: true, wantStatus: http.StatusUnauthorized},
@@ -315,8 +372,12 @@ func TestCreditsNativeAuthenticationEnforcesTokenRestrictions(t *testing.T) {
 			{name: "exhausted token", exhausted: true, wantStatus: http.StatusUnauthorized},
 			{name: "banned user", banned: true, wantStatus: http.StatusForbidden},
 			{name: "IP restriction", allowIPs: "192.0.2.0/24", wantStatus: http.StatusForbidden},
-			{name: "invalid native key cannot fall back to bearer", invalidKey: true, bearer: true, wantStatus: http.StatusUnauthorized},
+			{name: "user quota permission off", denyUserQuota: true, wantStatus: http.StatusForbidden},
+			{name: "invalid native key cannot fall back to bearer", invalidKey: true, fallbackBearer: true, wantStatus: http.StatusUnauthorized},
 		} {
+			if tc.fallbackBearer && protocol.header == "Authorization" {
+				continue
+			}
 			t.Run(protocol.name+"/"+tc.name, func(t *testing.T) {
 				identity := fmt.Sprintf("creditguard%s%d", protocol.name, i)
 				user := model.User{
@@ -330,7 +391,7 @@ func TestCreditsNativeAuthenticationEnforcesTokenRestrictions(t *testing.T) {
 				token := model.Token{
 					UserId: user.Id, Key: identity,
 					Status: common.TokenStatusEnabled, ExpiredTime: -1, RemainQuota: int(common.QuotaPerUnit),
-					AllowUserQuotaQuery: true,
+					AllowUserQuotaQuery: !tc.denyUserQuota,
 				}
 				if tc.tokenStatus != 0 {
 					token.Status = tc.tokenStatus
@@ -353,9 +414,12 @@ func TestCreditsNativeAuthenticationEnforcesTokenRestrictions(t *testing.T) {
 					if tc.invalidKey {
 						key = "invalidnativekey"
 					}
+					if protocol.header == "Authorization" {
+						key = "Bearer sk-" + key
+					}
 					request.Header.Set(protocol.header, key)
 				}
-				if tc.bearer {
+				if tc.fallbackBearer {
 					request.Header.Set("Authorization", "Bearer "+token.Key)
 				}
 				recorder := httptest.NewRecorder()
@@ -366,6 +430,7 @@ func TestCreditsNativeAuthenticationEnforcesTokenRestrictions(t *testing.T) {
 				require.NoError(t, common.Unmarshal(recorder.Body.Bytes(), &payload))
 				assert.Contains(t, payload, "error")
 				assert.NotContains(t, payload, "data")
+				assert.NotContains(t, payload, "balance")
 				assert.NotContains(t, recorder.Body.String(), token.Key)
 			})
 		}
