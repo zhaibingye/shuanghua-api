@@ -306,13 +306,7 @@ func toolsToChat(tools []ir.Tool) ([]dto.ToolCallRequest, *dto.WebSearchOptions,
 		item := dto.ToolCallRequest{Type: "function"}
 		item.Function.Name = tool.Name
 		item.Function.Description = tool.Description
-		if jsonx.Present(tool.Schema) {
-			var parameters any
-			if err := kitutil.Unmarshal(tool.Schema, &parameters); err != nil {
-				return nil, nil, err
-			}
-			item.Function.Parameters = parameters
-		}
+		item.Function.Parameters = jsonx.Clone(tool.Schema)
 		out = append(out, item)
 	}
 	return out, search, nil

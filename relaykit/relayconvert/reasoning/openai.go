@@ -3,10 +3,9 @@ package reasoning
 import (
 	"strings"
 
+	"github.com/MoeForge/moego/ojson"
 	"github.com/QuantumNous/new-api/relaykit/dto"
 	"github.com/QuantumNous/new-api/relaykit/relayconvert/kitutil"
-	"github.com/tidwall/gjson"
-	"github.com/tidwall/sjson"
 )
 
 func openAIThinkingBudget(rawBudget, enabled []byte) *int {
@@ -44,14 +43,15 @@ func OpenAIOutputEffort(model string, intent Intent) Effort {
 // NormalizeOpenAIChatBudget handles budget extensions on native Chat
 // requests. Qwen uses its own native budget field.
 func NormalizeOpenAIChatBudget(req *dto.GeneralOpenAIRequest) error {
-	if dto.IsQwenThinkingBudgetModel(req.Model) || len(req.ThinkingBudget) == 0 && !gjson.GetBytes(req.Reasoning, "max_tokens").Exists() {
+	hasReasoningBudget := ojson.GetBytes(req.Reasoning, "max_tokens").Exists()
+	if dto.IsQwenThinkingBudgetModel(req.Model) || len(req.ThinkingBudget) == 0 && !hasReasoningBudget {
 		return nil
 	}
 	intent, _, err := FromOpenAIChat(req)
 	if err != nil {
 		return err
 	}
-	explicitEffort := req.ReasoningEffort != "" || gjson.GetBytes(req.Reasoning, "effort").Str != "" || gjson.GetBytes(req.Reasoning, "enabled").Type == gjson.False
+	explicitEffort := req.ReasoningEffort != "" || ojson.GetBytes(req.Reasoning, "effort").Str != "" || ojson.GetBytes(req.Reasoning, "enabled").Type == ojson.False
 	if !explicitEffort && (intent.BudgetTokens == nil || *intent.BudgetTokens <= 0) {
 		return nil
 	}
@@ -59,8 +59,8 @@ func NormalizeOpenAIChatBudget(req *dto.GeneralOpenAIRequest) error {
 		req.ReasoningEffort = string(OpenAIOutputEffort(req.Model, intent))
 	}
 	req.ThinkingBudget = nil
-	if gjson.GetBytes(req.Reasoning, "max_tokens").Exists() {
-		req.Reasoning, err = sjson.DeleteBytes(req.Reasoning, "max_tokens")
+	if hasReasoningBudget {
+		req.Reasoning, err = ojson.DeleteBytes(req.Reasoning, "max_tokens")
 		if string(req.Reasoning) == "{}" {
 			req.Reasoning = nil
 		}

@@ -206,6 +206,7 @@ func irRequestConverter(from, target types.RelayFormat) RequestConverterFunc {
 				case dto.GeneralOpenAIRequest:
 					native = value
 				}
+				req.GenerationConfig.ImageConfig = native.ImageConfig
 				if err := sharedgemini.ApplyGoogleExtraBody(req, native.ExtraBody); err != nil {
 					return nil, err
 				}

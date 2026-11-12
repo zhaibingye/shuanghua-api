@@ -20,6 +20,7 @@ type GeminiChatRequest struct {
 	ToolConfig         *ToolConfig                `json:"toolConfig,omitempty"`
 	SystemInstructions *GeminiChatContent         `json:"systemInstruction,omitempty"`
 	CachedContent      string                     `json:"cachedContent,omitempty"`
+	ContinuationToken  json.RawMessage            `json:"continuationToken,omitempty"`
 }
 
 // UnmarshalJSON allows GeminiChatRequest to accept both snake_case and camelCase fields.
@@ -29,6 +30,7 @@ func (r *GeminiChatRequest) UnmarshalJSON(data []byte) error {
 		Alias
 		SystemInstructionSnake *GeminiChatContent `json:"system_instruction,omitempty"`
 		ToolConfigSnake        *ToolConfig        `json:"tool_config,omitempty"`
+		ContinuationTokenSnake json.RawMessage    `json:"continuation_token,omitempty"`
 	}
 
 	if err := kitutil.Unmarshal(data, &aux); err != nil {
@@ -42,6 +44,10 @@ func (r *GeminiChatRequest) UnmarshalJSON(data []byte) error {
 	}
 	if r.ToolConfig == nil {
 		r.ToolConfig = aux.ToolConfigSnake
+	}
+
+	if aux.ContinuationTokenSnake != nil {
+		r.ContinuationToken = aux.ContinuationTokenSnake
 	}
 
 	return nil
@@ -403,6 +409,7 @@ type GeminiPart struct {
 	FunctionResponse *GeminiFunctionResponse `json:"functionResponse,omitempty"`
 	// Optional. Media resolution for the input media.
 	MediaResolution     json.RawMessage                `json:"mediaResolution,omitempty"`
+	MediaProcessing     json.RawMessage                `json:"mediaProcessing,omitempty"`
 	VideoMetadata       json.RawMessage                `json:"videoMetadata,omitempty"`
 	FileData            *GeminiFileData                `json:"fileData,omitempty"`
 	ExecutableCode      *GeminiPartExecutableCode      `json:"executableCode,omitempty"`
@@ -444,6 +451,7 @@ func (p *GeminiPart) UnmarshalJSON(data []byte) error {
 		CodeExecutionResultSnake *GeminiPartCodeExecutionResult `json:"code_execution_result"`
 		ToolCallSnake            json.RawMessage                `json:"tool_call"`
 		ToolResponseSnake        json.RawMessage                `json:"tool_response"`
+		MediaProcessingSnake     json.RawMessage                `json:"media_processing,omitempty"`
 	}
 
 	if err := kitutil.Unmarshal(data, &aux); err != nil {
@@ -490,6 +498,9 @@ func (p *GeminiPart) UnmarshalJSON(data []byte) error {
 	if aux.ToolResponseSnake != nil {
 		p.ToolResponse = aux.ToolResponseSnake
 	}
+	if aux.MediaProcessingSnake != nil {
+		p.MediaProcessing = aux.MediaProcessingSnake
+	}
 	return nil
 }
 
@@ -532,6 +543,7 @@ type GeminiChatGenerationConfig struct {
 	Logprobs                   *int32                `json:"logprobs,omitempty"`
 	EnableEnhancedCivicAnswers *bool                 `json:"enableEnhancedCivicAnswers,omitempty"`
 	MediaResolution            MediaResolution       `json:"mediaResolution,omitempty"`
+	MediaProcessing            json.RawMessage       `json:"mediaProcessing,omitempty"`
 	Seed                       *int64                `json:"seed,omitempty"`
 	ResponseModalities         []string              `json:"responseModalities,omitempty"`
 	ThinkingConfig             *GeminiThinkingConfig `json:"thinkingConfig,omitempty"`
@@ -557,6 +569,7 @@ func (c *GeminiChatGenerationConfig) UnmarshalJSON(data []byte) error {
 		ResponseLogprobsSnake           *bool                 `json:"response_logprobs,omitempty"`
 		EnableEnhancedCivicAnswersSnake *bool                 `json:"enable_enhanced_civic_answers,omitempty"`
 		MediaResolutionSnake            MediaResolution       `json:"media_resolution,omitempty"`
+		MediaProcessingSnake            json.RawMessage       `json:"media_processing,omitempty"`
 		ResponseModalitiesSnake         []string              `json:"response_modalities,omitempty"`
 		ThinkingConfigSnake             *GeminiThinkingConfig `json:"thinking_config,omitempty"`
 		SpeechConfigSnake               json.RawMessage       `json:"speech_config,omitempty"`
@@ -609,6 +622,9 @@ func (c *GeminiChatGenerationConfig) UnmarshalJSON(data []byte) error {
 	if aux.MediaResolutionSnake != "" {
 		c.MediaResolution = aux.MediaResolutionSnake
 	}
+	if aux.MediaProcessingSnake != nil {
+		c.MediaProcessing = aux.MediaProcessingSnake
+	}
 	if len(aux.ResponseModalitiesSnake) > 0 {
 		c.ResponseModalities = aux.ResponseModalitiesSnake
 	}
@@ -630,6 +646,7 @@ type MediaResolution string
 type GeminiChatCandidate struct {
 	Content           GeminiChatContent        `json:"content"`
 	FinishReason      *string                  `json:"finishReason"`
+	ContinuationToken json.RawMessage          `json:"continuationToken,omitempty"`
 	Index             int64                    `json:"index"`
 	SafetyRatings     []GeminiChatSafetyRating `json:"safetyRatings"`
 	GroundingMetadata *GeminiGroundingMetadata `json:"groundingMetadata,omitempty"`
@@ -811,11 +828,29 @@ func (r *GeminiBatchEmbeddingRequest) SetModelName(modelName string) {
 }
 
 type GeminiEmbeddingResponse struct {
-	Embedding ContentEmbedding `json:"embedding"`
+	Embedding     ContentEmbedding              `json:"embedding"`
+	UsageMetadata *GeminiEmbeddingUsageMetadata `json:"usageMetadata,omitempty"`
 }
 
 type GeminiBatchEmbeddingResponse struct {
-	Embeddings []*ContentEmbedding `json:"embeddings"`
+	Embeddings    []*ContentEmbedding           `json:"embeddings"`
+	UsageMetadata *GeminiEmbeddingUsageMetadata `json:"usageMetadata,omitempty"`
+}
+
+type GeminiEmbeddingUsageMetadata struct {
+	PromptTokenCount   int                         `json:"promptTokenCount"`
+	PromptTokenDetails []GeminiPromptTokensDetails `json:"promptTokenDetails,omitempty"`
+}
+
+func (m *GeminiEmbeddingUsageMetadata) GeminiUsageMetadata() *GeminiUsageMetadata {
+	if m == nil || m.PromptTokenCount <= 0 {
+		return nil
+	}
+	return &GeminiUsageMetadata{
+		PromptTokenCount:    m.PromptTokenCount,
+		TotalTokenCount:     m.PromptTokenCount,
+		PromptTokensDetails: m.PromptTokenDetails,
+	}
 }
 
 type ContentEmbedding struct {

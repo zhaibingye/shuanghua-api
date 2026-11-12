@@ -3,6 +3,7 @@
 ## 转发运行时
 
 - 流式转发由 `relay/helper/stream_scanner.go` 的请求处理协程统一调用数据回调、发送心跳和记录终态；上游读取协程只传递原始行与读取结果。接管流之前须等待请求准备阶段的 `streamKeepAliveWriter` 心跳退出，再修改响应头。必须先处理已读取的数据，再记录 EOF，避免正常结束掩盖回调错误。取消请求要立即关闭上游，即使下游回调尚未返回；返回前须等待关闭与读取完成。
+- SSE 写入由 `SetEventStreamHeaders` 安装的 writer 按累计写入字节数延长截止时间，避免大图事件被固定超时截断。流扫描器只把完整的裸 `[DONE]` 或 `data: [DONE]` 当作结束。
 - HTTP 代理配置只在构造连接池前校验一次，再通过 `http.Transport.Clone` 创建独立分片。保留各分片的代理、TLS 与协议策略；不要使用吞掉代理构造错误的工厂或不会发生的直连降级分支。验证入口为 `service/http_client_transport_test.go`。
 - 请求体存储的游标、关闭状态与释放计数由同一把互斥锁管理。磁盘构造失败须清理临时文件，`Bytes()` 不得改变主读取游标，独立回放 reader 不得接管存储生命周期。验证入口为 `common/body_storage_test.go`。
 - 日志轮转计数由 `atomic.Uint64` 管理，文件切换由 `setupLogLock` 串行化；计数允许近似并不意味着可以无锁读写。`relay/helper` 与 `service` 的并发日志路径会在竞态检测中覆盖该约束。
@@ -17,6 +18,7 @@
 ### 转换入口与缓存
 
 - 内置文本转换器的实际入口在 `relaykit/relayconvert/text_converter_registry.go`，请求与响应统一走 `ir/project`。排查旧 `internal` 转换器时先确认调用链。
+- Chat、Responses 与 Claude 转换用原始 JSON 传递结构化输出和工具 schema。转成 `map[string]any` 再编码会排序，影响上游按属性顺序生成结果。回归入口为 `TestConvertRequestPreservesSchemaPropertyOrder`。
 - 缓存计数必须同时保留公共 `PromptTokensDetails` 与 Responses 的 `InputTokensDetails`：`UsageFromChatUsage` 也用于其他目标协议和流式账务，不能只填 Responses 别名。Gemini 投影须发送 `cachedContentTokenCount`，并把已包含在 completion 总数里的 reasoning 拆为 `thoughtsTokenCount`。原始供应商账务仍以 `BillingUsage` 快照为准。回归入口为 `relaykit/relayconvert/cache_conversion_test.go`。
 - Chat/Responses 共有的 `prompt_cache_key`、`prompt_cache_retention`、`cache_salt` 经 IR 保留。目标无法表示的缓存字段和 Responses 非字符串缓存 key 静默丢弃。原生请求体透传保留原字段。该策略仅用于缓存字段。
 - Claude 工具调用、工具定义及工具结果中的缓存断点均需保留。单文本工具结果只有在不含 `cache_control` 或 citations 时才能折叠成字符串。`ConvertRequestVia` 抽取并最终恢复的工具定义也必须保留缓存配置。
@@ -41,6 +43,10 @@
 
 - `/v1/credits` 返回账户余额，采用站点显示单位。`/api/usage/token/` 返回 API Key 的原始额度，启用 `allow_user_quota_query` 时附带 `data.user_quota`。OpenMinis `1a71df0` 的 New API 解析器只读取 Key 额度字段。
 - OpenMinis 优先探测 `GET /v1/usage`，按 Sub2API 钱包格式读取顶层 `isValid` 和 `balance`，固定以 USD 展示。已识别为 New API 的连接需重新探测。网关要求 `allow_user_quota_query`，按通过鉴权的 Key 确定账户，用原始剩余额度除以 `QuotaPerUnit`。回归入口为 `router/relay_router_test.go` 的 `TestSub2APIWalletBalanceReturnsAccountQuotaInUSD` 和 `TestBalanceEndpointsEnforceTokenRestrictions`。
+
+## 视频插件兼容路由
+
+- `SetVideoRouter` 的 Ark 和 xAI 提交别名沿用共享视频协议选渠道，Ark 路径可选中已绑定的 MediaKit 渠道。插件原生协议仍可通过 `/doubao`、`/doubao-mediakit` 和 `/xai` 前缀访问。`GET /v1/videos/:task_id` 依据已保存的提交路径转交原生查询；缺少执行快照或使用 xAI 插件 1.0/1.1 的历史任务走旧渲染。回归入口为 `TestBuiltInPluginRoutesAreServedBesideHostRoutes` 和 `TestGetOpenAIVideoRouteHandsNativeXAITaskToPluginQuery`。
 
 ## 测试与竞态验证
 

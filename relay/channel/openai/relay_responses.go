@@ -1,6 +1,7 @@
 package openai
 
 import (
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -14,9 +15,8 @@ import (
 	"github.com/QuantumNous/new-api/relaykit/types"
 	"github.com/QuantumNous/new-api/service"
 
+	"github.com/MoeForge/moego/ojson"
 	"github.com/gin-gonic/gin"
-	"github.com/tidwall/gjson"
-	"github.com/tidwall/sjson"
 )
 
 func OaiResponsesHandler(c *gin.Context, info *relaycommon.RelayInfo, resp *http.Response) (*dto.Usage, *types.NewAPIError) {
@@ -91,8 +91,18 @@ func OaiResponsesStreamHandler(c *gin.Context, info *relaycommon.RelayInfo, resp
 			service.RecordOpenCodeResponse(c, info, streamResponse.Response.ID)
 			data = string(rewriteSGLangResponsesCreatedAt(info, []byte(data), "response.created_at", streamResponse.Response.CreatedAt))
 		}
-		sendResponsesStreamData(c, streamResponse, data)
 		accumulator.Observe(&streamResponse, common.StringToByteSlice(data))
+		if err := helper.ResponseChunkData(c, streamResponse, data); err != nil {
+			if cancelErr := c.Request.Context().Err(); cancelErr == nil || !errors.Is(err, cancelErr) {
+				sr.Stop(err)
+			}
+			return
+		}
+		if (streamResponse.Type == "response.completed" || streamResponse.Type == "response.done") &&
+			streamResponse.Response != nil && info.StreamStatus.ResponseOutcome() == string(relaycommon.ResponseOutcomeCompleted) &&
+			(c.Request.Context().Err() == nil || !info.StreamStatus.HasErrors()) {
+			sr.Done()
+		}
 	})
 
 	common.SetContextKey(c, constant.ContextKeyResponseStreamStatus, info.StreamStatus)
@@ -104,10 +114,10 @@ func rewriteSGLangResponsesCreatedAt(info *relaycommon.RelayInfo, payload []byte
 	if info.GetChannelType() != constant.ChannelTypeSGLang {
 		return payload
 	}
-	if !gjson.GetBytes(payload, path).Exists() {
+	if !ojson.GetBytes(payload, path).Exists() {
 		return payload
 	}
-	patched, err := sjson.SetBytes(payload, path, int(createdAt))
+	patched, err := ojson.SetBytes(payload, path, int(createdAt))
 	if err != nil {
 		return payload
 	}

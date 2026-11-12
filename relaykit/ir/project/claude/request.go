@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"strings"
 
+	"github.com/MoeForge/moego/ojson"
 	"github.com/QuantumNous/new-api/relaykit/dto"
 	"github.com/QuantumNous/new-api/relaykit/ir"
 	kitutil "github.com/QuantumNous/new-api/relaykit/relayconvert/kitutil"
@@ -284,20 +285,23 @@ func toolsFromClaude(tools any) ([]ir.Tool, error) {
 	if tools == nil {
 		return nil, nil
 	}
-	items, ok := asSlice(tools)
-	if !ok {
+	raw, err := marshalRaw(tools)
+	if err != nil {
+		return nil, err
+	}
+	var items []json.RawMessage
+	if !ojson.ParseBytes(raw).IsArray() || kitutil.Unmarshal(raw, &items) != nil {
 		return nil, fmt.Errorf("claude tools: expected array, got %T", tools)
 	}
 	out := make([]ir.Tool, 0, len(items))
 	for _, item := range items {
 		m, ok := asMap(item)
 		if !ok {
-			raw, err := marshalRaw(item)
-			if err != nil {
-				return nil, err
-			}
-			out = append(out, ir.Tool{Kind: ir.ToolCustom, Extra: raw})
+			out = append(out, ir.Tool{Kind: ir.ToolCustom, Extra: item})
 			continue
+		}
+		if schema := ojson.GetBytes(item, "input_schema"); schema.Exists() {
+			m["input_schema"] = json.RawMessage(schema.Raw)
 		}
 		tool, err := toolFromClaudeMap(m)
 		if err != nil {
@@ -380,7 +384,9 @@ func toolToClaudeValue(tool ir.Tool) (any, error) {
 		m := map[string]any{}
 		putIfNotEmpty(m, "name", tool.Name)
 		putIfNotEmpty(m, "description", tool.Description)
-		putRaw(m, "input_schema", tool.Schema)
+		if rawPresent(tool.Schema) {
+			m["input_schema"] = tool.Schema
+		}
 		if cc := cacheControlToMap(tool.CacheControl); cc != nil {
 			m["cache_control"] = cc
 		}

@@ -6,12 +6,11 @@ import (
 	"slices"
 	"strings"
 
+	"github.com/MoeForge/moego/ojson"
 	"github.com/QuantumNous/new-api/relaykit/dto"
 	"github.com/QuantumNous/new-api/relaykit/relayconvert/convmeta"
 	"github.com/QuantumNous/new-api/relaykit/relayconvert/kitutil"
 	"github.com/QuantumNous/new-api/relaykit/types"
-	"github.com/tidwall/gjson"
-	"github.com/tidwall/sjson"
 )
 
 func geminiSearchWithFunctionsOmitted(index int) types.ConversionDiagnostic {
@@ -28,10 +27,10 @@ func FilterNativeGeminiSearch(request *dto.GeminiChatRequest, options *convmeta.
 	if request == nil || len(request.Tools) == 0 {
 		return nil, nil
 	}
-	root := gjson.ParseBytes(request.Tools)
+	root := ojson.ParseBytes(request.Tools)
 	tools := root.Array()
 	if root.IsObject() {
-		tools = []gjson.Result{root}
+		tools = []ojson.Result{root}
 	}
 	if !slices.ContainsFunc(tools, geminiNativeFunctionTool) {
 		return nil, nil
@@ -48,7 +47,7 @@ func FilterNativeGeminiSearch(request *dto.GeminiChatRequest, options *convmeta.
 				continue
 			}
 			var err error
-			payload, err = sjson.Delete(payload, key)
+			payload, err = ojson.Delete(payload, key)
 			if err != nil {
 				return nil, err
 			}
@@ -58,7 +57,7 @@ func FilterNativeGeminiSearch(request *dto.GeminiChatRequest, options *convmeta.
 			diagnostic.From = types.RelayFormatGemini
 			diagnostic.To = types.RelayFormatGemini
 			diagnostics = append(diagnostics, diagnostic)
-			if len(gjson.Parse(payload).Map()) == 0 {
+			if len(ojson.Parse(payload).Map()) == 0 {
 				continue
 			}
 		}
@@ -82,12 +81,12 @@ func FilterNativeGeminiSearch(request *dto.GeminiChatRequest, options *convmeta.
 	return diagnostics, nil
 }
 
-func geminiNativeFunctionTool(tool gjson.Result) bool {
+func geminiNativeFunctionTool(tool ojson.Result) bool {
 	for _, key := range []string{"functionDeclarations", "function_declarations"} {
 		declarations := tool.Get(key)
-		if declarations.IsArray() && slices.ContainsFunc(declarations.Array(), func(declaration gjson.Result) bool {
+		if declarations.IsArray() && slices.ContainsFunc(declarations.Array(), func(declaration ojson.Result) bool {
 			name := declaration.Get("name")
-			return name.Type == gjson.String && strings.TrimSpace(name.Str) != ""
+			return name.Type == ojson.String && strings.TrimSpace(name.Str) != ""
 		}) {
 			return true
 		}

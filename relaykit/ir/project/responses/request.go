@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"strings"
 
+	"github.com/MoeForge/moego/ojson"
 	"github.com/QuantumNous/new-api/relaykit/dto"
 	"github.com/QuantumNous/new-api/relaykit/ir"
 	"github.com/QuantumNous/new-api/relaykit/ir/internal/jsonx"
@@ -225,8 +226,7 @@ func formatFromResponsesText(raw json.RawMessage) *ir.ResponseFormat {
 		if strict, ok := inner["strict"].(bool); ok {
 			format.Strict = &strict
 		}
-		schema, _ := jsonx.Marshal(inner["schema"])
-		format.Schema = schema
+		format.Schema = json.RawMessage(ojson.GetBytes(raw, "format.schema").Raw)
 	}
 	if format.Type == "" && format.Name == "" && !jsonx.Present(format.Schema) {
 		return nil
@@ -244,7 +244,9 @@ func formatToResponsesText(format *ir.ResponseFormat) (json.RawMessage, error) {
 	if format.Strict != nil {
 		inner["strict"] = *format.Strict
 	}
-	jsonx.PutRaw(inner, "schema", format.Schema)
+	if jsonx.Present(format.Schema) {
+		inner["schema"] = format.Schema
+	}
 	return kitutil.Marshal(map[string]any{"format": inner})
 }
 
@@ -252,8 +254,8 @@ func toolsFromResponses(raw json.RawMessage) ([]ir.Tool, error) {
 	if !jsonx.Present(raw) {
 		return nil, nil
 	}
-	items, ok := jsonx.AsSlice(raw)
-	if !ok {
+	var items []json.RawMessage
+	if kitutil.Unmarshal(raw, &items) != nil {
 		return nil, fmt.Errorf("responses tools: expected array")
 	}
 	out := make([]ir.Tool, 0, len(items))
@@ -262,35 +264,27 @@ func toolsFromResponses(raw json.RawMessage) ([]ir.Tool, error) {
 		if !ok {
 			continue
 		}
-		full, err := jsonx.Marshal(m)
-		if err != nil {
-			return nil, err
-		}
 		typ := jsonx.MapString(m, "type")
 		switch typ {
 		case "", "function":
-			schema, err := jsonx.Marshal(m["parameters"])
-			if err != nil {
-				return nil, err
-			}
 			out = append(out, ir.Tool{
 				Kind:        ir.ToolFunction,
 				Name:        jsonx.MapString(m, "name"),
 				Description: jsonx.MapString(m, "description"),
-				Schema:      schema,
+				Schema:      json.RawMessage(ojson.GetBytes(item, "parameters").Raw),
 			})
 		case "web_search", "web_search_preview":
-			out = append(out, ir.Tool{Kind: ir.ToolWebSearch, Extra: full})
+			out = append(out, ir.Tool{Kind: ir.ToolWebSearch, Extra: item})
 		case "file_search":
-			out = append(out, ir.Tool{Kind: ir.ToolFileSearch, Extra: full})
+			out = append(out, ir.Tool{Kind: ir.ToolFileSearch, Extra: item})
 		case "code_interpreter":
-			out = append(out, ir.Tool{Kind: ir.ToolCodeExecution, Extra: full})
+			out = append(out, ir.Tool{Kind: ir.ToolCodeExecution, Extra: item})
 		case "image_generation":
-			out = append(out, ir.Tool{Kind: ir.ToolImageGen, Extra: full})
+			out = append(out, ir.Tool{Kind: ir.ToolImageGen, Extra: item})
 		case "computer", "computer_use":
-			out = append(out, ir.Tool{Kind: ir.ToolComputer, Extra: full})
+			out = append(out, ir.Tool{Kind: ir.ToolComputer, Extra: item})
 		default:
-			out = append(out, ir.Tool{Kind: ir.ToolCustom, Extra: full})
+			out = append(out, ir.Tool{Kind: ir.ToolCustom, Extra: item})
 		}
 	}
 	return out, nil
@@ -313,7 +307,9 @@ func toolsToResponses(tools []ir.Tool) (json.RawMessage, error) {
 		item := map[string]any{"type": "function"}
 		jsonx.PutIfNotEmpty(item, "name", tool.Name)
 		jsonx.PutIfNotEmpty(item, "description", tool.Description)
-		jsonx.PutRaw(item, "parameters", tool.Schema)
+		if jsonx.Present(tool.Schema) {
+			item["parameters"] = tool.Schema
+		}
 		items = append(items, item)
 	}
 	return kitutil.Marshal(items)

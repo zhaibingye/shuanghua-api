@@ -58,6 +58,7 @@
       "name": "get_weather",
       "description": "Get weather by city",
       "input_schema": {
+        "type": "object",
         "properties": {
           "city": {
             "type": "string"
@@ -65,8 +66,7 @@
         },
         "required": [
           "city"
-        ],
-        "type": "object"
+        ]
       }
     }
   ],

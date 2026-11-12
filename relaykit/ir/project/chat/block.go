@@ -291,7 +291,7 @@ func blocksToChatMessage(msg ir.Message) (dto.Message, error) {
 		if toolResult != nil {
 			out.ToolCallId = toolResult.ToolUseID
 			out.Name = kitutil.GetPointer(toolResult.Name)
-			body, err := blocksToChatContent(toolResult.Blocks)
+			body, err := blocksToChatContent(toolResult.Blocks, true)
 			if err != nil {
 				return dto.Message{}, err
 			}
@@ -299,7 +299,7 @@ func blocksToChatMessage(msg ir.Message) (dto.Message, error) {
 		}
 		return out, nil
 	}
-	body, err := blocksToChatContent(content)
+	body, err := blocksToChatContent(content, len(toolCalls) == 0)
 	if err != nil {
 		return dto.Message{}, err
 	}
@@ -307,7 +307,7 @@ func blocksToChatMessage(msg ir.Message) (dto.Message, error) {
 	return out, nil
 }
 
-func blocksToChatContent(blocks []ir.Block) (any, error) {
+func blocksToChatContent(blocks []ir.Block, collapseText bool) (any, error) {
 	if len(blocks) == 0 {
 		return nil, nil
 	}
@@ -333,7 +333,7 @@ func blocksToChatContent(blocks []ir.Block) (any, error) {
 	if len(parts) == 0 {
 		return nil, nil
 	}
-	if onlyText {
+	if onlyText && (collapseText || len(parts) == 1) {
 		return strings.Join(texts, ""), nil
 	}
 	return parts, nil

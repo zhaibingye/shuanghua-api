@@ -2,6 +2,7 @@ package relayconvert
 
 import (
 	"context"
+	"encoding/json"
 	"testing"
 
 	"github.com/QuantumNous/new-api/relaykit/dto"
@@ -416,7 +417,7 @@ func TestConvertRequestClaudeToResponsesPreservesMixedBlockOrder(t *testing.T) {
 		Tools: []dto.Tool{{
 			Name:        "lookup",
 			Description: "Look up a value",
-			InputSchema: map[string]any{"type": "object", "properties": map[string]any{"q": map[string]any{"type": "string"}}},
+			InputSchema: json.RawMessage(`{"type":"object","properties":{"q":{"type":"string"}}}`),
 			Strict:      &strict,
 		}},
 		ToolChoice: dto.ClaudeToolChoice{Type: "tool", Name: "lookup", DisableParallelToolUse: true},
@@ -1428,8 +1429,8 @@ func TestConvertRequestResponsesToGeminiUsesDirectConverter(t *testing.T) {
 	require.NoError(t, err)
 	require.Len(t, functions, 1)
 	assert.Equal(t, "lookup", functions[0].Name)
-	params, ok := functions[0].Parameters.(map[string]any)
-	require.True(t, ok)
+	var params map[string]any
+	require.NoError(t, kitutil.Unmarshal(functions[0].Parameters, &params))
 	assert.Equal(t, "OBJECT", params["type"])
 	assert.NotContains(t, params, "additionalProperties")
 	assert.NotContains(t, params, "propertyNames")
@@ -1499,6 +1500,73 @@ func TestConvertRequestResponsesToGeminiSkipsThoughtSignatureWhenDisabled(t *tes
 	assert.Empty(t, geminiReq.Contents[0].Parts[0].ThoughtSignature)
 }
 
+func TestConvertRequestOpenAIChatToGeminiImageConfig(t *testing.T) {
+	tests := []struct {
+		name   string
+		fields string
+		want   string
+	}{
+		{
+			name: "omitted",
+		},
+		{
+			name:   "top level 4K",
+			fields: `,"imageConfig":{"imageSize":"4K"}`,
+			want:   `{"imageSize":"4K"}`,
+		},
+		{
+			name:   "top level aspect ratio",
+			fields: `,"imageConfig":{"imageSize":"4K","aspectRatio":"16:9"}`,
+			want:   `{"imageSize":"4K","aspectRatio":"16:9"}`,
+		},
+		{
+			name:   "google extra body",
+			fields: `,"extra_body":{"google":{"image_config":{"image_size":"4K","aspect_ratio":"16:9"}}}`,
+			want:   `{"imageSize":"4K","aspectRatio":"16:9"}`,
+		},
+		{
+			name:   "google extra body takes precedence",
+			fields: `,"imageConfig":{"imageSize":"1K"},"extra_body":{"google":{"image_config":{"image_size":"4K"}}}`,
+			want:   `{"imageSize":"4K"}`,
+		},
+		{
+			name:   "empty google image config keeps top level config",
+			fields: `,"imageConfig":{"imageSize":"4K"},"extra_body":{"google":{"image_config":{}}}`,
+			want:   `{"imageSize":"4K"}`,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			raw := `{"model":"gemini-3.1-flash-image-preview","temperature":0.7,"top_p":1,"messages":[{"role":"user","content":[{"type":"text","text":"Remove the distant car"}]}]` + tt.fields + `}`
+			var request dto.GeneralOpenAIRequest
+			require.NoError(t, kitutil.Unmarshal([]byte(raw), &request))
+
+			body, err := kitutil.Marshal(request)
+			require.NoError(t, err)
+			var copiedRequest dto.GeneralOpenAIRequest
+			require.NoError(t, kitutil.Unmarshal(body, &copiedRequest))
+
+			result, err := ConvertRequest(context.Background(), nil, types.RelayFormatGemini, &copiedRequest)
+			require.NoError(t, err)
+			body, err = kitutil.Marshal(result.Value)
+			require.NoError(t, err)
+			var upstream map[string]json.RawMessage
+			require.NoError(t, kitutil.Unmarshal(body, &upstream))
+			var generationConfig map[string]json.RawMessage
+			require.NoError(t, kitutil.Unmarshal(upstream["generationConfig"], &generationConfig))
+
+			assert.NotContains(t, upstream, "imageConfig")
+			if tt.want == "" {
+				assert.NotContains(t, generationConfig, "imageConfig")
+				return
+			}
+			require.Contains(t, generationConfig, "imageConfig")
+			assert.JSONEq(t, tt.want, string(generationConfig["imageConfig"]))
+		})
+	}
+}
+
 func TestConvertRequestOpenAIChatToGeminiAddsThoughtSignatureForAdvancedCustom(t *testing.T) {
 	assistantMessage := dto.Message{Role: "assistant", Content: ""}
 	assistantMessage.SetToolCalls([]dto.ToolCallRequest{
@@ -1530,7 +1598,7 @@ func TestConvertRequestOpenAIChatToGeminiAddsThoughtSignatureForAdvancedCustom(t
 				Type: "function",
 				Function: dto.FunctionRequest{
 					Name:       "lookup",
-					Parameters: map[string]any{"type": "object"},
+					Parameters: json.RawMessage(`{"type":"object"}`),
 				},
 			},
 		},
@@ -1774,5 +1842,93 @@ func TestIRRequestPreservesExplicitZeroAndFalseAcrossProtocols(t *testing.T) {
 				assert.Zero(t, *topP)
 			})
 		}
+	}
+}
+
+func TestGeminiToOpenAIChatPreservesTextAlongsideToolCalls(t *testing.T) {
+	const text = "I will check the weather."
+	call := dto.GeminiPart{FunctionCall: &dto.FunctionCall{
+		ID: "call_weather", FunctionName: "get_weather", Arguments: map[string]any{"city": "Paris"},
+	}}
+	for _, tt := range []struct {
+		name      string
+		parts     []dto.GeminiPart
+		wantText  []string
+		wantCalls int
+	}{
+		{name: "text and call", parts: []dto.GeminiPart{{Text: text}, call}, wantText: []string{text}, wantCalls: 1},
+		{name: "text around call", parts: []dto.GeminiPart{{Text: text}, call, {Text: "Please wait."}}, wantText: []string{text, "Please wait."}, wantCalls: 1},
+		{name: "call only", parts: []dto.GeminiPart{call}, wantCalls: 1},
+		{name: "text only", parts: []dto.GeminiPart{{Text: text}}, wantText: []string{text}},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			request := &dto.GeminiChatRequest{Contents: []dto.GeminiChatContent{{Role: "model", Parts: tt.parts}}}
+			result, err := ConvertRequest(context.Background(), &convmeta.Values{
+				UpstreamModelName: "gpt-4o", ChannelMetaAttached: true,
+			}, types.RelayFormatOpenAI, request)
+			require.NoError(t, err)
+			converted, ok := result.Value.(*dto.GeneralOpenAIRequest)
+			require.True(t, ok)
+			// Verify the JSON sent upstream, including custom DTO serialization.
+			body, err := kitutil.Marshal(converted)
+			require.NoError(t, err)
+			var wire dto.GeneralOpenAIRequest
+			require.NoError(t, kitutil.Unmarshal(body, &wire))
+			require.Len(t, wire.Messages, 1)
+			assistant := wire.Messages[0]
+			assert.Equal(t, "assistant", assistant.Role)
+			content := assistant.ParseContent()
+			require.Len(t, content, len(tt.wantText))
+			for i, want := range tt.wantText {
+				assert.Equal(t, "text", content[i].Type)
+				assert.Equal(t, want, content[i].Text)
+			}
+			calls := assistant.ParseToolCalls()
+			require.Len(t, calls, tt.wantCalls)
+			if tt.wantCalls > 0 {
+				assert.Equal(t, "call_weather", calls[0].ID)
+				assert.Equal(t, "get_weather", calls[0].Function.Name)
+				assert.JSONEq(t, `{"city":"Paris"}`, calls[0].Function.Arguments)
+			}
+		})
+	}
+}
+
+func TestConvertRequestPreservesSchemaPropertyOrder(t *testing.T) {
+	const schema = `{"type":"object","properties":{"reasoning":{"type":"string"},"answer":{"type":"string"}}}`
+	for _, tc := range []struct {
+		name   string
+		target types.RelayFormat
+		input  any
+		body   string
+	}{
+		{
+			name: "Chat structured output and tools to Responses", target: types.RelayFormatOpenAIResponses,
+			input: &dto.GeneralOpenAIRequest{},
+			body:  `{"model":"test","messages":[{"role":"user","content":"hello"}],"response_format":{"type":"json_schema","json_schema":{"name":"result","schema":` + schema + `}},"tools":[{"type":"function","function":{"name":"lookup","parameters":` + schema + `}}]}`,
+		},
+		{
+			name: "Responses tools to Claude", target: types.RelayFormatClaude,
+			input: &dto.OpenAIResponsesRequest{},
+			body:  `{"model":"test","input":"hello","max_output_tokens":1024,"tools":[{"type":"function","name":"lookup","parameters":` + schema + `}]}`,
+		},
+		{
+			name: "Claude tools to Chat", target: types.RelayFormatOpenAI,
+			input: &dto.ClaudeRequest{},
+			body:  `{"model":"test","messages":[{"role":"user","content":"hello"}],"max_tokens":1024,"tools":[{"name":"lookup","input_schema":` + schema + `}]}`,
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			require.NoError(t, kitutil.UnmarshalJsonStr(tc.body, tc.input))
+			result, err := ConvertRequest(t.Context(), &convmeta.Values{UpstreamModelName: "test"}, tc.target, tc.input)
+			require.NoError(t, err)
+			body, err := kitutil.Marshal(result.Value)
+			require.NoError(t, err)
+			assert.Contains(t, string(body), schema)
+			if tc.target == types.RelayFormatOpenAIResponses {
+				assert.Contains(t, string(body), `"schema":`+schema)
+				assert.Contains(t, string(body), `"parameters":`+schema)
+			}
+		})
 	}
 }

@@ -371,7 +371,9 @@ func toolsToGemini(tools []ir.Tool) ([]dto.GeminiChatTool, error) {
 			fn := map[string]any{}
 			jsonx.PutIfNotEmpty(fn, "name", tool.Name)
 			jsonx.PutIfNotEmpty(fn, "description", tool.Description)
-			jsonx.PutRaw(fn, "parameters", tool.Schema)
+			if jsonx.Present(tool.Schema) {
+				fn["parameters"] = tool.Schema
+			}
 			functions = append(functions, fn)
 		case ir.ToolGoogleSearch, ir.ToolCodeExecution:
 			if !jsonx.Present(tool.Extra) {

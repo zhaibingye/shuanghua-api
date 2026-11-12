@@ -494,8 +494,8 @@ func videoFetchByIDRespBodyBuilder(c *gin.Context) (respBody []byte, taskResp *d
 
 	isOpenAIVideoAPI := strings.HasPrefix(c.Request.URL.Path, "/v1/videos/") || strings.HasPrefix(c.Request.URL.Path, "/openai/v1/videos/")
 	isArk := strings.HasPrefix(c.Request.URL.Path, constant.ArkContentGenerationTasksPath)
-	isNativeXAI := (originTask.Platform == "xai" || originTask.Platform == "48") && strings.HasPrefix(c.Request.URL.Path, "/v1/videos/")
-	if isArk || isNativeXAI {
+	isLegacyXAI := strings.HasPrefix(c.Request.URL.Path, "/v1/videos/") && originTask.UsesLegacyXAINativeVideoResponse()
+	if isArk || isLegacyXAI {
 		adaptor := GetTaskAdaptor(originTask.Platform)
 		if converter, ok := adaptor.(channel.NativeVideoConverter); ok {
 			respBody, err = converter.ConvertToNativeVideo(originTask)

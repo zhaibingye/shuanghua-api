@@ -194,6 +194,7 @@ func UsageFromChatUsage(src *dto.Usage) *dto.Usage {
 		src.PromptTokensDetails.AudioTokens != 0 ||
 		src.PromptTokensDetails.CachedCreationTokens != 0 ||
 		src.PromptTokensDetails.CacheWriteTokens != 0 ||
+		src.PromptTokensDetails.CacheCreationInputTokens != 0 ||
 		src.PromptTokensDetails.TextTokens != 0 {
 		details := usage.PromptTokensDetails.Clone()
 		usage.InputTokensDetails = &details

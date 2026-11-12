@@ -8,6 +8,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/MoeForge/moego/ojson"
 	"github.com/QuantumNous/new-api/common"
 	"github.com/QuantumNous/new-api/constant"
 	"github.com/QuantumNous/new-api/pkg/billingexpr"
@@ -23,7 +24,6 @@ import (
 	"github.com/gin-gonic/gin"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
-	"github.com/tidwall/gjson"
 )
 
 type imageReservation struct {
@@ -111,18 +111,18 @@ func TestReasoningBudgetsInNativeUpstreamRequests(t *testing.T) {
 			require.Equal(t, http.StatusBadGateway, apiErr.StatusCode, "%v", apiErr)
 			require.Len(t, received, 1)
 			outbound := <-received
-			assert.Equal(t, tc.wantEffort, gjson.GetBytes(outbound, effortPath).Str)
-			assert.Equal(t, tc.wantBudget, gjson.GetBytes(outbound, budgetPath).Raw)
-			assert.Equal(t, int64(16384), gjson.GetBytes(outbound, outputPath).Int())
-			assert.False(t, gjson.GetBytes(outbound, "reasoning.max_tokens").Exists())
+			assert.Equal(t, tc.wantEffort, ojson.GetBytes(outbound, effortPath).Str)
+			assert.Equal(t, tc.wantBudget, ojson.GetBytes(outbound, budgetPath).Raw)
+			assert.Equal(t, int64(16384), ojson.GetBytes(outbound, outputPath).Int())
+			assert.False(t, ojson.GetBytes(outbound, "reasoning.max_tokens").Exists())
 			if tc.format == types.RelayFormatClaude && tc.wantEffort != "" {
-				assert.Equal(t, "adaptive", gjson.GetBytes(outbound, "thinking.type").Str)
+				assert.Equal(t, "adaptive", ojson.GetBytes(outbound, "thinking.type").Str)
 			}
 			if strings.Contains(tc.controls, `"summary":"auto"`) {
-				assert.Equal(t, "auto", gjson.GetBytes(outbound, "reasoning.summary").Str)
+				assert.Equal(t, "auto", ojson.GetBytes(outbound, "reasoning.summary").Str)
 			}
 			if strings.Contains(tc.controls, `"includeThoughts":false`) {
-				assert.Equal(t, "false", gjson.GetBytes(outbound, "generationConfig.thinkingConfig.includeThoughts").Raw)
+				assert.Equal(t, "false", ojson.GetBytes(outbound, "generationConfig.thinkingConfig.includeThoughts").Raw)
 			}
 			if tc.passThrough {
 				assert.Equal(t, body, string(outbound))
@@ -204,11 +204,11 @@ func TestNativeGeminiSearchAndFunctionTools(t *testing.T) {
 			require.Equal(t, http.StatusBadGateway, apiErr.StatusCode, "%v", apiErr)
 			require.Len(t, received, 1)
 			outbound := <-received
-			gotTools := gjson.GetBytes(outbound, "tools").Raw
+			gotTools := ojson.GetBytes(outbound, "tools").Raw
 			assert.JSONEq(t, tc.want, gotTools)
 			assert.Equal(t, tc.want != tc.tools, hasHostDiagnosticCode(info.ConversionDiagnostics(), "hosted_web_search_omitted"))
 			if tc.tools == combined {
-				assert.Equal(t, "9007199254740993", gjson.Get(gotTools, "vendorTool.value").Raw)
+				assert.Equal(t, "9007199254740993", ojson.Get(gotTools, "vendorTool.value").Raw)
 			}
 			if tc.passthrough {
 				assert.Equal(t, body, string(outbound))
@@ -218,10 +218,10 @@ func TestNativeGeminiSearchAndFunctionTools(t *testing.T) {
 			if channelType == constant.ChannelTypeGemini {
 				wantPrompt = cleanSkillPrompt
 			}
-			assert.Equal(t, wantPrompt, gjson.GetBytes(outbound, "systemInstruction.parts.0.text").String())
-			assert.Equal(t, "<available_skills>literal user message</available_skills>", gjson.GetBytes(outbound, "contents.0.parts.0.text").String())
+			assert.Equal(t, wantPrompt, ojson.GetBytes(outbound, "systemInstruction.parts.0.text").String())
+			assert.Equal(t, "<available_skills>literal user message</available_skills>", ojson.GetBytes(outbound, "contents.0.parts.0.text").String())
 			if toolConfig != "" {
-				assert.JSONEq(t, nativeToolConfig, gjson.GetBytes(outbound, "toolConfig").Raw)
+				assert.JSONEq(t, nativeToolConfig, ojson.GetBytes(outbound, "toolConfig").Raw)
 			}
 		})
 	}
@@ -309,7 +309,7 @@ func TestImageRequestReservesFinalQuantityBeforeUpstream(t *testing.T) {
 			assert.Equal(t, http.StatusBadGateway, apiErr.StatusCode)
 			require.Len(t, received, 1)
 			body := <-received
-			assert.Equal(t, int64(tc.count), gjson.GetBytes(body, "n").Int())
+			assert.Equal(t, int64(tc.count), ojson.GetBytes(body, "n").Int())
 			assert.Equal(t, tc.count*20000, info.PriceData.QuotaToPreConsume)
 			assert.GreaterOrEqual(t, reservation.held, info.PriceData.QuotaToPreConsume)
 			assert.Nil(t, info.BillingImageCount)

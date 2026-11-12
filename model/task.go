@@ -178,6 +178,20 @@ type TaskBillingContext struct {
 	TieredSnapshot  *billingexpr.BillingSnapshot   `json:"tiered_snapshot,omitempty"`
 }
 
+// UsesLegacyXAINativeVideoResponse preserves the retrieval format of tasks
+// submitted before xAI 1.2 introduced separate native and OpenAI responses.
+func (t *Task) UsesLegacyXAINativeVideoResponse() bool {
+	if t.Platform != "xai" && t.Platform != "48" {
+		return false
+	}
+	execution := t.PrivateData.Execution
+	if execution == nil || execution.RequestPath == "" {
+		return true
+	}
+	plugin := execution.TaskPlugin
+	return plugin != nil && plugin.Key == "xai" && (plugin.Version == "1.0.0" || plugin.Version == "1.1.0")
+}
+
 // ResultRetrievable reports whether retrieval surfaces (native query routes,
 // protocol retrieve endpoints, artifact projection) may serve this task.
 func (t *Task) ResultRetrievable() bool {
