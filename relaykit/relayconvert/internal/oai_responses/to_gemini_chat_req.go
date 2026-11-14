@@ -194,12 +194,12 @@ func applyResponsesTextToGemini(c context.Context, raw []byte, geminiRequest *dt
 	}
 
 	geminiRequest.GenerationConfig.ResponseMimeType = "application/json"
-	if len(responseFormat.JsonSchema) == 0 {
+	schema := kitutil.ObjectMember(responseFormat.JsonSchema, "schema")
+	if schema == nil {
 		return nil
 	}
 
-	sharedgemini.ApplyResponseSchema(c, &geminiRequest.GenerationConfig, responseFormat.JsonSchema, "text.format.schema", jsonSchema)
-	return nil
+	return sharedgemini.ApplyResponseSchema(c, &geminiRequest.GenerationConfig, schema, "text.format.schema", jsonSchema)
 }
 
 func responsesInputContentToGeminiParts(c context.Context, content any) ([]dto.GeminiPart, error) {

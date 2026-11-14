@@ -734,22 +734,13 @@ func attachGeminiRequest(request any, set Set, options *convmeta.Options) (any, 
 			if definition.Function == nil {
 				continue
 			}
-			parametersField, parameters := "parameters", any(nil)
-			if definition.Function.Parameters != nil {
-				var schema any
-				if err := kitutil.Unmarshal(definition.Function.Parameters, &schema); err != nil {
-					return nil, diagnostics, fmt.Errorf("tools[%d].parameters: %w", index, err)
-				}
-				var misfits []string
-				parametersField, parameters, misfits = sharedgemini.FunctionParameters(schema, jsonSchema)
-				if parametersField == "parametersJsonSchema" {
-					// The schema goes unchanged; send the client's bytes and property order.
-					parameters = definition.Function.Parameters
-				}
-				if len(misfits) > 0 {
-					diagnostics = append(diagnostics, presentationLoss(fmt.Sprintf("tools[%d].parameters", index), "gemini_schema_keyword_dropped",
-						fmt.Sprintf("Gemini function parameters cannot carry %s", strings.Join(misfits, ", "))))
-				}
+			parametersField, parameters, misfits, err := sharedgemini.FunctionParameters(definition.Function.Parameters, jsonSchema)
+			if err != nil {
+				return nil, diagnostics, fmt.Errorf("tools[%d].parameters: %w", index, err)
+			}
+			if len(misfits) > 0 {
+				diagnostics = append(diagnostics, presentationLoss(fmt.Sprintf("tools[%d].parameters", index), "gemini_schema_keyword_dropped",
+					fmt.Sprintf("Gemini function parameters cannot carry %s", strings.Join(misfits, ", "))))
 			}
 			function := map[string]any{
 				"name":          definition.Function.Name,
@@ -810,10 +801,18 @@ func attachGeminiRequest(request any, set Set, options *convmeta.Options) (any, 
 			}
 			if tool, handled := customTools[index]; handled {
 				if tool != nil {
+					parameters, err := kitutil.Marshal(tool.inputSchema())
+					if err != nil {
+						return nil, diagnostics, err
+					}
+					schema, err := sharedgemini.CleanFunctionParametersJSON(parameters)
+					if err != nil {
+						return nil, diagnostics, err
+					}
 					functions = append(functions, map[string]any{
 						"name":        tool.name,
 						"description": tool.description,
-						"parameters":  sharedgemini.CleanFunctionParameters(tool.inputSchema()),
+						"parameters":  schema,
 					})
 				}
 				continue

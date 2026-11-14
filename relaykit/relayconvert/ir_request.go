@@ -233,8 +233,17 @@ func irRequestConverter(from, target types.RelayFormat) RequestConverterFunc {
 				}
 			}
 			if normalized.Format != nil && len(normalized.Format.Schema) > 0 {
-				req.GenerationConfig.ResponseMimeType = "application/json"
-				sharedgemini.ApplyResponseSchema(ctx, &req.GenerationConfig, normalized.Format.Schema, "response_format.json_schema.schema", opts.Gemini.SupportsJSONSchemaModel(normalized.Model))
+				model := convmeta.UpstreamModelName(info)
+				if model == "" {
+					model = normalized.Model
+				}
+				path := "response_format.json_schema.schema"
+				if from == types.RelayFormatOpenAIResponses {
+					path = "text.format.schema"
+				}
+				if err := sharedgemini.ApplyResponseSchema(ctx, &req.GenerationConfig, normalized.Format.Schema, path, opts.Gemini.SupportsJSONSchemaModel(model)); err != nil {
+					return nil, err
+				}
 			}
 			for i := range req.Contents {
 				for j := range req.Contents[i].Parts {

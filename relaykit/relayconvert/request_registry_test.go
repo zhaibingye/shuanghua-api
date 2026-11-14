@@ -1467,6 +1467,133 @@ func TestConvertRequestResponsesToGeminiUsesDirectConverter(t *testing.T) {
 	assert.Empty(t, geminiReq.Contents[1].Parts[0].ThoughtSignature)
 }
 
+func TestConvertRequestToGeminiNullableToolSchema(t *testing.T) {
+	const parameters = `{"type":"object","properties":{
+		"threadId":{"type":"string","minLength":1},
+		"projectId":{"anyOf":[{"type":"string","minLength":1},{"type":"null"}],"description":"Destination project"},
+		"nested":{"type":"array","items":{"type":["integer","null"],"minimum":0}},
+		"choice":{"oneOf":[{"type":"null"},{"type":"string","enum":["a","b"]}]},
+		"nullOnly":{"type":"null"},
+		"example":{"type":"object","default":{"type":"null","anyOf":[null]},"properties":{"type":{"type":"string","maxLength":9007199254740993}}}
+	},"required":["threadId","projectId"]}`
+	const want = `{"type":"OBJECT","properties":{
+		"threadId":{"type":"STRING","minLength":"1"},
+		"projectId":{"type":"STRING","nullable":true,"minLength":"1","description":"Destination project"},
+		"nested":{"type":"ARRAY","items":{"type":"INTEGER","nullable":true,"minimum":0}},
+		"choice":{"type":"STRING","nullable":true,"enum":["a","b"]},
+		"nullOnly":{"type":"NULL"},
+		"example":{"type":"OBJECT","default":{"type":"null","anyOf":[null]},"properties":{"type":{"type":"STRING","maxLength":"9007199254740993"}}}
+	},"required":["threadId","projectId"],"propertyOrdering":["threadId","projectId","nested","choice","nullOnly","example"]}`
+	for _, tc := range []struct {
+		name    string
+		request any
+		body    string
+	}{
+		{
+			name: "Responses", request: &dto.OpenAIResponsesRequest{},
+			body: `{"model":"gemini-4-carbon","input":[{"type":"function_call","call_id":"call_1","name":"move","arguments":"{\"threadId\":\"t\",\"projectId\":null}"}],"tools":[{"type":"function","name":"move","parameters":` + parameters + `}]}`,
+		},
+		{
+			name: "Chat", request: &dto.GeneralOpenAIRequest{},
+			body: `{"model":"gemini-4-carbon","messages":[{"role":"user","content":"OK"}],"tools":[{"type":"function","function":{"name":"move","parameters":` +
+				parameters + `}}],"response_format":{"type":"json_schema","json_schema":{"name":"answer","schema":` + parameters + `}}}`,
+		},
+		{
+			name: "Claude", request: &dto.ClaudeRequest{},
+			body: `{"model":"gemini-4-carbon","max_tokens":64,"messages":[{"role":"user","content":"OK"}],"tools":[{"name":"move","input_schema":` + parameters + `}]}`,
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			require.NoError(t, kitutil.UnmarshalJsonStr(tc.body, tc.request))
+			info := &convmeta.Values{ChannelMetaAttached: true, UpstreamModelName: "gemini-4-carbon",
+				Options: &convmeta.Options{Gemini: convmeta.GeminiOptions{SupportsJSONSchema: func(string) bool { return true }}},
+			}
+			result, err := ConvertRequest(t.Context(), info, types.RelayFormatGemini, tc.request)
+			require.NoError(t, err)
+			assert.Empty(t, result.Diagnostics)
+			req := result.Value.(*dto.GeminiChatRequest)
+			assert.JSONEq(t, `[{"functionDeclarations":[{"name":"move","parameters":`+want+`}]}]`, string(req.Tools))
+			if tc.name == "Responses" {
+				require.NotEmpty(t, req.Contents)
+				require.NotEmpty(t, req.Contents[0].Parts)
+				require.NotNil(t, req.Contents[0].Parts[0].FunctionCall)
+				assert.Equal(t, map[string]any{"threadId": "t", "projectId": nil}, req.Contents[0].Parts[0].FunctionCall.Arguments)
+			}
+			if tc.name == "Chat" {
+				config, err := kitutil.Marshal(req.GenerationConfig)
+				require.NoError(t, err)
+				assert.JSONEq(t, want, string(kitutil.ObjectMember(config, "responseSchema")))
+			}
+		})
+	}
+}
+
+func TestConvertRequestToGeminiSchemaFieldSelection(t *testing.T) {
+	const nullable = `{"type":"object","properties":{"value":{"anyOf":[{"type":"string","minLength":1},{"type":"null"}]}},"required":["value"]}`
+	const typedNullable = `{"type":"OBJECT","properties":{"value":{"type":"STRING","nullable":true,"minLength":"1"}},"required":["value"]}`
+	const closed = `{"type":"object","additionalProperties":false,"properties":{"value":{"anyOf":[{"type":"string","minLength":1},{"type":"null"}]}},"required":["value"]}`
+	const references = `{"type":"object","properties":{"z":{"$ref":"#/$defs/value"},"a":{"type":"string"}},"$defs":{"value":{"type":"array","items":{"$ref":"#/$defs/value"}}}}`
+	for _, tc := range []struct {
+		name           string
+		schema         string
+		legacy         bool
+		raw            bool
+		wantDiagnostic string
+	}{
+		{name: "typed nullable on v1beta", schema: nullable},
+		{name: "typed nullable on v1", schema: nullable, legacy: true},
+		{name: "preserve references on v1beta", schema: references, raw: true},
+		{name: "preserve closed nullable objects on v1beta", schema: closed, raw: true},
+		{name: "report closed object constraint on v1", schema: closed, legacy: true, wantDiagnostic: "additionalProperties"},
+		{name: "preserve additional property schema on v1beta", schema: `{"type":"object","properties":{"nested":{"type":"object","additionalProperties":{"type":["string","null"]}}}}`, raw: true},
+		{name: "preserve multiple concrete types", schema: `{"type":"object","properties":{"value":{"type":["string","integer"]}}}`, raw: true},
+		{name: "preserve multi-branch nullable union", schema: `{"type":"object","properties":{"value":{"anyOf":[{"type":"string"},{"type":"integer"},{"type":"null"}]}}}`, raw: true},
+		{name: "preserve constraints on the whole union", schema: `{"type":"object","properties":{"value":{"anyOf":[{"type":"string"},{"type":"null"}],"enum":["a"]}}}`, raw: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			req := &dto.OpenAIResponsesRequest{}
+			body := `{"model":"alias","input":"OK","tools":[{"type":"function","name":"lookup","parameters":` + tc.schema +
+				`}],"text":{"format":{"type":"json_schema","name":"answer","schema":` + tc.schema + `}}}`
+			require.NoError(t, kitutil.UnmarshalJsonStr(body, req))
+			model := "gemini-v1beta"
+			if tc.legacy {
+				model = "gemini-v1"
+			}
+			info := &convmeta.Values{ChannelMetaAttached: true, UpstreamModelName: model,
+				Options: &convmeta.Options{Gemini: convmeta.GeminiOptions{
+					SupportsJSONSchema: func(model string) bool { return model == "gemini-v1beta" },
+				}},
+			}
+			result, err := ConvertRequest(t.Context(), info, types.RelayFormatGemini, req)
+			require.NoError(t, err)
+			if tc.wantDiagnostic == "" {
+				assert.Empty(t, result.Diagnostics)
+			} else {
+				require.Len(t, result.Diagnostics, 2)
+				assert.Equal(t, "text.format.schema", result.Diagnostics[0].Path)
+				assert.Equal(t, "tools[0].parameters", result.Diagnostics[1].Path)
+				for _, diagnostic := range result.Diagnostics {
+					assert.Equal(t, "gemini_schema_keyword_dropped", diagnostic.Code)
+					assert.Contains(t, diagnostic.Message, tc.wantDiagnostic)
+				}
+			}
+			gemini := result.Value.(*dto.GeminiChatRequest)
+			config, err := kitutil.Marshal(gemini.GenerationConfig)
+			require.NoError(t, err)
+			assert.Equal(t, "application/json", gemini.GenerationConfig.ResponseMimeType)
+			if tc.raw {
+				assert.Equal(t, `[{"functionDeclarations":[{"name":"lookup","parametersJsonSchema":`+tc.schema+`}]}]`, string(gemini.Tools))
+				assert.Contains(t, string(config), `"responseJsonSchema":`+tc.schema)
+				assert.NotContains(t, string(config), `"responseSchema"`)
+			} else {
+				assert.JSONEq(t, `[{"functionDeclarations":[{"name":"lookup","parameters":`+typedNullable+`}]}]`, string(gemini.Tools))
+				assert.JSONEq(t, typedNullable, string(kitutil.ObjectMember(config, "responseSchema")))
+				assert.NotContains(t, string(config), `"responseJsonSchema"`)
+			}
+		})
+	}
+}
+
 func TestConvertRequestResponsesToGeminiSkipsThoughtSignatureWhenDisabled(t *testing.T) {
 	info := &convmeta.Values{
 		Options:             &convmeta.Options{Gemini: convmeta.GeminiOptions{FunctionCallThoughtSignatureEnabled: false}},

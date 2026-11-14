@@ -35,6 +35,8 @@
 
 ### Gemini 原生请求与工具
 
+- 跨协议转 Gemini 时，工具参数和结构化输出共用 Schema 转换。明确的单一类型与 null 的并集可映射到 `type` 和 `nullable`，`required` 仍按源定义保留。Developer API 的 typed Schema 没有 `additionalProperties`，有该约束或其他无法等价投影的约束时，按上游能力选 `parametersJsonSchema` / `responseJsonSchema` 保留原 JSON，否则给出转换诊断。回归入口为 `TestConvertRequestToGeminiNullableToolSchema` 和 `TestConvertRequestToGeminiSchemaFieldSelection`。
+- 2026-11-14 在同一 `gemini-4-carbon` 渠道复测，旧转换形态 `anyOf: [{type: STRING}, {nullable: true}]` 走原生路由也触发缺少 type 的 400。本地修复后的最小、完整单工具及恢复目标工具后的 35 工具请求走原生路由均得到 200。复测线上转换是否生效时，要另发原始 Responses 请求；原生请求成功只验证出站载荷。
 - 关闭请求体透传时，Gemini 原生请求会经 DTO 解码和适配器重新编码。`tools` 保留原 JSON 键名，`toolConfig` 把 `function_calling_config` 和已知子字段别名转成 REST 字段并保留显式 `false`。排查时应检查实际出站 JSON。
 - Gemini 类型的原生生成路由在关闭透传时移除客户端系统提示里的 `<available_skills>` 标签，保留内部文本和函数声明。同一 Argon 渠道重放时，技能系统提示段触发了 429，单独加入 `read_file` 声明为 200。移除标签后，原失败请求、工具调用和带思考签名的结果回传均通过。上游判定原因尚未确认。回归入口为 `TestNativeGeminiSearchAndFunctionTools`。
 - 保留普通函数或可转换的自定义工具时过滤内置网页搜索。Chat/Claude/Responses→Gemini 走 `attachGeminiRequest`，Gemini 类型的原生路由在关闭透传时直接过滤工具 JSON 中的搜索键。两条路径均记录 `hosted_web_search_omitted`，默认允许，`safe`/`strict` 拒绝。回归入口为 `TestConvertRequestToGeminiToolCombination` 和 `TestNativeGeminiSearchAndFunctionTools`。

@@ -103,9 +103,11 @@ func OpenAIChatRequestToGeminiGenerateContent(c context.Context, textRequest dto
 	if textRequest.ResponseFormat != nil && (textRequest.ResponseFormat.Type == "json_schema" || textRequest.ResponseFormat.Type == "json_object") {
 		geminiRequest.GenerationConfig.ResponseMimeType = "application/json"
 
-		if len(textRequest.ResponseFormat.JsonSchema) > 0 {
-			sharedgemini.ApplyResponseSchema(c, &geminiRequest.GenerationConfig, textRequest.ResponseFormat.JsonSchema,
-				"response_format.json_schema.schema", opts.Gemini.SupportsJSONSchemaModel(upstreamModelName))
+		if schema := kitutil.ObjectMember(textRequest.ResponseFormat.JsonSchema, "schema"); schema != nil {
+			if err := sharedgemini.ApplyResponseSchema(c, &geminiRequest.GenerationConfig, schema,
+				"response_format.json_schema.schema", opts.Gemini.SupportsJSONSchemaModel(upstreamModelName)); err != nil {
+				return nil, err
+			}
 		}
 	}
 
