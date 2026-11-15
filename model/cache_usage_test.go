@@ -111,6 +111,9 @@ func TestCacheHitRateDatabaseMatrix(t *testing.T) {
 				{UserId: 5, ModelName: "unknown", Group: "default", CreatedAt: 1500, Type: LogTypeConsume, PromptTokens: 100, Other: `{}`},
 				{UserId: 6, ModelName: "zero", Group: "default", CreatedAt: 1500, Type: LogTypeConsume, PromptTokens: 100, Other: `{}`},
 				{UserId: 6, ModelName: "zero", Group: "default", CreatedAt: 1600, Type: LogTypeConsume, PromptTokens: 100, Other: `{"cache_tokens":0}`},
+				{ModelName: "model-a", Group: "zero", CreatedAt: 1500, Type: LogTypeConsume, PromptTokens: 100, Other: `{"cache_tokens":0}`},
+				{ModelName: "model-a", Group: "unknown", CreatedAt: 1500, Type: LogTypeConsume, PromptTokens: 100, Other: `{}`},
+				{ModelName: "model-a", Group: "hidden", CreatedAt: 1500, Type: LogTypeConsume, PromptTokens: 10000, Other: `{"cache_tokens":0}`},
 			}
 			require.NoError(t, db.Create(&logs).Error)
 			for _, tc := range []struct {
@@ -134,19 +137,38 @@ func TestCacheHitRateDatabaseMatrix(t *testing.T) {
 				{"mixed telemetry retains measured zero", 6, "", "", nil, new(0.0)},
 			} {
 				t.Run(tc.name, func(t *testing.T) {
-					rate, err := GetCacheHitRate(context.Background(), CacheUsageFilter{UserID: tc.userID, ModelName: tc.model, Group: tc.group, AllowedGroups: tc.groups, StartTimestamp: 900, EndTimestamp: 2000})
+					rates, err := GetCacheHitRates(context.Background(), CacheUsageFilter{UserID: tc.userID, ModelName: tc.model, Group: tc.group, AllowedGroups: tc.groups, StartTimestamp: 900, EndTimestamp: 2000})
 					require.NoError(t, err)
 					if tc.want == nil {
-						assert.Nil(t, rate)
+						assert.Nil(t, rates.Overall)
 						return
 					}
-					require.NotNil(t, rate)
-					assert.InDelta(t, *tc.want, *rate, 0.000001)
+					require.NotNil(t, rates.Overall)
+					assert.InDelta(t, *tc.want, *rates.Overall, 0.000001)
 				})
 			}
-			rate, err := GetCacheHitRate(context.Background(), CacheUsageFilter{StartTimestamp: 900, EndTimestamp: 2000})
+			t.Run("model cache hit rates use each visible group's measured input", func(t *testing.T) {
+				rates, err := GetCacheHitRates(context.Background(), CacheUsageFilter{
+					ModelName:      "model-a",
+					AllowedGroups:  []string{"default", "vip", "zero", "unknown"},
+					ByGroup:        true,
+					StartTimestamp: 900,
+					EndTimestamp:   2000,
+				})
+				require.NoError(t, err)
+				require.NotNil(t, rates.Overall)
+				assert.InDelta(t, 1900.0/2200*100, *rates.Overall, 0.000001)
+				for group, expected := range map[string]float64{"default": 950.0 / 1100 * 100, "vip": 95, "zero": 0} {
+					rate := rates.ByGroup[group]
+					require.NotNil(t, rate, group)
+					assert.InDelta(t, expected, *rate, 0.000001, group)
+				}
+				assert.Nil(t, rates.ByGroup["unknown"])
+				assert.NotContains(t, rates.ByGroup, "hidden")
+			})
+			rates, err := GetCacheHitRates(context.Background(), CacheUsageFilter{StartTimestamp: 900, EndTimestamp: 2000})
 			assert.Error(t, err)
-			assert.Nil(t, rate)
+			assert.Nil(t, rates.Overall)
 		})
 	}
 }

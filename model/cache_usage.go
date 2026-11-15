@@ -2,6 +2,7 @@ package model
 
 import (
 	"context"
+	"database/sql"
 	"errors"
 	"math"
 	"strings"
@@ -16,8 +17,26 @@ type CacheUsageFilter struct {
 	ModelName      string
 	Group          string
 	AllowedGroups  []string
+	ByGroup        bool
 	StartTimestamp int64
 	EndTimestamp   int64
+}
+
+type CacheHitRates struct {
+	Overall *float64
+	ByGroup map[string]*float64
+}
+
+type cacheTokenTotals struct {
+	input float64
+	read  float64
+}
+
+func (totals cacheTokenTotals) hitRate() *float64 {
+	if totals.input <= 0 || math.IsInf(totals.input, 0) || math.IsInf(totals.read, 0) {
+		return nil
+	}
+	return new(totals.read / totals.input * 100)
 }
 
 // cacheTokensFromLog normalizes existing usage logs without changing billing.
@@ -64,25 +83,28 @@ func cacheTokensFromLog(promptTokens int64, rawOther string) (input, read float6
 	return input, read, true
 }
 
-// GetCacheHitRate weights cache reads by total input tokens, never by request
+// GetCacheHitRates weights cache reads by total input tokens, never by request
 // count or output tokens. Only logs with reported, valid token usage contribute
 // to either total; unrelated, estimated or malformed logs cannot erase known
-// samples or dilute them into zero hits. Streaming rows keeps memory independent of
-// traffic volume and avoids database-specific JSON operators. Existing logs
-// are included immediately; no migration or historical backfill is needed.
-func GetCacheHitRate(ctx context.Context, filter CacheUsageFilter) (rate *float64, err error) {
+// samples or dilute them into zero hits. The overall rate and optional group
+// rates share one scan of existing logs.
+func GetCacheHitRates(ctx context.Context, filter CacheUsageFilter) (rates CacheHitRates, err error) {
 	if filter.UserID <= 0 && filter.ModelName == "" {
-		return nil, common.NewMessage("Invalid parameters")
+		return CacheHitRates{}, common.NewMessage("Invalid parameters")
 	}
 	if filter.StartTimestamp <= 0 || filter.EndTimestamp < filter.StartTimestamp {
-		return nil, common.NewMessage("Invalid parameters")
+		return CacheHitRates{}, common.NewMessage("Invalid parameters")
 	}
 	if filter.AllowedGroups != nil && len(filter.AllowedGroups) == 0 {
-		return nil, nil
+		return CacheHitRates{}, nil
 	}
 	query := LOG_DB.WithContext(ctx).Model(&Log{}).
-		Select("prompt_tokens, other").
 		Where("type = ? AND created_at >= ? AND created_at <= ?", LogTypeConsume, filter.StartTimestamp, filter.EndTimestamp)
+	if filter.ByGroup {
+		query = query.Select("prompt_tokens", "other", "group")
+	} else {
+		query = query.Select("prompt_tokens", "other")
+	}
 	if filter.UserID > 0 {
 		query = query.Where("user_id = ?", filter.UserID)
 	}
@@ -97,29 +119,47 @@ func GetCacheHitRate(ctx context.Context, filter CacheUsageFilter) (rate *float6
 	}
 	rows, err := query.Rows()
 	if err != nil {
-		return nil, err
+		return CacheHitRates{}, err
 	}
 	defer func() { err = errors.Join(err, rows.Close()) }()
-	var totalInput, totalRead float64
+	var total cacheTokenTotals
+	var totalsByGroup map[string]cacheTokenTotals
+	if filter.ByGroup {
+		totalsByGroup = make(map[string]cacheTokenTotals)
+	}
+	var prompt int64
+	var other string
+	var group sql.NullString
+	dest := []any{&prompt, &other}
+	if filter.ByGroup {
+		dest = append(dest, &group)
+	}
 	for rows.Next() {
-		var prompt int64
-		var other string
-		if err := rows.Scan(&prompt, &other); err != nil {
-			return nil, err
+		if err := rows.Scan(dest...); err != nil {
+			return CacheHitRates{}, err
 		}
 		input, read, known := cacheTokensFromLog(prompt, other)
-		if !known {
+		if !known || input == 0 {
 			continue
 		}
-		totalInput += input
-		totalRead += read
+		total.input += input
+		total.read += read
+		if filter.ByGroup && group.Valid {
+			groupTotals := totalsByGroup[group.String]
+			groupTotals.input += input
+			groupTotals.read += read
+			totalsByGroup[group.String] = groupTotals
+		}
 	}
 	if err := rows.Err(); err != nil {
-		return nil, err
+		return CacheHitRates{}, err
 	}
-	if totalInput <= 0 || math.IsInf(totalInput, 0) || math.IsInf(totalRead, 0) {
-		return nil, nil
+	rates.Overall = total.hitRate()
+	if filter.ByGroup {
+		rates.ByGroup = make(map[string]*float64, len(totalsByGroup))
+		for group, totals := range totalsByGroup {
+			rates.ByGroup[group] = totals.hitRate()
+		}
 	}
-	value := totalRead / totalInput * 100
-	return &value, nil
+	return rates, nil
 }

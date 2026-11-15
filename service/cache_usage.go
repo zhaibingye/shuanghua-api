@@ -11,13 +11,13 @@ import (
 	"golang.org/x/sync/singleflight"
 )
 
-var cacheHitRates = hot.NewHotCache[string, *float64](hot.LRU, 1024).
+var cacheHitRates = hot.NewHotCache[string, model.CacheHitRates](hot.LRU, 1024).
 	WithTTL(time.Minute).Build()
 var cacheHitRateQueries singleflight.Group
 
-// GetCacheHitRate shares a bounded, one-minute cache between both model tabs.
+// GetCacheHitRates shares a bounded, one-minute cache between both model tabs.
 // Every visibility dimension is part of the key, including the current user.
-func GetCacheHitRate(ctx context.Context, filter model.CacheUsageFilter) (*float64, error) {
+func GetCacheHitRates(ctx context.Context, filter model.CacheUsageFilter) (model.CacheHitRates, error) {
 	filter.AllowedGroups = slices.Clone(filter.AllowedGroups)
 	slices.Sort(filter.AllowedGroups)
 	// Match the UI's one-minute freshness while making requests in the same
@@ -26,7 +26,7 @@ func GetCacheHitRate(ctx context.Context, filter model.CacheUsageFilter) (*float
 	filter.EndTimestamp -= filter.EndTimestamp % 60
 	key, err := common.Marshal(filter)
 	if err != nil {
-		return nil, err
+		return model.CacheHitRates{}, err
 	}
 	cacheKey := string(key)
 	if value, found, err := cacheHitRates.Get(cacheKey); err == nil && found {
@@ -38,7 +38,7 @@ func GetCacheHitRate(ctx context.Context, filter model.CacheUsageFilter) (*float
 		}
 		queryCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 30*time.Second)
 		defer cancel()
-		value, err := model.GetCacheHitRate(queryCtx, filter)
+		value, err := model.GetCacheHitRates(queryCtx, filter)
 		if err == nil {
 			cacheHitRates.Set(cacheKey, value)
 		}
@@ -46,11 +46,11 @@ func GetCacheHitRate(ctx context.Context, filter model.CacheUsageFilter) (*float
 	})
 	select {
 	case <-ctx.Done():
-		return nil, ctx.Err()
+		return model.CacheHitRates{}, ctx.Err()
 	case value := <-result:
 		if value.Err != nil {
-			return nil, value.Err
+			return model.CacheHitRates{}, value.Err
 		}
-		return value.Val.(*float64), nil
+		return value.Val.(model.CacheHitRates), nil
 	}
 }

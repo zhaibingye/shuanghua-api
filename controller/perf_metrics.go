@@ -75,17 +75,21 @@ func GetPerfMetrics(c *gin.Context) {
 		return
 	}
 
-	result.CacheHitRate, err = service.GetCacheHitRate(c.Request.Context(), model.CacheUsageFilter{
+	rates, err := service.GetCacheHitRates(c.Request.Context(), model.CacheUsageFilter{
 		ModelName:      modelName,
 		Group:          c.Query("group"),
 		AllowedGroups:  activeGroups,
+		ByGroup:        len(result.Groups) > 0,
 		StartTimestamp: result.WindowStart,
 		EndTimestamp:   result.WindowEnd,
 	})
-	if err != nil {
-		// A missing log database must not hide otherwise available latency,
-		// throughput, and availability metrics.
-		result.CacheHitRate = nil
+	// A log query failure leaves the other performance metrics available.
+	if err == nil {
+		result.CacheHitRate = rates.Overall
+		for i := range result.Groups {
+			group := &result.Groups[i]
+			group.CacheHitRate = rates.ByGroup[group.Group]
+		}
 	}
 
 	c.JSON(http.StatusOK, gin.H{

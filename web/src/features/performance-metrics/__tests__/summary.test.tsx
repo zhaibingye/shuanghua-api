@@ -17,13 +17,15 @@ along with this program. If not, see <https://www.gnu.org/licenses/>.
 For commercial licensing, please contact support@quantumnous.com
 */
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query'
-import { render, screen, waitFor } from '@testing-library/react'
+import { render, screen, waitFor, within } from '@testing-library/react'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 
 import { PerformanceOverview } from '@/features/dashboard/components/models/performance-overview'
 import { PerformanceHealthPanel } from '@/features/dashboard/components/overview/performance-health-panel'
 import { ModelDetailsPerformance } from '@/features/pricing/components/model-details-performance'
 import { UptimeSparkline } from '@/features/pricing/components/model-details-uptime-sparkline'
+
+import type { PerformanceGroup } from '../types'
 
 const chart = vi.hoisted(() =>
   vi.fn(
@@ -52,6 +54,7 @@ const windowEnd = windowStart + 23 * 3600 + 1800
 const groups = [
   {
     group: 'a',
+    cache_hit_rate: 83.125,
     success_rate: 100,
     avg_latency_ms: 1000,
     avg_ttft_ms: 100,
@@ -68,6 +71,7 @@ const groups = [
   },
   {
     group: 'b',
+    cache_hit_rate: 0,
     success_rate: 0,
     avg_latency_ms: 2000,
     avg_ttft_ms: 0,
@@ -84,7 +88,7 @@ const groups = [
   },
 ]
 
-function renderModelDetails() {
+function renderModelDetails(performanceGroups: PerformanceGroup[] = groups) {
   client.setQueryData(['perf-metrics', 'test-model'], {
     success: true,
     data: {
@@ -101,7 +105,7 @@ function renderModelDetails() {
       ],
       window_start: windowStart,
       window_end: windowEnd,
-      groups,
+      groups: performanceGroups,
     },
   })
   return render(
@@ -166,6 +170,33 @@ describe('server performance summaries', () => {
     renderModelDetails()
     expect(screen.getByText('100.00%')).toBeVisible()
     expect(screen.getByText('0.00%')).toBeVisible()
+  })
+
+  it('shows each group cache hit rate after its success rate', () => {
+    renderModelDetails()
+
+    const table = within(screen.getByRole('table'))
+    const headers = table.getAllByRole('columnheader')
+    const successColumn = headers.indexOf(
+      table.getByRole('columnheader', { name: 'Success rate' })
+    )
+    expect(headers[successColumn + 1]).toHaveTextContent('Cache hit rate')
+
+    const groupA = within(table.getByRole('row', { name: /^a / }))
+    const groupB = within(table.getByRole('row', { name: /^b / }))
+    expect(groupA.getAllByRole('cell')[successColumn + 1]).toHaveTextContent(
+      '83.13%'
+    )
+    expect(groupB.getAllByRole('cell')[successColumn + 1]).toHaveTextContent(
+      '0%'
+    )
+  })
+
+  it('shows an unavailable group cache hit rate when token usage is missing', () => {
+    renderModelDetails([{ ...groups[0], cache_hit_rate: null }])
+
+    const row = screen.getByRole('row', { name: /^a / })
+    expect(within(row).getAllByRole('cell').at(-1)).toHaveTextContent('—')
   })
 
   it('displays the supplied group summary instead of averaging hourly percentages', () => {

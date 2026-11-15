@@ -86,12 +86,12 @@ func GetUserQuotaDates(c *gin.Context) {
 		// The quota chart has a future-hour buffer; cache usage instead covers
 		// the actual rolling 24 hours up to the current minute.
 		cacheEnd := time.Now().Unix()
-		rate, _ := service.GetCacheHitRate(c.Request.Context(), model.CacheUsageFilter{
+		rates, _ := service.GetCacheHitRates(c.Request.Context(), model.CacheUsageFilter{
 			UserID:         userId,
 			StartTimestamp: cacheEnd - 24*60*60,
 			EndTimestamp:   cacheEnd,
 		})
-		response["cache_hit_rate"] = rate
+		response["cache_hit_rate"] = rates.Overall
 	}
 	c.JSON(http.StatusOK, response)
 	return

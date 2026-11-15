@@ -77,14 +77,6 @@ function StatCard(props: {
   )
 }
 
-type PerformanceRow = {
-  group: string
-  avg_ttft_ms: number
-  avg_latency_ms: number
-  success_rate: number
-  avg_tps: number
-}
-
 function toUptimePct(value: number): number {
   if (!Number.isFinite(value)) return 0
   const clamped = Math.min(100, Math.max(0, value))
@@ -138,17 +130,6 @@ export function ModelDetailsPerformance(props: { model: PricingModel }) {
   const series = useMemo(
     () => metricsQuery.data?.data.series ?? [],
     [metricsQuery.data]
-  )
-  const performances = useMemo<PerformanceRow[]>(
-    () =>
-      groups.map((group) => ({
-        group: group.group,
-        avg_ttft_ms: group.avg_ttft_ms,
-        avg_latency_ms: group.avg_latency_ms,
-        success_rate: group.success_rate,
-        avg_tps: group.avg_tps,
-      })),
-    [groups]
   )
   const latencySeries = useMemo(() => toLatencySeries(series), [series])
   const uptimeSeries = useMemo(() => toUptimeSeries(series), [series])
@@ -209,7 +190,7 @@ export function ModelDetailsPerformance(props: { model: PricingModel }) {
         />
       </div>
 
-      {metricsQuery.isLoading || performances.length === 0 ? (
+      {metricsQuery.isLoading || groups.length === 0 ? (
         <div className='text-muted-foreground rounded-lg border p-6 text-center text-sm'>
           {t('Performance data is not yet available for this model.')}
         </div>
@@ -219,13 +200,12 @@ export function ModelDetailsPerformance(props: { model: PricingModel }) {
             <SectionHeader
               icon={HeartPulse}
               title={t('Per-group performance')}
-              description={t('Average latency, TTFT, TPS, and success rate')}
             />
             <StaticDataTable
               className='rounded-lg'
               tableClassName='text-sm'
               headerRowClassName={tableStyles.compactHeaderRow}
-              data={performances}
+              data={groups}
               getRowKey={(perf) => perf.group}
               columns={[
                 {
@@ -268,6 +248,13 @@ export function ModelDetailsPerformance(props: { model: PricingModel }) {
                       overallSuccessRate={perf.success_rate}
                     />
                   ),
+                },
+                {
+                  id: 'cache-hit-rate',
+                  header: t('Cache hit rate'),
+                  className: tableStyles.compactHeaderCellRight,
+                  cellClassName: tableStyles.compactNumericCell,
+                  cell: (perf) => formatCacheHitRate(perf.cache_hit_rate),
                 },
               ]}
             />

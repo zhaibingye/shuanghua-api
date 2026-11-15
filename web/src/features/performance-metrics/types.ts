@@ -32,6 +32,7 @@ export type PerformanceSeriesPoint = {
 
 export type PerformanceGroup = {
   group: string
+  cache_hit_rate?: number | null
   avg_ttft_ms: number
   avg_latency_ms: number
   success_rate: number

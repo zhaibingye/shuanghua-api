@@ -46,6 +46,10 @@
 - `/v1/credits` 返回账户余额，采用站点显示单位。`/api/usage/token/` 返回 API Key 的原始额度，启用 `allow_user_quota_query` 时附带 `data.user_quota`。OpenMinis `1a71df0` 的 New API 解析器只读取 Key 额度字段。
 - OpenMinis 优先探测 `GET /v1/usage`，按 Sub2API 钱包格式读取顶层 `isValid` 和 `balance`，固定以 USD 展示。已识别为 New API 的连接需重新探测。网关要求 `allow_user_quota_query`，按通过鉴权的 Key 确定账户，用原始剩余额度除以 `QuotaPerUnit`。回归入口为 `router/relay_router_test.go` 的 `TestSub2APIWalletBalanceReturnsAccountQuotaInUSD` 和 `TestBalanceEndpointsEnforceTokenRestrictions`。
 
+## 模型性能统计
+
+- 模型广场按请求分组展示性能。缓存命中率由同一次消费日志查询汇总模型和分组的缓存读取 Token 与总输入 Token，仅纳入有效的上游用量。实测零命中为 `0%`，缺少有效输入用量为 `—`。回归入口为 `model/cache_usage_test.go` 的 `TestCacheHitRateDatabaseMatrix`。
+
 ## 视频插件兼容路由
 
 - `SetVideoRouter` 的 Ark 和 xAI 提交别名沿用共享视频协议选渠道，Ark 路径可选中已绑定的 MediaKit 渠道。插件原生协议仍可通过 `/doubao`、`/doubao-mediakit` 和 `/xai` 前缀访问。`GET /v1/videos/:task_id` 依据已保存的提交路径转交原生查询；缺少执行快照或使用 xAI 插件 1.0/1.1 的历史任务走旧渲染。回归入口为 `TestBuiltInPluginRoutesAreServedBesideHostRoutes` 和 `TestGetOpenAIVideoRouteHandsNativeXAITaskToPluginQuery`。
