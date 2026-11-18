@@ -117,15 +117,14 @@ type responsesWSSession struct {
 
 	// These fields belong to the serial request worker and describe the actual
 	// established connection. Per-request token/user data is never stored here.
-	lastResponseID    string
-	lockedModel       string
-	lockedChannelID   int
-	lockedGroup       string
-	lockedKey         string
-	lockedKeyIndex    int
-	lockedContext     map[appconstant.ContextKey]any
-	lockedRoute       dto.AdvancedCustomRoute
-	openCodeSessionID string
+	lastResponseID  string
+	lockedModel     string
+	lockedChannelID int
+	lockedGroup     string
+	lockedKey       string
+	lockedKeyIndex  int
+	lockedContext   map[appconstant.ContextKey]any
+	lockedRoute     dto.AdvancedCustomRoute
 }
 
 func ResponsesWebSocketHelper(c *gin.Context, client *websocket.Conn, runner ResponsesWSRequestRunner) *types.NewAPIError {
@@ -306,9 +305,6 @@ func (s *responsesWSSession) runCall(c *gin.Context, state *responsesWSCallState
 			return apiErr
 		}
 		info = relaycommon.GenRelayInfoResponses(c, &create.Request)
-		if s.openCodeSessionID != "" {
-			service.ApplyOpenCodeSession(c, info, http.Header{"X-Opencode-Session": []string{s.openCodeSessionID}})
-		}
 		info.IsStream = true
 		info.SetRequestPluginIngress(ingressSteps, ingressRecord)
 		common.SetContextKey(c, appconstant.ContextKeyIsStream, true)
@@ -340,9 +336,6 @@ func (s *responsesWSSession) runCall(c *gin.Context, state *responsesWSCallState
 			service.AppendUsedChannel(c, channel.Id)
 			if info == nil {
 				info = relaycommon.GenRelayInfoResponses(c, &create.Request)
-				if s.openCodeSessionID != "" {
-					service.ApplyOpenCodeSession(c, info, http.Header{"X-Opencode-Session": []string{s.openCodeSessionID}})
-				}
 				info.IsStream = true
 				info.SetRequestPluginIngress(ingressSteps, ingressRecord)
 				common.SetContextKey(c, appconstant.ContextKeyIsStream, true)
@@ -382,7 +375,6 @@ func (s *responsesWSSession) runCall(c *gin.Context, state *responsesWSCallState
 				}
 				return apiErr
 			}
-			s.openCodeSessionID = service.OpenCodeSessionID(c)
 			if !s.setTarget(target) {
 				return types.NewError(context.Canceled, types.ErrorCodeBadResponse, types.ErrOptionWithSkipRetry())
 			}
@@ -558,7 +550,6 @@ func (s *responsesWSSession) runCall(c *gin.Context, state *responsesWSCallState
 					accepted = true
 					if event.Response != nil && event.Response.ID != "" {
 						responseID = event.Response.ID
-						service.RecordOpenCodeResponse(c, info, event.Response.ID)
 					}
 				}
 				service.CaptureModerationEvent(c, incoming.body)

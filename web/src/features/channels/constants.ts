@@ -32,7 +32,6 @@ export const CHANNEL_TYPE_SUB2API = 59
 
 export const CHANNEL_TYPE_NEW_API = 60
 export const MEDIAKIT_PLUGIN_KEY = 'doubao-mediakit'
-export const OPENCODE_GO_COMPAT_TYPES = new Set([1, 14])
 
 export const CHANNEL_TYPE_TASK_PLUGIN = 61
 

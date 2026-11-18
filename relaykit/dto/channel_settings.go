@@ -114,7 +114,6 @@ const (
 )
 
 type ChannelOtherSettings struct {
-	OpenCodeGoCompat                      bool                  `json:"opencode_go_compat,omitempty"` // Stable per-conversation X-Opencode-Session (OpenAI/Anthropic only).
 	AzureResponsesVersion                 string                `json:"azure_responses_version,omitempty"`
 	VertexKeyType                         VertexKeyType         `json:"vertex_key_type,omitempty"`    // "json" or "api_key"
 	VertexProjectID                       string                `json:"vertex_project_id,omitempty"`  // 仅当 vertex_key_type=api_key 时使用；JSON 模式下从 service account 解析

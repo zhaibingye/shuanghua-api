@@ -271,6 +271,8 @@ func TestFetchModelsAdvancedCustomEditPreviewUsesSavedKeyAndExplicitClears(t *te
 	require.Equal(t, "http://127.0.0.1:1", preserved.GetBaseURL())
 	require.Equal(t, savedHeaderOverride, *preserved.HeaderOverride)
 	require.Equal(t, "http://127.0.0.1:1", preserved.GetSetting().Proxy)
+	_, err = buildModelPreviewChannel(fetchModelsRequest{ChannelID: savedChannel.Id, Type: constant.ChannelTypeOpenAI})
+	require.ErrorContains(t, err, "save the channel type change before previewing models")
 
 	previewConfig := dto.AdvancedCustomConfig{Routes: []dto.AdvancedCustomRoute{{
 		IncomingPath: dto.AdvancedCustomModelListPath,
@@ -372,15 +374,17 @@ func TestFetchModelsUsesSharedChannelFetchBehavior(t *testing.T) {
 		if r.Header.Get("Authorization") != "" {
 			t.Errorf("unexpected Authorization header: %s", r.Header.Get("Authorization"))
 		}
+		assert.Empty(t, r.Header.Get("X-Opencode-Session"))
 		w.Header().Set("Content-Type", "application/json")
 		_, _ = w.Write([]byte(`{"data":[{"id":" claude-sonnet "},{"id":"claude-sonnet"}]}`))
 	}))
 	t.Cleanup(server.Close)
 
 	body, err := common.Marshal(map[string]any{
-		"base_url": server.URL,
-		"type":     constant.ChannelTypeAnthropic,
-		"key":      "first-key\nsecond-key",
+		"base_url":           server.URL,
+		"type":               constant.ChannelTypeAnthropic,
+		"key":                "first-key\nsecond-key",
+		"opencode_go_compat": true,
 	})
 	require.NoError(t, err)
 

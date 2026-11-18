@@ -348,7 +348,6 @@ func applyFetchModelsHeaderOverrides(channel *model.Channel, key string, headers
 	for name, value := range overrides {
 		headers.Set(name, value)
 	}
-	service.ApplyOpenCodeSession(nil, info, headers)
 
 	return nil
 }
@@ -1582,15 +1581,14 @@ func equalStringPtr(a, b *string) bool {
 }
 
 type fetchModelsRequest struct {
-	ChannelID        int     `json:"channel_id"`
-	BaseURL          *string `json:"base_url"`
-	Type             int     `json:"type"`
-	Key              string  `json:"key"`
-	AdvancedCustom   *string `json:"advanced_custom"`
-	HeaderOverride   *string `json:"header_override"`
-	Proxy            *string `json:"proxy"`
-	OpenCodeGoCompat *bool   `json:"opencode_go_compat,omitempty"`
-	TaskPluginKey    string  `json:"task_plugin_key"`
+	ChannelID      int     `json:"channel_id"`
+	BaseURL        *string `json:"base_url"`
+	Type           int     `json:"type"`
+	Key            string  `json:"key"`
+	AdvancedCustom *string `json:"advanced_custom"`
+	HeaderOverride *string `json:"header_override"`
+	Proxy          *string `json:"proxy"`
+	TaskPluginKey  string  `json:"task_plugin_key"`
 }
 
 // buildModelPreviewChannel applies unsaved connection settings to an isolated
@@ -1636,10 +1634,6 @@ func buildModelPreviewChannel(req fetchModelsRequest) (*model.Channel, error) {
 		}
 	}
 
-	settings := channel.GetOtherSettings()
-	if req.OpenCodeGoCompat != nil {
-		settings.OpenCodeGoCompat = *req.OpenCodeGoCompat
-	}
 	if channel.Type == constant.ChannelTypeAdvancedCustom && req.AdvancedCustom != nil {
 		rawConfig := strings.TrimSpace(*req.AdvancedCustom)
 		if rawConfig == "" {
@@ -1649,11 +1643,12 @@ func buildModelPreviewChannel(req fetchModelsRequest) (*model.Channel, error) {
 		if err := common.UnmarshalJsonStr(rawConfig, &config); err != nil {
 			return nil, err
 		}
+		settings := channel.GetOtherSettings()
 		settings.AdvancedCustom = &config
+		channel.SetOtherSettings(settings)
 	} else if channel.Type == constant.ChannelTypeAdvancedCustom && req.ChannelID <= 0 {
 		return nil, fmt.Errorf("advanced_custom is required")
 	}
-	channel.SetOtherSettings(settings)
 
 	if req.HeaderOverride != nil {
 		rawHeaderOverride := strings.TrimSpace(*req.HeaderOverride)

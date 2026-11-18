@@ -256,7 +256,6 @@ along with this program. If not, see <https://www.gnu.org/licenses/>.
 
 For commercial licensing, please contact support@quantumnous.com
 */
-import { ChannelOpenCodeSetting } from './sections/channel-opencode-setting'
 
 type ChannelMutateDrawerProps = {
   open: boolean
@@ -322,7 +321,6 @@ const SENSITIVE_FORM_FIELDS = [
   'ark_api_key',
   'mediakit_api_key',
   'mediakit_base_url',
-  'opencode_go_compat',
   'type',
   'base_url',
   'key',
@@ -670,7 +668,6 @@ export function ChannelMutateDrawer({
   const currentAdvancedCustom = formValues.advanced_custom
   const currentHeaderOverride = formValues.header_override
   const currentProxy = formValues.proxy
-  const currentOpenCodeGoCompat = formValues.opencode_go_compat
   const currentHttpProtocol = formValues.http_protocol
   const {
     unlocked: doubaoApiEditUnlocked,
@@ -1330,7 +1327,6 @@ export function ChannelMutateDrawer({
           advanced_custom: currentAdvancedCustom,
           header_override: currentHeaderOverride,
           proxy: currentProxy,
-          opencode_go_compat: currentOpenCodeGoCompat,
         },
         isEditing ? channelId || undefined : undefined
       ),
@@ -1345,7 +1341,6 @@ export function ChannelMutateDrawer({
       currentAdvancedCustom,
       currentHeaderOverride,
       currentProxy,
-      currentOpenCodeGoCompat,
     ]
   )
   const savedRequest = useMemo<ChannelModelDiscoveryRequest>(
@@ -5056,11 +5051,6 @@ export function ChannelMutateDrawer({
                 />
                 {formatFields}
                 {ollamaOpenAIChatFields}
-                <ChannelOpenCodeSetting
-                  control={form.control}
-                  channelType={currentType}
-                  disabled={sensitiveLocked}
-                />
                 {thinkingFields}
                 {passthroughFields}
                 {systemPromptFields}

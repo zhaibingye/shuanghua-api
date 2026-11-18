@@ -175,11 +175,6 @@ func GetResponseBody(method, url string, channel *model.Channel, headers http.He
 	for k := range headers {
 		req.Header.Add(k, headers.Get(k))
 	}
-	if channel.GetOtherSettings().OpenCodeGoCompat && (channel.Type == constant.ChannelTypeOpenAI || channel.Type == constant.ChannelTypeAnthropic) {
-		if err := applyFetchModelsHeaderOverrides(channel, channel.Key, req.Header); err != nil {
-			return nil, err
-		}
-	}
 	setting := channel.GetSetting()
 	client, err := service.GetHttpClientWithProxySettings(setting.Proxy, setting)
 	if err != nil {

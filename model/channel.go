@@ -1178,9 +1178,6 @@ func (channel *Channel) ValidateSettings() error {
 			return err
 		}
 	}
-	if channelOtherSettings.OpenCodeGoCompat && channel.Type != constant.ChannelTypeOpenAI && channel.Type != constant.ChannelTypeAnthropic {
-		return fmt.Errorf("opencode_go_compat is only supported by OpenAI and Anthropic channels")
-	}
 	if err := channelOtherSettings.ValidateToolLossPolicy(); err != nil {
 		return err
 	}

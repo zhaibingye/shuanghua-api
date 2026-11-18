@@ -50,24 +50,6 @@ func TestChannelValidateSettingsRejectsInvalidHTTPTransport(t *testing.T) {
 	}
 }
 
-func TestOpenCodeGoSettingsRoundTripAndChannelValidation(t *testing.T) {
-	for _, kind := range []int{constant.ChannelTypeOpenAI, constant.ChannelTypeAnthropic, constant.ChannelTypeAzure} {
-		channel := &Channel{Type: kind}
-		assert.False(t, channel.GetOtherSettings().OpenCodeGoCompat)
-		channel.SetOtherSettings(dto.ChannelOtherSettings{OpenCodeGoCompat: true, AllowServiceTier: true})
-		assert.True(t, channel.GetOtherSettings().OpenCodeGoCompat)
-		assert.True(t, channel.GetOtherSettings().AllowServiceTier)
-		if kind == constant.ChannelTypeAzure {
-			require.ErrorContains(t, channel.ValidateSettings(), "opencode_go_compat")
-		} else {
-			require.NoError(t, channel.ValidateSettings())
-		}
-		channel.SetOtherSettings(dto.ChannelOtherSettings{AllowServiceTier: true})
-		assert.False(t, channel.GetOtherSettings().OpenCodeGoCompat)
-		require.NoError(t, channel.ValidateSettings())
-	}
-}
-
 func TestAdvancedCustomChannelRequiresModelListRouteOnlyWhenUpdateChecksEnabled(t *testing.T) {
 	inferenceRoute := dto.AdvancedCustomRoute{
 		IncomingPath: "/v1/chat/completions",
@@ -126,7 +108,7 @@ func TestAdvancedCustomChannelRequiresModelListRouteOnlyWhenUpdateChecksEnabled(
 	}
 }
 
-func TestInferencePresetSettingsAndDatabaseRoundTrip(t *testing.T) {
+func TestChannelOtherSettingsDatabaseRoundTrip(t *testing.T) {
 	for _, dialect := range []string{"sqlite", "mysql", "postgres"} {
 		t.Run(dialect, func(t *testing.T) {
 			var driver gorm.Dialector
@@ -161,6 +143,31 @@ func TestInferencePresetSettingsAndDatabaseRoundTrip(t *testing.T) {
 				require.NoError(t, db.Raw("select version()").Scan(&version).Error)
 			}
 			t.Logf("%s version: %s", dialect, version)
+
+			t.Run("retired setting", func(t *testing.T) {
+				const savedSettings = `{"opencode_go_compat":true,"allow_service_tier":true}`
+				channel := &Channel{
+					Type:          constant.ChannelTypeAzure,
+					Key:           "fixture-key",
+					Name:          "legacy channel",
+					OtherSettings: savedSettings,
+				}
+				require.NoError(t, table.Create(channel).Error)
+				var loaded Channel
+				require.NoError(t, table.First(&loaded, channel.Id).Error)
+				require.NoError(t, loaded.ValidateSettings())
+				settings := loaded.GetOtherSettings()
+				assert.True(t, settings.AllowServiceTier)
+				assert.Equal(t, savedSettings, loaded.OtherSettings)
+
+				loaded.SetOtherSettings(settings)
+				require.NoError(t, table.Save(&loaded).Error)
+				var reloaded Channel
+				require.NoError(t, table.First(&reloaded, channel.Id).Error)
+				assert.NotContains(t, reloaded.OtherSettings, "opencode_go_compat")
+				assert.True(t, reloaded.GetOtherSettings().AllowServiceTier)
+			})
+
 			for _, channelType := range []int{constant.ChannelTypeVLLM, constant.ChannelTypeSGLang} {
 				t.Run(fmt.Sprint(channelType), func(t *testing.T) {
 					channel := &Channel{Type: channelType, Key: "EMPTY", Name: "inference", Status: common.ChannelStatusEnabled}

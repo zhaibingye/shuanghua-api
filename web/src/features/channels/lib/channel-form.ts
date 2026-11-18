@@ -31,7 +31,6 @@ import {
   FIELD_PASSTHROUGH_TYPES,
   MODEL_FETCHABLE_TYPES,
   OPENAI_FIELD_PASSTHROUGH_TYPES,
-  OPENCODE_GO_COMPAT_TYPES,
 } from '../constants'
 import type { Channel, FetchModelsRequest } from '../types'
 import {
@@ -283,7 +282,6 @@ export const channelFormSchema = z
     system_prompt: z.string().optional(),
     system_prompt_override: z.boolean().optional(),
     // Type-specific settings (stored in settings JSON)
-    opencode_go_compat: z.boolean().optional(),
     is_enterprise_account: z.boolean().optional(), // OpenRouter specific
     vertex_key_type: z.enum(['json', 'api_key']).optional(), // Vertex AI specific
     vertex_project_id: z.string().optional(), // Vertex AI specific (api_key mode only)
@@ -524,7 +522,6 @@ export const CHANNEL_FORM_DEFAULT_VALUES: ChannelFormValues = {
   system_prompt: '',
   system_prompt_override: false,
   // Type-specific settings
-  opencode_go_compat: false,
   is_enterprise_account: false,
   vertex_key_type: 'json',
   vertex_project_id: '',
@@ -628,7 +625,6 @@ export function transformChannelToFormDefaults(
   let allowInferenceGeo = false
   let allowSpeed = false
   let claudeBetaQuery = false
-  let openCodeGoCompat = false
   let ollamaOpenAIChat = false
   let disableTaskPollingSleep = false
   let mediaKitBaseUrl = DEFAULT_MEDIAKIT_BASE_URL
@@ -656,9 +652,6 @@ export function transformChannelToFormDefaults(
       allowInferenceGeo = parsed.allow_inference_geo === true
       allowSpeed = parsed.allow_speed === true
       claudeBetaQuery = parsed.claude_beta_query === true
-      openCodeGoCompat =
-        OPENCODE_GO_COMPAT_TYPES.has(channel.type) &&
-        parsed.opencode_go_compat === true
       ollamaOpenAIChat = parsed.ollama_openai_chat === true
       disableTaskPollingSleep = parsed.disable_task_polling_sleep === true
       mediaKitBaseUrl = parsed.mediakit_base_url || DEFAULT_MEDIAKIT_BASE_URL
@@ -725,7 +718,6 @@ export function transformChannelToFormDefaults(
     allow_inference_geo: allowInferenceGeo,
     allow_speed: allowSpeed,
     claude_beta_query: claudeBetaQuery,
-    opencode_go_compat: openCodeGoCompat,
     ollama_openai_chat: ollamaOpenAIChat,
     disable_task_polling_sleep: disableTaskPollingSleep,
     ark_api_key: '',
@@ -752,7 +744,6 @@ export function buildModelPreviewRequest(
     | 'advanced_custom'
     | 'header_override'
     | 'proxy'
-    | 'opencode_go_compat'
   >,
   channelId?: number
 ): FetchModelsRequest {
@@ -771,9 +762,6 @@ export function buildModelPreviewRequest(
         : undefined,
     header_override: formData.header_override,
     proxy: formData.proxy,
-    opencode_go_compat: OPENCODE_GO_COMPAT_TYPES.has(formData.type)
-      ? formData.opencode_go_compat === true
-      : undefined,
   }
 }
 
@@ -842,14 +830,7 @@ function buildSettingsJSON(formData: ChannelFormValues): string {
     }
   }
 
-  if (
-    OPENCODE_GO_COMPAT_TYPES.has(formData.type) &&
-    formData.opencode_go_compat
-  ) {
-    settingsObj.opencode_go_compat = true
-  } else {
-    delete settingsObj.opencode_go_compat
-  }
+  delete settingsObj.opencode_go_compat
 
   // Add vertex_key_type for Vertex AI channels (type 41)
   if (formData.type === 41) {
