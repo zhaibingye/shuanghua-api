@@ -30,18 +30,23 @@ func (a *Adaptor) ConvertGeminiRequest(c *gin.Context, info *relaycommon.RelayIn
 		return nil, err
 	}
 	if len(request.Contents) > 0 {
-		for i, content := range request.Contents {
-			if i == 0 {
-				if request.Contents[0].Role == "" {
-					request.Contents[0].Role = "user"
-				}
-			}
-			for _, part := range content.Parts {
-				if part.FileData != nil {
-					if part.FileData.MimeType == "" && strings.Contains(part.FileData.FileUri, "www.youtube.com") {
-						part.FileData.MimeType = "video/webm"
-					}
-				}
+		first := &request.Contents[0]
+		if first.Role == "" {
+			first.Role = "user"
+		} else if first.Role == "model" && request.CachedContent == "" && len(request.ContinuationToken) == 0 &&
+			slices.ContainsFunc(first.Parts, func(part dto.GeminiPart) bool { return part.FunctionCall != nil }) {
+			// A trimmed history can start mid-turn. Use a user turn as the
+			// predecessor while keeping the tool calls and results intact.
+			request.Contents = slices.Insert(request.Contents, 0, dto.GeminiChatContent{
+				Role:  "user",
+				Parts: []dto.GeminiPart{{Text: "Earlier conversation context was omitted."}},
+			})
+		}
+	}
+	for _, content := range request.Contents {
+		for _, part := range content.Parts {
+			if part.FileData != nil && part.FileData.MimeType == "" && strings.Contains(part.FileData.FileUri, "www.youtube.com") {
+				part.FileData.MimeType = "video/webm"
 			}
 		}
 	}

@@ -25,26 +25,45 @@ import (
 )
 
 func TestGeminiContentSurvivesRequestRelay(t *testing.T) {
+	const functionHistory = `{"role":"model","parts":[
+		{"functionCall":{"id":"call_a","name":"lookup","args":{"count":0}},"thoughtSignature":"c2lnbmF0dXJl"},
+		{"functionCall":{"id":"call_b","name":"lookup","args":{"enabled":false}}}
+	]},{"role":"user","parts":[
+		{"functionResponse":{"id":"call_b","name":"lookup","response":{"result":false}}},
+		{"functionResponse":{"id":"call_a","name":"lookup","response":{"result":0}}}
+	]}`
+	const userTurn = `{"role":"user","parts":[{"text":"Look up the results."}]}`
+	const omittedHistoryTurn = `{"role":"user","parts":[{"text":"Earlier conversation context was omitted."}]}`
 	tests := []struct {
 		name  string
 		input string
 		want  string
+		extra string
 	}{
 		{
-			name: "function history",
-			input: `[{"role":"model","parts":[
-				{"functionCall":{"id":"call_a","name":"lookup","args":{"count":0}},"thoughtSignature":"c2lnbmF0dXJl"},
-				{"functionCall":{"id":"call_b","name":"lookup","args":{"enabled":false}}}
-			]},{"role":"user","parts":[
-				{"functionResponse":{"id":"call_b","name":"lookup","response":{"result":false}}},
-				{"functionResponse":{"id":"call_a","name":"lookup","response":{"result":0}}}
-			]}]`,
+			name:  "function history",
+			input: "[" + userTurn + "," + functionHistory + "]",
+		},
+		{
+			name:  "clipped function history",
+			input: "[" + functionHistory + "," + userTurn + "]",
+			want:  "[" + omittedHistoryTurn + "," + functionHistory + "," + userTurn + "]",
+		},
+		{
+			name:  "function history after cached content",
+			input: "[" + functionHistory + "]",
+			extra: `,"cachedContent":"cachedContents/history"`,
+		},
+		{
+			name:  "function history with a continuation token",
+			input: "[" + functionHistory + "]",
+			extra: `,"continuationToken":"previous-turn"`,
 		},
 		{
 			name: "snake case function history",
-			input: `[{"role":"model","parts":[{"function_call":{"id":"call_a","name":"lookup","args":{}},"thought_signature":"c2lnbmF0dXJl"}]},
+			input: "[" + userTurn + `,{"role":"model","parts":[{"function_call":{"id":"call_a","name":"lookup","args":{}},"thought_signature":"c2lnbmF0dXJl"}]},
 				{"role":"user","parts":[{"function_response":{"id":"call_a","name":"lookup","response":{"result":"ok"}}}]}]`,
-			want: `[{"role":"model","parts":[{"functionCall":{"id":"call_a","name":"lookup","args":{}},"thoughtSignature":"c2lnbmF0dXJl"}]},
+			want: "[" + userTurn + `,{"role":"model","parts":[{"functionCall":{"id":"call_a","name":"lookup","args":{}},"thoughtSignature":"c2lnbmF0dXJl"}]},
 				{"role":"user","parts":[{"functionResponse":{"id":"call_a","name":"lookup","response":{"result":"ok"}}}]}]`,
 		},
 		{
@@ -122,7 +141,7 @@ func TestGeminiContentSurvivesRequestRelay(t *testing.T) {
 						want = tt.input
 					}
 					var source dto.GeminiChatRequest
-					require.NoError(t, common.Unmarshal([]byte(`{"contents":`+tt.input+`}`), &source))
+					require.NoError(t, common.Unmarshal([]byte(`{"contents":`+tt.input+tt.extra+`}`), &source))
 					request, err := common.DeepCopy(&source)
 					require.NoError(t, err)
 					c, _ := gin.CreateTestContext(httptest.NewRecorder())
@@ -136,7 +155,9 @@ func TestGeminiContentSurvivesRequestRelay(t *testing.T) {
 					// Replaying the history on another turn must remain lossless.
 					var replay dto.GeminiChatRequest
 					require.NoError(t, common.Unmarshal(encoded, &replay))
-					replayed, err := common.Marshal(replay)
+					replayedRequest, err := adaptor.ConvertGeminiRequest(c, info, &replay)
+					require.NoError(t, err)
+					replayed, err := common.Marshal(replayedRequest)
 					require.NoError(t, err)
 					assert.JSONEq(t, want, gjson.GetBytes(replayed, "contents").Raw)
 				})
