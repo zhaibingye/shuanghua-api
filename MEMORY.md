@@ -35,6 +35,8 @@
 
 ### Gemini 原生请求与工具
 
+- 排查 Kimi Code 压缩先看会话 `wire.jsonl` 的 `llm.request.kind` 和 `provider`。`kind=loop` 的 `APIEmptyResponseError` 属于普通生成请求，需从 `kind=compaction` 和 `full_compaction.*` 事件确认压缩是否触发及是否成功。对 Gemini 空响应，优先对照同一渠道的原生 SSE 中 `finishReason`、可见正文与工具调用，再检查 OpenAI 兼容输出。
+- Kimi Code 桌面版 1.3.3 可在后台自动压缩期间继续普通生成。隔离复测将触发比例设为 `0.60` 时，普通回复先写入历史，Gemini 原生压缩返回正文及 `STOP` 后客户端仍记录 `full_compaction.cancel`。客户端提交摘要时会校验原历史及新增消息。同一测试使用默认 `0.85` 时，普通请求等待压缩完成并观察到 `context.apply_compaction`，串行手动压缩也通过。诊断时将摘要请求成功和历史提交成功分别检查。
 - 跨协议转 Gemini 时，工具参数和结构化输出共用 Schema 转换。明确的单一类型与 null 的并集可映射到 `type` 和 `nullable`，`required` 仍按源定义保留。Developer API 的 typed Schema 没有 `additionalProperties`，有该约束或其他无法等价投影的约束时，按上游能力选 `parametersJsonSchema` / `responseJsonSchema` 保留原 JSON，否则给出转换诊断。回归入口为 `TestConvertRequestToGeminiNullableToolSchema` 和 `TestConvertRequestToGeminiSchemaFieldSelection`。
 - 2026-11-14 在同一 `gemini-4-carbon` 渠道复测，旧转换形态 `anyOf: [{type: STRING}, {nullable: true}]` 走原生路由也触发缺少 type 的 400。本地修复后的最小、完整单工具及恢复目标工具后的 35 工具请求走原生路由均得到 200。复测线上转换是否生效时，要另发原始 Responses 请求；原生请求成功只验证出站载荷。
 - 关闭请求体透传时，Gemini 原生请求会经 DTO 解码和适配器重新编码。`tools` 保留原 JSON 键名，`toolConfig` 把 `function_calling_config` 和已知子字段别名转成 REST 字段并保留显式 `false`。排查时应检查实际出站 JSON。
