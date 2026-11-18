@@ -127,6 +127,18 @@ describe('OpenCode Go channel settings', () => {
     ).toBeUndefined()
   })
 
+  test('model discovery includes the bound plugin only for plugin channels', () => {
+    const form = {
+      ...CHANNEL_FORM_DEFAULT_VALUES,
+      type: 61,
+      task_plugin_key: 'vendor',
+    }
+    expect(buildModelPreviewRequest(form).task_plugin_key).toBe('vendor')
+    expect(
+      buildModelPreviewRequest({ ...form, type: 1 }).task_plugin_key
+    ).toBeUndefined()
+  })
+
   test('string values are not treated as enabled booleans', () => {
     expect(
       transformChannelToFormDefaults(

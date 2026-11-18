@@ -123,7 +123,7 @@ func StreamScannerHandler(c *gin.Context, resp *http.Response, info *relaycommon
 
 	// Stop the preparation keepalive before changing headers. The request
 	// goroutine owns all subsequent downstream writes.
-	if writer, ok := c.Writer.(*streamKeepAliveWriter); ok {
+	if writer := keepAliveWriter(c); writer != nil {
 		writer.stop()
 	}
 

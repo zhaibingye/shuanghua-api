@@ -5,6 +5,7 @@ import (
 	"fmt"
 
 	relaycommon "github.com/QuantumNous/new-api/relay/common"
+	"github.com/QuantumNous/new-api/relay/requestplugin"
 	"github.com/QuantumNous/new-api/relaykit/dto"
 	"github.com/QuantumNous/new-api/relaykit/relayconvert/convmeta"
 	"github.com/QuantumNous/new-api/relaykit/relayconvert/reasoning"
@@ -22,8 +23,8 @@ import (
 // model modifiers override request fields; mapped-model modifiers override
 // origin-model modifiers. Mapped targets keep literal legacy suffixes such as
 // -high; only explicit @ modifiers are interpreted on those upstream IDs.
-// Pass-through (global or channel) is a no-op so the request body stays
-// byte-identical. c is used only to correlate diagnostics.
+// It also runs the request stage of the request plugins. Pass-through
+// (global or channel) is a no-op so the request body stays byte-identical.
 func ApplyReasoningModelSuffix(c *gin.Context, info *relaycommon.RelayInfo, outbound ...dto.Request) error {
 	if info == nil {
 		return nil
@@ -59,6 +60,34 @@ func ApplyReasoningModelSuffix(c *gin.Context, info *relaycommon.RelayInfo, outb
 	if upstream != origin {
 		selected, diagnostics = overlayMappedModelModifiers(selected, upstreamParsed, diagnostics)
 	}
+	if info.ChannelMeta != nil {
+		info.UpstreamModelName = selected.base
+	}
+
+	// A request plugin's reasoning.set applies as an @effort modifier does.
+	// Request returns none when the client or a modifier set an effort and
+	// the plugin does not override it.
+	modifierEffort := ""
+	if selected.hasThinking {
+		modifierEffort = string(reasoning.EffectiveEffort(selected.intent))
+	}
+	reasoningSet, pluginErr := requestplugin.Request(c, info, modifierEffort)
+	if pluginErr != nil {
+		return pluginErr
+	}
+	if reasoningSet != nil {
+		effort, _ := reasoning.ParseEffort(reasoningSet.Effort)
+		if effort == reasoning.EffortNone {
+			selected.intent = reasoning.Intent{Mode: reasoning.ModeDisabled, Effort: reasoning.EffortNone, Source: reasoning.SourceSuffix}
+		} else {
+			if selected.intent.Mode == reasoning.ModeUnset || selected.intent.Mode == reasoning.ModeDisabled {
+				selected.intent.Mode = reasoning.ModeEnabled
+			}
+			selected.intent.Effort = effort
+			selected.intent.Source = reasoning.SourceSuffix
+		}
+		selected.hasThinking = true
+	}
 
 	if selected.hasThinking {
 		explicit, explicitDiagnostics, err := explicitIntentFromRequest(info.Request)
@@ -71,9 +100,6 @@ func ApplyReasoningModelSuffix(c *gin.Context, info *relaycommon.RelayInfo, outb
 			selected.intent.IncludeThoughts = explicit.IncludeThoughts
 		}
 		info.ReasoningConversion = reasoning.StateFromIntent(selected.intent)
-	}
-	if info.ChannelMeta != nil {
-		info.UpstreamModelName = selected.base
 	}
 
 	if selected.hasTemperature {
@@ -121,6 +147,16 @@ func ApplyReasoningModelSuffix(c *gin.Context, info *relaycommon.RelayInfo, outb
 	}
 	info.RecordConversionDiagnostics(diagnosticContext, diagnostics)
 	return nil
+}
+
+// ModelModifierEffort is the reasoning effort the modifiers of a model name
+// set, as a relay request reads them; "" when they set none or are invalid.
+func ModelModifierEffort(modelName string) string {
+	parsed, err := parseRequestModelName(modelName, (&relaycommon.RelayInfo{}).ConvOptions(), true)
+	if err != nil || !parsed.hasThinking {
+		return ""
+	}
+	return string(reasoning.EffectiveEffort(parsed.intent))
 }
 
 func parseRequestModelName(name string, opts *convmeta.Options, allowLegacySuffix bool) (parsedModelModifiers, error) {

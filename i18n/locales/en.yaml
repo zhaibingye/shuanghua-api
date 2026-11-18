@@ -33,12 +33,16 @@ relay.model_price_not_configured: "Model {{.Model}} has not been priced by the a
 relay.model_price_not_configured_admin: "Model {{.Model}} price not configured. Go to System Settings → Operation Settings to enable self-use mode, or configure the model price in System Settings → Group & Model Pricing."
 relay.task_usage_price_unsupported: "Model {{.Model}} uses a task usage expression; configure ordinary relay pricing and separate plugin billing expressions"
 relay.shared_task_price_needs_override: "Model {{.Model}} shares its billing expression with task plugin {{.Plugin}}; configure a separate plugin billing expression before using ordinary relay pricing"
+relay.task_price_not_configured: "Model {{.Model}} has no task price for plugin {{.Plugin}}; set a separate price for this plugin in model pricing"
 relay.task_channel_disabled: "The channel of this task has been disabled"
 relay.group_saturated: "The current group is at capacity. Please try again later, or upgrade your account for better service."
 relay.group_upstream_saturated: "The upstream of the current group is at capacity. Please try again later"
 relay.retry_get_channel_failed: "Failed to get available channel for model {{.Model}} under group {{.Group}} (retry): {{.Error}}"
 relay.retry_no_available_channel: "No available channel for model {{.Model}} under group {{.Group}} (retry)"
 relay.access_token_unsupported: "Access tokens are not supported here"
+relay.request_rejected: "Request rejected by policy"
+relay.request_plugin_failed: "A request plugin failed"
+relay.response_rejected: "Response stopped by policy"
 
 # Emails and the name of the token created at registration
 user.default_token_name: "{{.Username}}'s initial token"
@@ -105,3 +109,4 @@ custom_oauth.discovery_url_invalid: "Invalid Discovery URL, only http/https is s
 custom_oauth.discovery_request_failed: "Failed to create the Discovery request"
 custom_oauth.discovery_fetch_failed: "Failed to fetch the Discovery configuration"
 custom_oauth.discovery_parse_failed: "Failed to parse the Discovery configuration"
+channel.notify_scheduled_subject: "Channel \"{{.Name}}\" (#{{.Id}}) plugin notification"
