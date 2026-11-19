@@ -8,14 +8,65 @@ import (
 	"github.com/QuantumNous/new-api/common"
 	"github.com/QuantumNous/new-api/logger"
 	relaycommon "github.com/QuantumNous/new-api/relay/common"
+	relayconstant "github.com/QuantumNous/new-api/relay/constant"
+	"github.com/QuantumNous/new-api/relaykit/dto"
 	"github.com/QuantumNous/new-api/relaykit/types"
+	"github.com/QuantumNous/new-api/setting/operation_setting"
 	"github.com/gin-gonic/gin"
 )
 
 const (
-	BillingSourceWallet       = "wallet"
-	BillingSourceSubscription = "subscription"
+	BillingSourceWallet        = "wallet"
+	BillingSourceSubscription  = "subscription"
+	emptyResponseRefundMessage = "Zero output tokens. Request charge waived."
 )
+
+func shouldRefundEmptyResponse(info *relaycommon.RelayInfo, reportedUsage, billingUsage *dto.Usage) bool {
+	if reportedUsage == nil {
+		return false
+	}
+	// A protocol billing snapshot and the relay's output estimate can carry different facts.
+	for _, usage := range [2]*dto.Usage{reportedUsage, billingUsage} {
+		if usage.CompletionTokens != 0 || usage.OutputTokens != 0 ||
+			usage.CompletionTokenDetails != (dto.OutputTokenDetails{}) ||
+			(usage.OutputTokensDetails != nil && *usage.OutputTokensDetails != (dto.OutputTokenDetails{})) {
+			return false
+		}
+	}
+	switch info.RelayMode {
+	case relayconstant.RelayModeChatCompletions, relayconstant.RelayModeCompletions, relayconstant.RelayModeEdits,
+		relayconstant.RelayModeResponses:
+	case relayconstant.RelayModeGemini:
+		if _, ok := info.Request.(*dto.GeminiChatRequest); !ok {
+			return false
+		}
+	case relayconstant.RelayModeUnknown:
+		if info.RelayFormat != types.RelayFormatClaude {
+			return false
+		}
+	default:
+		// These routes can return a valid result without any output token count.
+		return false
+	}
+	if info.ResponsesUsageInfo != nil {
+		if images := info.BuiltInTools[dto.BuildInToolImageGeneration]; images != nil && images.CallCount > 0 {
+			return false
+		}
+	}
+	if stream := info.StreamStatus; stream != nil {
+		outcome := stream.OutcomeSnapshot()
+		switch outcome.Response {
+		case relaycommon.ResponseOutcomeCompleted, relaycommon.ResponseOutcomeIncomplete:
+		case relaycommon.ResponseOutcomeUnknown:
+			if outcome.ExpectsTerminal || outcome.HasErrors || !stream.IsNormalEnd() {
+				return false
+			}
+		default:
+			return false
+		}
+	}
+	return operation_setting.RefundEmptyResponsesEnabled()
+}
 
 // PreConsumeBilling 根据用户计费偏好创建 BillingSession 并执行预扣费。
 // 会话存储在 relayInfo.Billing 上，供后续 Settle / Refund 使用。

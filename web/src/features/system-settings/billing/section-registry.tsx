@@ -74,6 +74,8 @@ const BILLING_SECTIONS = [
               settings['quota_setting.pre_consume_multiplier'],
             enable_free_model_pre_consume:
               settings['quota_setting.enable_free_model_pre_consume'],
+            refund_empty_responses:
+              settings['quota_setting.refund_empty_responses'],
           },
         }}
         complianceConfirmed={

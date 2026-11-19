@@ -438,21 +438,26 @@ func PostTextConsumeQuota(ctx *gin.Context, relayInfo *relaycommon.RelayInfo, us
 		}
 	}
 
-	for _, item := range summary.ToolSurchargeItems {
-		q := decimal.NewFromFloat(item.Price).
-			Mul(decimal.NewFromInt(int64(item.Count))).
-			Div(decimal.NewFromInt(1000)).
-			Mul(decimal.NewFromFloat(summary.GroupRatio)).
-			Mul(decimal.NewFromFloat(common.QuotaPerUnit))
-		extraContent = append(extraContent, common.NewMessage("{{name}} called {{count}} times, cost {{quota}}", map[string]any{
-			"name":  item.Name,
-			"count": item.Count,
-			"quota": logger.FormatQuota(common.QuotaFromDecimal(q)),
-		}))
-	}
-	if summary.AudioInputPrice > 0 && summary.AudioTokens > 0 {
-		q := decimal.NewFromFloat(summary.AudioInputPrice).Div(decimal.NewFromInt(1000000)).Mul(decimal.NewFromInt(int64(summary.AudioTokens))).Mul(decimal.NewFromFloat(summary.GroupRatio)).Mul(decimal.NewFromFloat(common.QuotaPerUnit))
-		extraContent = append(extraContent, common.NewMessage("Audio input cost {{quota}}", map[string]any{"quota": logger.FormatQuota(common.QuotaFromDecimal(q))}))
+	refundEmptyResponse := summary.Quota > 0 && shouldRefundEmptyResponse(relayInfo, originUsage, billingUsage)
+	if refundEmptyResponse {
+		summary.Quota = 0
+	} else {
+		for _, item := range summary.ToolSurchargeItems {
+			q := decimal.NewFromFloat(item.Price).
+				Mul(decimal.NewFromInt(int64(item.Count))).
+				Div(decimal.NewFromInt(1000)).
+				Mul(decimal.NewFromFloat(summary.GroupRatio)).
+				Mul(decimal.NewFromFloat(common.QuotaPerUnit))
+			extraContent = append(extraContent, common.NewMessage("{{name}} called {{count}} times, cost {{quota}}", map[string]any{
+				"name":  item.Name,
+				"count": item.Count,
+				"quota": logger.FormatQuota(common.QuotaFromDecimal(q)),
+			}))
+		}
+		if summary.AudioInputPrice > 0 && summary.AudioTokens > 0 {
+			q := decimal.NewFromFloat(summary.AudioInputPrice).Div(decimal.NewFromInt(1000000)).Mul(decimal.NewFromInt(int64(summary.AudioTokens))).Mul(decimal.NewFromFloat(summary.GroupRatio)).Mul(decimal.NewFromFloat(common.QuotaPerUnit))
+			extraContent = append(extraContent, common.NewMessage("Audio input cost {{quota}}", map[string]any{"quota": logger.FormatQuota(common.QuotaFromDecimal(q))}))
+		}
 	}
 
 	if !summary.hasBillableUsage() {
@@ -465,6 +470,8 @@ func PostTextConsumeQuota(ctx *gin.Context, relayInfo *relaycommon.RelayInfo, us
 
 	if err := SettleBilling(ctx, relayInfo, summary.Quota); err != nil {
 		logger.LogError(ctx, common.LogText("error settling billing: %s", err.Error()))
+	} else if refundEmptyResponse {
+		extraContent = append(extraContent, common.NewMessage(emptyResponseRefundMessage))
 	}
 
 	logModel := summary.ModelName

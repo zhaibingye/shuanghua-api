@@ -48,6 +48,7 @@ function Fixture() {
             TopUpLink: '',
             quota_setting: {
               enable_free_model_pre_consume: true,
+              refund_empty_responses: true,
               trust_quota_usd: 10,
               pre_consume_multiplier: 1,
             },
@@ -78,6 +79,25 @@ async function renderSettings() {
 
 beforeEach(() => {
   vi.spyOn(api, 'put').mockResolvedValue({ data: { success: true } })
+})
+
+test('the empty response refund switch starts enabled and saves when turned off', async () => {
+  const user = userEvent.setup()
+  await renderSettings()
+  const refund = screen.getByRole('switch', {
+    name: 'Refund empty responses',
+  })
+  expect(refund).toBeChecked()
+  refund.focus()
+  await user.keyboard(' ')
+  expect(refund).not.toBeChecked()
+  await user.click(screen.getByRole('button', { name: 'Save Changes' }))
+  await waitFor(() =>
+    expect(api.put).toHaveBeenCalledWith('/api/option/', {
+      key: 'quota_setting.refund_empty_responses',
+      value: false,
+    })
+  )
 })
 
 test.each(['0.5', '1.5', '2.5', '0.0001'])(

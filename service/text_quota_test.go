@@ -5,6 +5,7 @@ import (
 	"math"
 	"net/http/httptest"
 	"os"
+	"strings"
 	"testing"
 	"time"
 
@@ -16,6 +17,7 @@ import (
 	relayconstant "github.com/QuantumNous/new-api/relay/constant"
 	"github.com/QuantumNous/new-api/relaykit/dto"
 	"github.com/QuantumNous/new-api/relaykit/types"
+	"github.com/QuantumNous/new-api/setting/config"
 	"github.com/QuantumNous/new-api/setting/operation_setting"
 	hosttypes "github.com/QuantumNous/new-api/types"
 
@@ -80,7 +82,8 @@ func TestFixedPriceBillingDatabaseMatrix(t *testing.T) {
 			model.DB, model.LOG_DB = db, logDB
 			common.SetDatabaseTypes(dialect.name, dialect.name)
 			t.Cleanup(func() { model.DB, model.LOG_DB = oldDB, oldLogDB; common.SetDatabaseTypes(oldMainType, oldLogType) })
-			require.NoError(t, db.AutoMigrate(&model.User{}, &model.Token{}, &model.Channel{}))
+			require.NoError(t, db.AutoMigrate(&model.User{}, &model.Token{}, &model.Channel{},
+				&model.SubscriptionPlan{}, &model.UserSubscription{}, &model.SubscriptionPreConsumeRecord{}))
 			require.NoError(t, logDB.AutoMigrate(&model.Log{}))
 			versionQuery := "select version()"
 			if dialect.name == common.DatabaseTypeSQLite {
@@ -115,10 +118,25 @@ func runFixedPriceAccountingCases(t *testing.T, db, logDB *gorm.DB) {
 		want                                      int
 		unit                                      billingexpr.BillingUnit
 		requestedImages, actualImages             int
+		relayMode                                 int
+		emptyRefund, disableRefund, interrupted   bool
+		responseImage                             bool
+		relayRequest                              dto.Request
+		subscription                              bool
 	}{
 		{name: "missing usage charges once", expression: flat, want: 5000, unit: billingexpr.BillingUnitRequest},
 		{name: "zero usage charges once", expression: flat, usage: &dto.Usage{}, want: 5000, unit: billingexpr.BillingUnitRequest},
-		{name: "stream charges once", expression: flat, stream: true, usage: &dto.Usage{PromptTokens: 100, CompletionTokens: 20, TotalTokens: 120}, want: 5000, unit: billingexpr.BillingUnitRequest},
+		{name: "stream with output charges once", relayMode: relayconstant.RelayModeChatCompletions, expression: flat, stream: true, usage: &dto.Usage{PromptTokens: 100, CompletionTokens: 20, TotalTokens: 120}, want: 5000, unit: billingexpr.BillingUnitRequest},
+		{name: "empty chat refunds fixed charge", relayMode: relayconstant.RelayModeChatCompletions, expression: flat, usage: &dto.Usage{PromptTokens: 100, TotalTokens: 100}, emptyRefund: true, unit: billingexpr.BillingUnitRequest},
+		{name: "empty stream refunds token charge", relayMode: relayconstant.RelayModeChatCompletions, expression: `p * 2`, estimate: 100, stream: true, usage: &dto.Usage{PromptTokens: 100, TotalTokens: 100}, emptyRefund: true, unit: billingexpr.BillingUnitToken},
+		{name: "empty gemini generation refunds subscription and token", relayMode: relayconstant.RelayModeGemini, relayRequest: &dto.GeminiChatRequest{}, expression: `p * 2`, estimate: 100, usage: &dto.Usage{PromptTokens: 100, TotalTokens: 100}, emptyRefund: true, subscription: true, unit: billingexpr.BillingUnitToken},
+		{name: "disabled empty refund keeps token charge", relayMode: relayconstant.RelayModeChatCompletions, expression: `p * 2`, estimate: 100, usage: &dto.Usage{PromptTokens: 100, TotalTokens: 100}, disableRefund: true, want: 100, unit: billingexpr.BillingUnitToken},
+		{name: "empty audio generation refunds fixed charge", relayMode: relayconstant.RelayModeChatCompletions, expression: flat, audio: true, usage: &dto.Usage{PromptTokens: 100, TotalTokens: 100}, emptyRefund: true, unit: billingexpr.BillingUnitRequest},
+		{name: "interrupted stream keeps token charge", relayMode: relayconstant.RelayModeChatCompletions, expression: `p * 2`, estimate: 100, stream: true, usage: &dto.Usage{PromptTokens: 100, TotalTokens: 100}, interrupted: true, want: 100, unit: billingexpr.BillingUnitToken},
+		{name: "reasoning output keeps fixed charge", relayMode: relayconstant.RelayModeResponses, expression: flat, usage: &dto.Usage{PromptTokens: 100, TotalTokens: 100, CompletionTokenDetails: dto.OutputTokenDetails{ReasoningTokens: 5}}, want: 5000, unit: billingexpr.BillingUnitRequest},
+		{name: "embedding without output tokens is still billed", relayMode: relayconstant.RelayModeEmbeddings, expression: `p * 2`, estimate: 100, usage: &dto.Usage{PromptTokens: 100, TotalTokens: 100}, want: 100, unit: billingexpr.BillingUnitToken},
+		{name: "native gemini embedding uses input pricing", relayMode: relayconstant.RelayModeGemini, relayRequest: &dto.GeminiEmbeddingRequest{}, expression: `p * 2`, estimate: 100, usage: &dto.Usage{PromptTokens: 100, TotalTokens: 100}, want: 100, unit: billingexpr.BillingUnitToken},
+		{name: "image returned by responses is still billed", relayMode: relayconstant.RelayModeResponses, expression: flat, usage: &dto.Usage{PromptTokens: 100, TotalTokens: 100}, responseImage: true, want: 80000, unit: billingexpr.BillingUnitRequest},
 		{name: "audio zero usage charges once", expression: flat, audio: true, usage: &dto.Usage{}, want: 5000, unit: billingexpr.BillingUnitRequest},
 		{name: "audio missing usage charges once", expression: flat, audio: true, want: 5000, unit: billingexpr.BillingUnitRequest},
 		{name: "token reservation refunds to fixed price", expression: mixed, estimate: 50000, usage: &dto.Usage{PromptTokens: 100, TotalTokens: 100}, want: 5000, unit: billingexpr.BillingUnitRequest},
@@ -144,6 +162,13 @@ func runFixedPriceAccountingCases(t *testing.T, db, logDB *gorm.DB) {
 		{name: "task retry cannot exceed remaining wallet", expression: flat, retryReservation: 40000, wallet: 20000, reserveInsufficient: true, refund: true},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
+			if tc.disableRefund {
+				const option = "quota_setting.refund_empty_responses"
+				require.NoError(t, config.GlobalConfig.LoadFromDB(map[string]string{option: "false"}))
+				t.Cleanup(func() {
+					require.NoError(t, config.GlobalConfig.LoadFromDB(map[string]string{option: "true"}))
+				})
+			}
 			quota := startingQuota
 			if tc.insufficient {
 				quota = 1
@@ -178,10 +203,37 @@ func runFixedPriceAccountingCases(t *testing.T, db, logDB *gorm.DB) {
 			snapshot := &billingexpr.BillingSnapshot{BillingMode: "tiered_expr", ExprString: tc.expression, ExprHash: billingexpr.ExprHashString(tc.expression), QuotaPerUnit: common.QuotaPerUnit, GroupRatio: group, EstimatedTier: trace.MatchedTier, EstimatedBillingUnit: trace.BillingUnit, EstimatedFixedPrice: trace.FixedPrice, EstimatedQuotaAfterGroup: reservation}
 			snapshot.EstimatedImageCount = trace.ImageCount
 			info := &relaycommon.RelayInfo{UserId: user.Id, TokenId: token.Id, TokenKey: token.Key, ChannelMeta: &relaycommon.ChannelMeta{ChannelId: channel.Id}, OriginModelName: "fixed-test", UsingGroup: "default", UserGroup: "default", UserSetting: dto.UserSetting{BillingPreference: "wallet_only"}, ForcePreConsume: true, StartTime: time.Now(), IsStream: tc.stream, RelayFormat: types.RelayFormatOpenAI, PriceData: hosttypes.PriceData{GroupRatioInfo: hosttypes.GroupRatioInfo{GroupRatio: group}}, TieredBillingSnapshot: snapshot, BillingRequestInput: request}
+			info.RelayMode = tc.relayMode
+			info.Request = tc.relayRequest
+			var subscription model.UserSubscription
+			if tc.subscription {
+				plan := model.SubscriptionPlan{Title: "Billing test", TotalAmount: startingQuota}
+				require.NoError(t, db.Create(&plan).Error)
+				subscription = model.UserSubscription{
+					UserId: user.Id, PlanId: plan.Id, AmountTotal: startingQuota,
+					StartTime: time.Now().Add(-time.Hour).Unix(), EndTime: time.Now().Add(time.Hour).Unix(), Status: "active",
+				}
+				require.NoError(t, db.Create(&subscription).Error)
+				info.UserSetting.BillingPreference = "subscription_only"
+				info.RequestId = fmt.Sprintf("empty-response-%d-%d", user.Id, time.Now().UnixNano())
+				t.Cleanup(func() {
+					require.NoError(t, db.Where("request_id = ?", info.RequestId).Delete(&model.SubscriptionPreConsumeRecord{}).Error)
+					require.NoError(t, db.Delete(&subscription).Error)
+					require.NoError(t, db.Delete(&plan).Error)
+				})
+			}
+			if tc.stream {
+				info.StreamStatus = relaycommon.NewStreamStatus()
+				end := relaycommon.StreamEndReasonDone
+				if tc.interrupted {
+					end = relaycommon.StreamEndReasonClientGone
+				}
+				info.StreamStatus.SetEndReason(end, nil)
+			}
 			info.SetEstimatePromptTokens(tc.estimate)
 			ctx, _ := gin.CreateTestContext(httptest.NewRecorder())
 			ctx.Request = httptest.NewRequest("POST", "/v1/chat/completions", nil)
-			if tc.expression == imageExpression {
+			if tc.expression == imageExpression || tc.requestedImages > 0 {
 				ctx.Request.URL.Path = "/v1/images/generations"
 				info.RelayMode = relayconstant.RelayModeImagesGenerations
 			}
@@ -193,7 +245,13 @@ func runFixedPriceAccountingCases(t *testing.T, db, logDB *gorm.DB) {
 				require.Nil(t, apiErr)
 				held, err := model.GetUserQuota(user.Id, true)
 				require.NoError(t, err)
-				assert.Equal(t, quota-reservation, held)
+				if tc.subscription {
+					assert.Equal(t, quota, held)
+					require.NoError(t, db.First(&subscription, subscription.Id).Error)
+					assert.EqualValues(t, reservation, subscription.AmountUsed)
+				} else {
+					assert.Equal(t, quota-reservation, held)
+				}
 				if tc.outboundImages > 0 {
 					reserveErr := PrepareImageBillingForRequest(ctx, info, tc.outboundImages)
 					if tc.reserveInsufficient {
@@ -240,6 +298,11 @@ func runFixedPriceAccountingCases(t *testing.T, db, logDB *gorm.DB) {
 					if tc.tool {
 						info.ResponsesUsageInfo = &relaycommon.ResponsesUsageInfo{BuiltInTools: map[string]*relaycommon.BuildInToolInfo{"fixed_billing_tool": {CallCount: 1}}}
 					}
+					if tc.responseImage {
+						counter := &relaycommon.ImageGenerationCallCounter{}
+						counter.Observe(&dto.ResponsesOutput{ID: "image-1", Type: dto.ResponsesOutputTypeImageGenerationCall, Status: "completed", Result: "image"}, nil)
+						counter.Commit(info)
+					}
 					if tc.realtime {
 						PostWssConsumeQuota(ctx, info, info.OriginModelName, &dto.RealtimeUsage{
 							InputTokens: tc.usage.PromptTokens, OutputTokens: tc.usage.CompletionTokens, TotalTokens: tc.usage.TotalTokens,
@@ -255,6 +318,9 @@ func runFixedPriceAccountingCases(t *testing.T, db, logDB *gorm.DB) {
 					assert.Equal(t, tc.want, log.Quota)
 					assert.Equal(t, tc.stream, log.IsStream)
 					assert.NotContains(t, log.Content, "nothing was charged")
+					assert.Equal(t, tc.emptyRefund, strings.Contains(log.Content, emptyResponseRefundMessage))
+					require.NoError(t, db.First(&channel, channel.Id).Error)
+					assert.EqualValues(t, tc.want, channel.UsedQuota)
 					var other map[string]any
 					require.NoError(t, common.UnmarshalJsonStr(log.Other, &other))
 					assert.Equal(t, string(tc.unit), other["billing_unit"])
@@ -300,6 +366,10 @@ func runFixedPriceAccountingCases(t *testing.T, db, logDB *gorm.DB) {
 			require.NoError(t, db.First(&user, user.Id).Error)
 			require.NoError(t, db.First(&token, token.Id).Error)
 			assert.Equal(t, quota-tc.want, user.Quota)
+			if tc.subscription {
+				require.NoError(t, db.First(&subscription, subscription.Id).Error)
+				assert.Zero(t, subscription.AmountUsed)
+			}
 			assert.Equal(t, startingQuota-tc.want, token.RemainQuota)
 			assert.Equal(t, tc.want, user.UsedQuota)
 			assert.Equal(t, tc.want, token.UsedQuota)

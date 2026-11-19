@@ -62,6 +62,7 @@ const quotaSchema = z.object({
   TopUpLink: z.string(),
   quota_setting: z.object({
     enable_free_model_pre_consume: z.boolean(),
+    refund_empty_responses: z.boolean(),
     trust_quota_usd: z.preprocess(
       (value) => (value === '' ? undefined : value),
       z.coerce
@@ -366,6 +367,30 @@ export function QuotaSettingsSection({
                 )}
               />
             </SettingsFormGridItem>
+
+            <FormField
+              control={form.control}
+              name='quota_setting.refund_empty_responses'
+              render={({ field }) => (
+                <SettingsSwitchItem>
+                  <SettingsSwitchContent>
+                    <FormLabel>{t('Refund empty responses')}</FormLabel>
+                    <FormDescription>
+                      {t(
+                        'Automatically refund the request charge when a model generation returns zero output tokens.'
+                      )}
+                    </FormDescription>
+                  </SettingsSwitchContent>
+                  <FormControl>
+                    <Switch
+                      checked={field.value}
+                      onCheckedChange={field.onChange}
+                      disabled={updateOption.isPending}
+                    />
+                  </FormControl>
+                </SettingsSwitchItem>
+              )}
+            />
 
             <FormField
               control={form.control}

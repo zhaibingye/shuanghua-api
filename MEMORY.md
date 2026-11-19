@@ -49,6 +49,10 @@
 - `/v1/credits` 返回账户余额，采用站点显示单位。`/api/usage/token/` 返回 API Key 的原始额度，启用 `allow_user_quota_query` 时附带 `data.user_quota`。OpenMinis `1a71df0` 的 New API 解析器只读取 Key 额度字段。
 - OpenMinis 优先探测 `GET /v1/usage`，按 Sub2API 钱包格式读取顶层 `isValid` 和 `balance`，固定以 USD 展示。已识别为 New API 的连接需重新探测。网关要求 `allow_user_quota_query`，按通过鉴权的 Key 确定账户，用原始剩余额度除以 `QuotaPerUnit`。回归入口为 `router/relay_router_test.go` 的 `TestSub2APIWalletBalanceReturnsAccountQuotaInUSD` 和 `TestBalanceEndpointsEnforceTokenRestrictions`。
 
+## 空回自动退费
+
+- 生成请求按最终输出 Token 判断空回，通过现有 `BillingSession.Settle(0)` 释放原资金来源和 API Key 的预扣。核对 Gemini 入口时须用请求类型识别生成调用，因为原生向量接口也可能归入 `RelayModeGemini`。Responses 已交付的图片可能没有输出 Token，须保留图片费用。回归入口为 `service/text_quota_test.go` 的三数据库计费测试。
+
 ## 模型性能统计
 
 - 模型广场按请求分组展示性能。缓存命中率由同一次消费日志查询汇总模型和分组的缓存读取 Token 与总输入 Token，仅纳入有效的上游用量。实测零命中为 `0%`，缺少有效输入用量为 `—`。回归入口为 `model/cache_usage_test.go` 的 `TestCacheHitRateDatabaseMatrix`。

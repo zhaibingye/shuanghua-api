@@ -5,18 +5,21 @@ import (
 	"math"
 	"strconv"
 
+	"github.com/QuantumNous/new-api/common"
 	"github.com/QuantumNous/new-api/setting/config"
 )
 
 type QuotaSetting struct {
 	EnableFreeModelPreConsume bool    `json:"enable_free_model_pre_consume"` // 是否对免费模型启用预消耗
-	TrustQuotaUSD             float64 `json:"trust_quota_usd"`               // 钱包免预扣门槛，0 表示禁用
-	PreConsumeMultiplier      float64 `json:"pre_consume_multiplier"`        // 预计输入费用的预扣倍率，仅影响预留
+	RefundEmptyResponses      bool    `json:"refund_empty_responses"`
+	TrustQuotaUSD             float64 `json:"trust_quota_usd"`        // 钱包免预扣门槛，0 表示禁用
+	PreConsumeMultiplier      float64 `json:"pre_consume_multiplier"` // 预计输入费用的预扣倍率，仅影响预留
 }
 
 // 默认配置
 var quotaSetting = QuotaSetting{
 	EnableFreeModelPreConsume: true,
+	RefundEmptyResponses:      true,
 	TrustQuotaUSD:             10,
 	PreConsumeMultiplier:      1,
 }
@@ -28,6 +31,13 @@ func init() {
 
 func GetQuotaSetting() *QuotaSetting {
 	return &quotaSetting
+}
+
+func RefundEmptyResponsesEnabled() bool {
+	// Option reloads and updates write the registered setting under this lock.
+	common.OptionMapRWMutex.RLock()
+	defer common.OptionMapRWMutex.RUnlock()
+	return quotaSetting.RefundEmptyResponses
 }
 
 // ValidateQuotaOption validates reservation settings before they are persisted.
